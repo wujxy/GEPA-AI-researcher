@@ -261,17 +261,18 @@ class GEPAMiniFlowTest(unittest.TestCase):
         self.assertEqual(decision.next_feedback, ["feedback hint", "pareto improver hint"])
 
     def test_orchestrator_writes_gepa_artifacts_and_parent_ids(self):
-        from gepa_researcher.io_utils import read_json
         from gepa_researcher.orchestrator import ResearchOrchestrator
-
-        config_path = Path("examples/paper_qa/config.json").resolve()
-        config = read_json(config_path)
+        from _fakes import fake_components, make_generic_config
 
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp) / "run"
-            config["run_dir"] = str(run_dir)
+            config = make_generic_config(run_dir)
             with redirect_stdout(StringIO()):
-                state = ResearchOrchestrator(config=config, config_path=config_path).run()
+                state = ResearchOrchestrator(
+                    config=config,
+                    config_path=Path(tmp) / "config.json",
+                    components=fake_components(),
+                ).run()
 
             self.assertTrue(state.history)
             self.assertTrue((run_dir / "candidate_pool.json").exists())

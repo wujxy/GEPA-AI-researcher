@@ -98,5 +98,34 @@ def recent_trace_summaries(run_dir: Path, limit: int = 5) -> list[dict[str, Any]
     return summaries
 
 
+def parent_trace_artifacts(run_dir: Path, parent_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """Last recorded trace artifacts for each parent candidate id (generic).
+
+    Surfaces a parent's execution state to the next round, so a task whose
+    executor records structured artifacts in the trace (e.g. a git commit sha)
+    can build on the parent's result instead of restarting from a fixed base.
+    The key names are a convention between the task's proposer/executor — GEPA
+    does not interpret them. Returns ``{}`` per parent when no trace is found.
+    """
+    import json
+
+    result = {pid: {} for pid in parent_ids}
+    if not parent_ids:
+        return result
+    path = run_dir / "traces.jsonl"
+    if not path.exists():
+        return result
+    for row in path.read_text(encoding="utf-8").splitlines():
+        try:
+            data = json.loads(row)
+        except Exception:
+            continue
+        cid = str(data.get("candidate_id"))
+        if cid in result:
+            samples = data.get("samples") or []
+            result[cid] = dict(samples[0].get("artifacts", {})) if samples else {}  # last wins
+    return result
+
+
 def _trace_ref(run_dir: Path, trace: Any) -> str:
     return str(run_dir / "traces" / f"round_{trace.round_id:03d}" / trace.candidate_id / "trace.json")

@@ -23,26 +23,29 @@ from .display import (
     format_run_header,
     format_trace_summary,
 )
-from .executor import PaperQAExecutor
 from .gate import GEPAGate
 from .io_utils import append_jsonl, read_json, write_json
-from .judger import PaperQAJudger
 from .pareto import ParetoSelector
 from .pool import CandidatePool
-from .proposer import RuleBasedProposer
-from .runtime import config_for_eval, recent_trace_summaries, resolve_dataset_split, select_feedback_minibatch
+from .runtime import config_for_eval, parent_trace_artifacts, recent_trace_summaries, resolve_dataset_split, select_feedback_minibatch
 from .schemas import Candidate, CandidateBatch, Decision, EvaluationBatch, GateDecision, GenerationDecision, Judgment, JudgmentBatch, LoopState, ParetoFrontier, ScoreMatrix, Trace
 from .score_matrix import ScoreMatrixBuilder
 
 
 class ResearchOrchestrator:
-    def __init__(self, config: dict[str, Any], config_path: Path):
+    def __init__(self, config: dict[str, Any], config_path: Path, components: tuple | None = None):
         self.config = config
         self.config_path = config_path
         self.run_dir = self._resolve_run_dir(config, config_path)
         self.dataset_split = resolve_dataset_split(config)
         self.prior_context = load_prior_context(config, config_path.parent)
-        self.proposer, self.executor, self.judger = self._build_components()
+        # Dependency injection: callers (and tests) may pass a (proposer, executor,
+        # judger) tuple directly; otherwise components are built from config. This
+        # keeps the orchestrator free of any task-specific or mock component code.
+        if components is not None:
+            self.proposer, self.executor, self.judger = components
+        else:
+            self.proposer, self.executor, self.judger = self._build_components()
         self.gate = GEPAGate()
         self.pareto = ParetoSelector()
 
@@ -56,7 +59,7 @@ class ResearchOrchestrator:
         self._log_block(format_run_header(
             state.task_name,
             str(self.run_dir),
-            self.config.get("components", {}).get("mode", "local_mock"),
+            self.config.get("components", {}).get("mode", "claude_code_agents"),
             max_rounds,
             int(self.config.get("generation", {}).get("batch_size", 1)),
             self.dataset_split,
@@ -138,7 +141,7 @@ class ResearchOrchestrator:
         return (config_path.parent / "runs" / stamp).resolve()
 
     def _build_components(self):
-        mode = self.config.get("components", {}).get("mode", "local_mock")
+        mode = self.config.get("components", {}).get("mode", "claude_code_agents")
         if mode == "claude_code_agents":
             agent_config = self.config.get("agent", {})
             client = ClaudeCodeClient(
@@ -152,9 +155,11 @@ class ResearchOrchestrator:
                 AgentExecutor(client, self.run_dir),
                 AgentJudger(client),
             )
-        if mode == "local_mock":
-            return RuleBasedProposer(), PaperQAExecutor(), PaperQAJudger()
-        raise ValueError(f"Unknown component mode: {mode}")
+        raise ValueError(
+            f"Unknown component mode: {mode!r}. GEPA ships only the generic "
+            "'claude_code_agents' mode; pass components= to __init__ for custom "
+            "or test components."
+        )
 
     def _load_or_initialize_state(self) -> LoopState:
         state_path = self.run_dir / "state.json"
@@ -423,6 +428,7 @@ class ResearchOrchestrator:
             "score_matrix": matrix.to_dict(),
             "pareto_frontier": frontier.to_dict(),
             "parents": [parent.to_dict() for parent in parents],
+            "parent_traces": parent_trace_artifacts(self.run_dir, [parent.candidate_id for parent in parents]),
             "recent_feedback": self._recent_feedback(state),
             "recent_traces": recent_trace_summaries(self.run_dir),
             "dataset_split": self.dataset_split.to_dict(),

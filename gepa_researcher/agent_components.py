@@ -78,6 +78,7 @@ def format_gepa_context(config: dict[str, Any]) -> str:
         "GEPA context:\n"
         f"- Pareto frontier: {context.get('pareto_frontier', {})}\n"
         f"- Parent candidates: {context.get('parents', [])}\n"
+        f"- Parent trace artifacts: {context.get('parent_traces', {})}\n"
         f"- Score matrix: {context.get('score_matrix', {})}\n"
         f"- Recent feedback: {context.get('recent_feedback', [])}\n"
         f"- Recent traces: {context.get('recent_traces', [])}\n"
