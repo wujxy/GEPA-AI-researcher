@@ -198,6 +198,102 @@ class AgentComponentsTest(unittest.TestCase):
         self.assertIn("Dataset split", prompt)
         self.assertIn("pareto_ids", prompt)
 
+    def test_agent_prompts_use_structured_context_before_evidence_refs(self):
+        proposer_client = CapturingClient(
+            {
+                "candidates": [
+                    {
+                        "hypothesis": "hypothesis",
+                        "target_module": "distribution_model",
+                        "proposed_change": "change",
+                        "rationale": "reason",
+                        "expected_improvement": "better fit",
+                        "risk": "risk",
+                        "model_family": "normal",
+                        "analysis_plan": ["fit"],
+                    }
+                ]
+            }
+        )
+        proposer_config = {
+            "generation": {"batch_size": 1},
+            "task": {"goal": "infer model", "data_files": ["data.csv"]},
+            "runtime": {"python_command": "python"},
+            "evidence": {},
+            "_gepa_context": {
+                "pareto_frontier": {},
+                "parents": [],
+                "score_matrix": {},
+                "recent_feedback": [],
+                "recent_traces": [
+                    {
+                        "candidate_id": "cand_000_000",
+                        "evidence_refs": ["traces/round_000/cand_000_000/trace.json"],
+                        "samples": [{"summary": "fit normal", "key_metrics": {"aic": 770.38}}],
+                    }
+                ],
+                "dataset_split": {},
+            },
+        }
+
+        AgentProposer(proposer_client).propose_batch(LoopState(task_name="task"), proposer_config)
+
+        proposer_prompt = proposer_client.prompts[0][1]
+        self.assertIn("Use structured facts and metrics as the default evidence", proposer_prompt)
+        self.assertIn("Only read evidence_refs when the structured context is insufficient", proposer_prompt)
+        self.assertIn("traces/round_000/cand_000_000/trace.json", proposer_prompt)
+
+    def test_agent_proposer_prompt_uses_compact_state_without_history_feedback_blob(self):
+        client = CapturingClient(
+            {
+                "candidates": [
+                    {
+                        "hypothesis": "hypothesis",
+                        "target_module": "distribution_model",
+                        "proposed_change": "change",
+                        "rationale": "reason",
+                        "expected_improvement": "better fit",
+                        "risk": "risk",
+                        "model_family": "normal",
+                        "analysis_plan": ["fit"],
+                    }
+                ]
+            }
+        )
+        state = LoopState(task_name="task", round_id=2, best_candidate_id="seed_000", best_score=0.95)
+        state.history.append(
+            {
+                "round_id": 1,
+                "kept": [],
+                "rejected": ["cand_000_000"],
+                "next_feedback": ["VERBOSE_FEEDBACK_BLOB_SHOULD_NOT_APPEAR"],
+                "best_candidate_id": "seed_000",
+                "best_score": 0.95,
+                "stop": False,
+            }
+        )
+        config = {
+            "generation": {"batch_size": 1},
+            "task": {"goal": "infer model", "data_files": ["data.csv"]},
+            "runtime": {"python_command": "python"},
+            "evidence": {},
+            "_gepa_context": {
+                "pareto_frontier": {},
+                "parents": [],
+                "score_matrix": {},
+                "recent_feedback": ["compact feedback"],
+                "recent_traces": [],
+                "dataset_split": {},
+            },
+        }
+
+        AgentProposer(client).propose_batch(state, config)
+
+        prompt = client.prompts[0][1]
+        self.assertIn("Current state facts", prompt)
+        self.assertIn("'best_candidate_id': 'seed_000'", prompt)
+        self.assertNotIn("VERBOSE_FEEDBACK_BLOB_SHOULD_NOT_APPEAR", prompt)
+
     def test_agent_executor_uses_per_candidate_timeout(self):
         with tempfile.TemporaryDirectory() as tmp:
             script = Path(tmp) / "fake_claude.py"

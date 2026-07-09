@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .agent_client import ClaudeCodeClient
+from .context_views import candidate_for_agent, evidence_access_policy, state_for_agent, trace_for_agent
 from .schemas import Candidate, CandidateBatch, Decision, Judgment, LoopState, SampleTrace, Trace
 
 
@@ -106,8 +107,10 @@ Available data files:
 
 {format_gepa_context(config)}
 
-Current state JSON:
-{state.to_dict()}
+{evidence_access_policy()}
+
+Current state facts:
+{state_for_agent(state)}
 
 Important constraints:
 - Propose exactly one candidate research hypothesis/model for the next round.
@@ -183,8 +186,10 @@ Available data files:
 
 {format_gepa_context(config)}
 
-Current state JSON:
-{state.to_dict()}
+{evidence_access_policy()}
+
+Current state facts:
+{state_for_agent(state)}
 
 Important constraints:
 - Propose exactly {batch_size} candidate research hypotheses/models for the next generation.
@@ -284,8 +289,10 @@ Data files:
 Evaluation phase: {config.get("_eval_phase", "pareto")}
 Selected sample ids: {config.get("_selected_sample_ids", [])}
 
-Candidate JSON:
-{candidate.to_dict()}
+Candidate decision facts:
+{candidate_for_agent(candidate, [str(self.run_dir / "traces" / f"round_{candidate.round_id:03d}" / candidate.candidate_id / "candidate.json")])}
+
+{evidence_access_policy()}
 
 Working directory for any scripts/artifacts you create:
 {round_dir}
@@ -357,15 +364,17 @@ description of the observed numeric dataset.
 Task goal:
 {config["task"]["goal"]}
 
-Candidate JSON:
-{candidate.to_dict()}
+Candidate decision facts:
+{candidate_for_agent(candidate, [str(Path(config.get("_run_dir", ".")) / "traces" / f"round_{candidate.round_id:03d}" / candidate.candidate_id / "candidate.json")])}
 
-Trace JSON:
-{trace.to_dict()}
+Trace decision facts:
+{trace_for_agent(trace, [str(Path(config.get("_run_dir", ".")) / "traces" / f"round_{trace.round_id:03d}" / trace.candidate_id / "trace.json")])}
 
 {format_evidence_policy(config)}
 
 {format_prior_context(config)}
+
+{evidence_access_policy()}
 
 Evaluation phase: {config.get("_eval_phase", "pareto")}
 Selected sample ids: {config.get("_selected_sample_ids", [])}

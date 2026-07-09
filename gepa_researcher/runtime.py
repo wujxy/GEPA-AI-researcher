@@ -4,6 +4,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+from .context_views import trace_summary_for_proposer
 from .schemas import DatasetSplit
 
 
@@ -74,20 +75,28 @@ def recent_trace_summaries(run_dir: Path, limit: int = 5) -> list[dict[str, Any]
             data = json.loads(row)
         except Exception:
             continue
-        samples = data.get("samples") or []
-        summaries.append(
-            {
-                "candidate_id": data.get("candidate_id"),
-                "round_id": data.get("round_id"),
-                "samples": [
-                    {
-                        "sample_id": sample.get("sample_id"),
-                        "logs": sample.get("logs"),
-                        "error": sample.get("error"),
-                        "artifacts": sample.get("artifacts", {}),
-                    }
-                    for sample in samples[:3]
-                ],
-            }
+        from .schemas import SampleTrace, Trace
+
+        trace = Trace(
+            candidate_id=str(data.get("candidate_id")),
+            round_id=int(data.get("round_id", 0)),
+            samples=[
+                SampleTrace(
+                    sample_id=str(sample.get("sample_id")),
+                    input=str(sample.get("input", "")),
+                    output=str(sample.get("output", "")),
+                    expected=str(sample.get("expected", "")),
+                    logs=str(sample.get("logs", "")),
+                    error=sample.get("error"),
+                    latency_ms=int(sample.get("latency_ms", 0)),
+                    artifacts=dict(sample.get("artifacts", {})),
+                )
+                for sample in (data.get("samples") or [])[:3]
+            ],
         )
+        summaries.append(trace_summary_for_proposer(trace, evidence_refs=[_trace_ref(run_dir, trace)]))
     return summaries
+
+
+def _trace_ref(run_dir: Path, trace: Any) -> str:
+    return str(run_dir / "traces" / f"round_{trace.round_id:03d}" / trace.candidate_id / "trace.json")

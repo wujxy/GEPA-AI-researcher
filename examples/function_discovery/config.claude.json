@@ -58,13 +58,13 @@
     "no_improvement_patience": 2
   },
   "generation": {
-    "batch_size": 10,
+    "batch_size": 5,
     "enable_merge": false
   },
   "gepa": {
     "frontier_policy": "pareto",
     "acceptance_policy": "minibatch_improves_then_pareto",
-    "minibatch_size": 3,
+    "minibatch_size": 2,
     "parent_sampling": "pareto_win_weighted"
   },
   "executor": {

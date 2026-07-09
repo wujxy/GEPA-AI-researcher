@@ -384,6 +384,7 @@ class ResearchOrchestrator:
                 role=role_by_candidate.get(candidate.candidate_id),
             ))
         eval_config = config_for_eval(self.config, sample_ids, phase, self.prior_context)
+        eval_config["_run_dir"] = str(self.run_dir)
         trace_batch = ExecutorAdapter(self.executor, self.run_dir).run_many(candidates, round_id, eval_config)
         for trace in trace_batch.traces:
             self._log_block(format_trace_summary(trace, phase, sample_ids))
