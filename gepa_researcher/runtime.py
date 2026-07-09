@@ -11,7 +11,7 @@ from .schemas import DatasetSplit
 def all_sample_ids(config: dict[str, Any]) -> list[str]:
     samples = config.get("task", {}).get("samples") or []
     ids = [str(sample.get("sample_id")) for sample in samples if sample.get("sample_id")]
-    return ids or ["observed_numeric_dataset"]
+    return ids or ["task_execution"]
 
 
 def resolve_dataset_split(config: dict[str, Any]) -> DatasetSplit:

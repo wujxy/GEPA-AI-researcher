@@ -79,7 +79,7 @@ class GEPAUpgradeTest(unittest.TestCase):
             parent_id="parent",
             parent_ids=["parent"],
             hypothesis="h",
-            target_module="m",
+            scope="m",
             proposed_change="c",
             rationale="r",
             expected_improvement="e",

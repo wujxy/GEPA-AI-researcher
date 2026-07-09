@@ -108,9 +108,9 @@ class ResearchOrchestrator:
         artifacts = sample.artifacts
         summary = artifacts.get("summary") or sample.logs or sample.output
         self._log(f"Executor summary: {summary}")
-        model_expression = artifacts.get("model_expression")
-        if model_expression:
-            self._log(f"Model expression: {model_expression}")
+        implementation = artifacts.get("implementation")
+        if implementation:
+            self._log(f"Implementation: {implementation}")
         metrics = artifacts.get("metrics")
         if metrics:
             self._log(f"Metrics: {metrics}")

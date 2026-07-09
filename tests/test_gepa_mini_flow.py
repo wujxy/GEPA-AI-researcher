@@ -45,8 +45,8 @@ class ScoreByCandidateJudger:
             score=score,
             passed=score >= 0.85,
             per_sample_scores=[{"sample_id": "task_a", "score": score}],
-            failure_categories=[] if score >= 0.85 else ["weak_fit"],
-            actionable_feedback=["keep simple"] if score >= 0.85 else ["improve fit"],
+            failure_categories=[] if score >= 0.85 else ["weak_result"],
+            actionable_feedback=["keep simple"] if score >= 0.85 else ["improve execute"],
             confidence="high",
         )
 
@@ -59,7 +59,7 @@ class GEPAMiniFlowTest(unittest.TestCase):
             parent_id=parent_ids[0] if parent_ids else None,
             parent_ids=parent_ids or [],
             hypothesis="h",
-            target_module="distribution_model",
+            scope="task_system",
             proposed_change="change",
             rationale="why",
             expected_improvement="score",

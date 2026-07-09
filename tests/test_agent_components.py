@@ -25,17 +25,17 @@ class AgentComponentsTest(unittest.TestCase):
         client = CapturingClient(
             {
                 "hypothesis": "test a compact model",
-                "target_module": "distribution_model",
-                "proposed_change": "fit a baseline",
+                "scope": "task_system",
+                "proposed_change": "execute a baseline",
                 "rationale": "start simple",
-                "expected_improvement": "better fit",
-                "risk": "underfit",
-                "model_family": "normal",
+                "expected_improvement": "better primary metric",
+                "risk": "weak result",
+                "strategy": "baseline_strategy",
                 "analysis_plan": ["run script"],
             }
         )
         config = {
-            "task": {"goal": "infer model", "data_files": ["data.csv"]},
+            "task": {"goal": "optimize task", "data_files": ["data.csv"]},
             "runtime": {
                 "environment": "conda",
                 "conda_env": "myenv",
@@ -56,14 +56,14 @@ class AgentComponentsTest(unittest.TestCase):
         self.assertIn("do not install packages", prompt)
         self.assertIn("Visual evidence", prompt)
         self.assertIn("proposer should choose", prompt)
-        self.assertNotIn("histogram_with_fit", prompt)
+        self.assertNotIn("histogram_with_execute", prompt)
 
     def test_executor_prompt_includes_runtime(self):
         client = CapturingClient(
             {
                 "summary": "ran analysis",
-                "model_expression": "x ~ normal(mu, sigma)",
-                "fit_parameters": {},
+                "implementation": "changed one function and ran validation",
+                "validation": {},
                 "metrics": {},
                 "diagnostics": [],
                 "artifact_paths": [],
@@ -74,17 +74,17 @@ class AgentComponentsTest(unittest.TestCase):
             candidate_id="cand_000",
             round_id=0,
             parent_id=None,
-            hypothesis="fit normal",
-            target_module="distribution_model",
-            proposed_change="fit normal model",
+            hypothesis="test baseline candidate",
+            scope="task_system",
+            proposed_change="test baseline candidate model",
             rationale="baseline",
-            expected_improvement="fit",
-            risk="underfit",
+            expected_improvement="execute",
+            risk="weak result",
             prompt_text="",
             created_at="now",
         )
         config = {
-            "task": {"goal": "infer model", "data_files": ["data.csv"]},
+            "task": {"goal": "optimize task", "data_files": ["data.csv"]},
             "runtime": {
                 "environment": "conda",
                 "conda_env": "myenv",
@@ -115,13 +115,13 @@ class AgentComponentsTest(unittest.TestCase):
                 "candidates": [
                     {
                         "hypothesis": f"hypothesis {index}",
-                        "target_module": "distribution_model",
+                        "scope": "task_system",
                         "proposed_change": f"change {index}",
                         "rationale": "reason",
-                        "expected_improvement": "better fit",
+                        "expected_improvement": "better primary metric",
                         "risk": "risk",
-                        "model_family": "normal",
-                        "analysis_plan": ["fit"],
+                        "strategy": "baseline_strategy",
+                        "analysis_plan": ["execute"],
                     }
                     for index in range(10)
                 ]
@@ -129,7 +129,7 @@ class AgentComponentsTest(unittest.TestCase):
         )
         config = {
             "generation": {"batch_size": 10},
-            "task": {"goal": "infer model", "data_files": ["data.csv"]},
+            "task": {"goal": "optimize task", "data_files": ["data.csv"]},
             "runtime": {"python_command": "python"},
             "evidence": {},
         }
@@ -148,20 +148,20 @@ class AgentComponentsTest(unittest.TestCase):
                 "candidates": [
                     {
                         "hypothesis": "hypothesis",
-                        "target_module": "distribution_model",
+                        "scope": "task_system",
                         "proposed_change": "change",
                         "rationale": "reason",
-                        "expected_improvement": "better fit",
+                        "expected_improvement": "better primary metric",
                         "risk": "risk",
-                        "model_family": "normal",
-                        "analysis_plan": ["fit"],
+                        "strategy": "baseline_strategy",
+                        "analysis_plan": ["execute"],
                     }
                 ]
             }
         )
         config = {
             "generation": {"batch_size": 1},
-            "task": {"goal": "infer model", "data_files": ["data.csv"]},
+            "task": {"goal": "optimize task", "data_files": ["data.csv"]},
             "runtime": {"python_command": "python"},
             "evidence": {},
             "_gepa_context": {
@@ -175,10 +175,10 @@ class AgentComponentsTest(unittest.TestCase):
                         "round_id": 0,
                         "samples": [
                             {
-                                "sample_id": "observed_numeric_dataset",
-                                "logs": "ran normal fit",
+                                "sample_id": "task_execution",
+                                "logs": "ran baseline_strategy execute",
                                 "error": "singular matrix",
-                                "artifacts": {"metrics": {"aic": 12.3}},
+                                "artifacts": {"metrics": {"primary_metric": 12.3}},
                             }
                         ],
                     }
@@ -192,9 +192,9 @@ class AgentComponentsTest(unittest.TestCase):
         prompt = client.prompts[0][1]
         self.assertIn("Recent traces", prompt)
         self.assertIn("cand_000_000", prompt)
-        self.assertIn("ran normal fit", prompt)
+        self.assertIn("ran baseline_strategy execute", prompt)
         self.assertIn("singular matrix", prompt)
-        self.assertIn("aic", prompt)
+        self.assertIn("primary_metric", prompt)
         self.assertIn("Dataset split", prompt)
         self.assertIn("pareto_ids", prompt)
 
@@ -204,20 +204,20 @@ class AgentComponentsTest(unittest.TestCase):
                 "candidates": [
                     {
                         "hypothesis": "hypothesis",
-                        "target_module": "distribution_model",
+                        "scope": "task_system",
                         "proposed_change": "change",
                         "rationale": "reason",
-                        "expected_improvement": "better fit",
+                        "expected_improvement": "better primary metric",
                         "risk": "risk",
-                        "model_family": "normal",
-                        "analysis_plan": ["fit"],
+                        "strategy": "baseline_strategy",
+                        "analysis_plan": ["execute"],
                     }
                 ]
             }
         )
         proposer_config = {
             "generation": {"batch_size": 1},
-            "task": {"goal": "infer model", "data_files": ["data.csv"]},
+            "task": {"goal": "optimize task", "data_files": ["data.csv"]},
             "runtime": {"python_command": "python"},
             "evidence": {},
             "_gepa_context": {
@@ -229,7 +229,7 @@ class AgentComponentsTest(unittest.TestCase):
                     {
                         "candidate_id": "cand_000_000",
                         "evidence_refs": ["traces/round_000/cand_000_000/trace.json"],
-                        "samples": [{"summary": "fit normal", "key_metrics": {"aic": 770.38}}],
+                        "samples": [{"summary": "test baseline candidate", "key_metrics": {"primary_metric": 770.38}}],
                     }
                 ],
                 "dataset_split": {},
@@ -249,13 +249,13 @@ class AgentComponentsTest(unittest.TestCase):
                 "candidates": [
                     {
                         "hypothesis": "hypothesis",
-                        "target_module": "distribution_model",
+                        "scope": "task_system",
                         "proposed_change": "change",
                         "rationale": "reason",
-                        "expected_improvement": "better fit",
+                        "expected_improvement": "better primary metric",
                         "risk": "risk",
-                        "model_family": "normal",
-                        "analysis_plan": ["fit"],
+                        "strategy": "baseline_strategy",
+                        "analysis_plan": ["execute"],
                     }
                 ]
             }
@@ -274,7 +274,7 @@ class AgentComponentsTest(unittest.TestCase):
         )
         config = {
             "generation": {"batch_size": 1},
-            "task": {"goal": "infer model", "data_files": ["data.csv"]},
+            "task": {"goal": "optimize task", "data_files": ["data.csv"]},
             "runtime": {"python_command": "python"},
             "evidence": {},
             "_gepa_context": {
@@ -301,7 +301,7 @@ class AgentComponentsTest(unittest.TestCase):
                 "\n".join(
                     [
                         "#!/usr/bin/env python3",
-                        "print('{\"summary\":\"ran\",\"model_expression\":\"x\",\"fit_parameters\":{},\"metrics\":{},\"diagnostics\":[],\"artifact_paths\":[],\"errors\":[]}')",
+                        "print('{\"summary\":\"ran\",\"implementation\":\"x\",\"validation\":{},\"metrics\":{},\"diagnostics\":[],\"artifact_paths\":[],\"errors\":[]}')",
                     ]
                 ),
                 encoding="utf-8",
@@ -312,18 +312,18 @@ class AgentComponentsTest(unittest.TestCase):
                 candidate_id="cand_000_000",
                 round_id=0,
                 parent_id=None,
-                hypothesis="fit normal",
-                target_module="distribution_model",
-                proposed_change="fit normal model",
+                hypothesis="test baseline candidate",
+                scope="task_system",
+                proposed_change="test baseline candidate model",
                 rationale="baseline",
-                expected_improvement="fit",
-                risk="underfit",
+                expected_improvement="execute",
+                risk="weak result",
                 prompt_text="",
                 created_at="now",
             )
             config = {
                 "_executor_timeout_seconds": 7,
-                "task": {"goal": "infer model", "data_files": ["data.csv"]},
+                "task": {"goal": "optimize task", "data_files": ["data.csv"]},
                 "runtime": {},
                 "evidence": {},
             }

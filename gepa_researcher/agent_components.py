@@ -85,6 +85,34 @@ def format_gepa_context(config: dict[str, Any]) -> str:
     )
 
 
+def format_task_resources(config: dict[str, Any]) -> str:
+    task = config.get("task", {})
+    resource_fields = {
+        "data_files": task.get("data_files", []),
+        "repo_paths": task.get("repo_paths", []),
+        "workspaces": task.get("workspaces", []),
+        "benchmark_commands": task.get("benchmark_commands", []),
+        "validation_commands": task.get("validation_commands", []),
+        "artifacts": task.get("artifacts", []),
+    }
+    resource_fields = {key: value for key, value in resource_fields.items() if value}
+    if not resource_fields:
+        return "Task resources:\n- No task resources configured."
+    lines = ["Task resources:"]
+    for key, value in resource_fields.items():
+        lines.append(f"- {key}: {value}")
+    return "\n".join(lines)
+
+
+def _candidate_prompt_text(data: dict[str, Any]) -> str:
+    strategy = data.get("strategy") or data.get("approach") or "unspecified"
+    return (
+        f"Strategy: {strategy}\n"
+        f"Hypothesis: {data.get('hypothesis', '')}\n"
+        f"Plan: {data.get('analysis_plan', [])}"
+    )
+
+
 class AgentProposer:
     def __init__(self, client: ClaudeCodeClient):
         self.client = client
@@ -96,8 +124,7 @@ You are the PROPOSER agent in a bounded GEPA-style research loop.
 Task goal:
 {config["task"]["goal"]}
 
-Available data files:
-{config["task"].get("data_files", [])}
+{format_task_resources(config)}
 
 {format_runtime(config)}
 
@@ -113,28 +140,28 @@ Current state facts:
 {state_for_agent(state)}
 
 Important constraints:
-- Propose exactly one candidate research hypothesis/model for the next round.
+- Propose exactly one candidate research hypothesis or intervention for the next round.
 - If parent candidates are provided, mutate from them instead of starting from scratch.
 - Include an executor_contract that tells the external executor what to run and what to return.
-- Do not assume any hidden data-generating process.
-- Use only the observed data files and prior loop feedback.
+- Do not assume hidden task facts that are not present in resources, prior context, or loop feedback.
+- Use only the configured resources and prior loop feedback.
 - Keep the candidate small enough for the executor to test in one round.
 - Propose candidates that are executable in the runtime environment above.
-- Include visual diagnostics in the analysis plan when they can support or falsify the model.
-- Choose the plot type(s) that best fit this specific task and candidate; do not rely on a fixed plot template.
+- Include diagnostics or evidence artifacts in the analysis plan when they can support or falsify the candidate.
+- Choose task-appropriate evidence; do not rely on a fixed artifact template.
 - Return only a JSON object, no prose outside JSON.
 
 Required JSON schema:
 {{
-  "hypothesis": "short falsifiable model hypothesis",
-  "target_module": "distribution_model",
+  "hypothesis": "short falsifiable hypothesis or optimization idea",
+  "scope": "module, component, prompt, dataset, workflow, or subsystem to change/test",
   "proposed_change": "what to test this round",
   "rationale": "why this is a good next candidate",
-  "expected_improvement": "what metric should improve",
+  "expected_improvement": "which configured metric or objective should improve",
   "risk": "main risk or failure mode",
-  "model_family": "e.g. normal, lognormal, mixture, uniform, exponential, nonparametric",
+  "strategy": "short name for the approach",
   "analysis_plan": ["step 1", "step 2"],
-  "executor_contract": {{"instructions": "what the executor must do", "expected_artifacts": ["artifact"]}},
+  "executor_contract": {{"instructions": "what the executor must do", "expected_artifacts": ["artifact"], "success_criteria": ["criterion"]}},
   "expected_artifacts": ["artifact"],
   "mutation_note": "what prior feedback this candidate responds to"
 }}
@@ -142,18 +169,13 @@ Required JSON schema:
         result = self.client.run_json(prompt, label="proposer")
         data = result.data
         candidate_id = f"cand_{state.round_id:03d}"
-        model_family = str(data.get("model_family", "unspecified"))
-        prompt_text = (
-            f"Model family: {model_family}\n"
-            f"Hypothesis: {data.get('hypothesis', '')}\n"
-            f"Plan: {data.get('analysis_plan', [])}"
-        )
+        prompt_text = _candidate_prompt_text(data)
         return Candidate(
             candidate_id=candidate_id,
             round_id=state.round_id,
             parent_id=state.best_candidate_id,
             hypothesis=str(data.get("hypothesis", "")),
-            target_module=str(data.get("target_module", "distribution_model")),
+            scope=str(data.get("scope", "task_system")),
             proposed_change=str(data.get("proposed_change", "")),
             rationale=str(data.get("rationale", "")),
             expected_improvement=str(data.get("expected_improvement", "")),
@@ -175,8 +197,7 @@ You are the PROPOSER agent in a bounded GEPA-style research loop.
 Task goal:
 {config["task"]["goal"]}
 
-Available data files:
-{config["task"].get("data_files", [])}
+{format_task_resources(config)}
 
 {format_runtime(config)}
 
@@ -192,30 +213,30 @@ Current state facts:
 {state_for_agent(state)}
 
 Important constraints:
-- Propose exactly {batch_size} candidate research hypotheses/models for the next generation.
+- Propose exactly {batch_size} candidate research hypotheses or interventions for the next generation.
 - If parent candidates are provided, each proposal must be a reflective mutation of the Pareto frontier parent(s).
 - Make the candidates meaningfully diverse while staying grounded in parent feedback.
 - Include executor_contract and expected_artifacts for every candidate.
-- Do not assume any hidden data-generating process.
-- Use only the observed data files and prior loop feedback.
+- Do not assume hidden task facts that are not present in resources, prior context, or loop feedback.
+- Use only the configured resources and prior loop feedback.
 - Keep each candidate small enough for the executor to test in one isolated workspace.
 - Propose candidates that are executable in the runtime environment above.
-- Include visual diagnostics in each analysis plan when they can support or falsify the model.
+- Include diagnostics or evidence artifacts in each analysis plan when they can support or falsify the candidate.
 - Return only a JSON object, no prose outside JSON.
 
 Required JSON schema:
 {{
   "candidates": [
     {{
-      "hypothesis": "short falsifiable model hypothesis",
-      "target_module": "distribution_model",
+      "hypothesis": "short falsifiable hypothesis or optimization idea",
+      "scope": "module, component, prompt, dataset, workflow, or subsystem to change/test",
       "proposed_change": "what to test this round",
       "rationale": "why this is a good next candidate",
-      "expected_improvement": "what metric should improve",
+      "expected_improvement": "which configured metric or objective should improve",
       "risk": "main risk or failure mode",
-      "model_family": "e.g. normal, lognormal, mixture, uniform, exponential, nonparametric",
+      "strategy": "short name for the approach",
       "analysis_plan": ["step 1", "step 2"],
-      "executor_contract": {{"instructions": "what the executor must do", "expected_artifacts": ["artifact"]}},
+      "executor_contract": {{"instructions": "what the executor must do", "expected_artifacts": ["artifact"], "success_criteria": ["criterion"]}},
       "expected_artifacts": ["artifact"],
       "mutation_note": "what prior feedback this candidate responds to"
     }}
@@ -228,19 +249,14 @@ Required JSON schema:
         candidates = []
         for index, data in enumerate(items):
             candidate_id = f"cand_{state.round_id:03d}_{index:03d}"
-            model_family = str(data.get("model_family", "unspecified"))
-            prompt_text = (
-                f"Model family: {model_family}\n"
-                f"Hypothesis: {data.get('hypothesis', '')}\n"
-                f"Plan: {data.get('analysis_plan', [])}"
-            )
+            prompt_text = _candidate_prompt_text(data)
             candidates.append(
                 Candidate(
                     candidate_id=candidate_id,
                     round_id=state.round_id,
                     parent_id=state.best_candidate_id,
                     hypothesis=str(data.get("hypothesis", "")),
-                    target_module=str(data.get("target_module", "distribution_model")),
+                    scope=str(data.get("scope", "task_system")),
                     proposed_change=str(data.get("proposed_change", "")),
                     rationale=str(data.get("rationale", "")),
                     expected_improvement=str(data.get("expected_improvement", "")),
@@ -272,13 +288,13 @@ class AgentExecutor:
 You are the EXECUTOR agent in a bounded GEPA-style research loop.
 
 You may inspect files and run commands inside the repository. Your job is to
-test the proposed candidate model on the observed numeric data.
+execute the proposed candidate under the configured task resources and return
+structured evidence about what happened.
 
 Task goal:
 {config["task"]["goal"]}
 
-Data files:
-{config["task"].get("data_files", [])}
+{format_task_resources(config)}
 
 {format_runtime(config)}
 
@@ -299,14 +315,13 @@ Working directory for any scripts/artifacts you create:
 
 Constraints:
 - Do not ask the user for help.
-- Do not assume any hidden data-generating process.
+- Do not assume hidden task facts that are not present in resources, prior context, or loop feedback.
 - Use the configured Python command from the runtime environment above for any Python execution.
-- Keep this execution compact. Prefer this sequence: inspect the data file once,
-  write at most one small Python script if needed, run it once, then return JSON.
-- Avoid broad repository exploration; the candidate and data files are the scope.
-- You may fit parameters, compute descriptive statistics, likelihood/AIC/BIC,
-  goodness-of-fit diagnostics, residual summaries, and compare simple baselines
-  only if useful for this candidate.
+- Keep this execution compact and scoped to the candidate contract.
+- Avoid broad repository exploration unless the candidate contract requires it.
+- You may inspect files, make bounded changes, run validation or benchmark commands,
+  and compare against available baselines when useful for this candidate and allowed
+  by the runtime policy.
 - Save any scripts or generated artifacts under the working directory above.
 - When visual evidence is feasible, follow the candidate's visual evidence plan.
   Save plot file(s) under the working directory and list them in artifact_paths.
@@ -315,10 +330,10 @@ Constraints:
 Required JSON schema:
 {{
   "summary": "what you executed",
-  "model_expression": "mathematical/statistical expression tested",
-  "fit_parameters": {{}},
-  "metrics": {{}},
-  "diagnostics": ["diagnostic finding"],
+  "implementation": {{"changed_files": [], "commands_run": [], "notes": ""}},
+  "metrics": {{"primary": null, "baseline": null, "delta": null}},
+  "validation": {{"passed": false, "checks": [], "regressions": []}},
+  "diagnostics": ["diagnostic or failure finding"],
   "artifact_paths": ["relative or absolute paths"],
   "errors": []
 }}
@@ -327,8 +342,8 @@ Required JSON schema:
         result = client.run_json(prompt, label="executor")
         data = result.data
         trace = SampleTrace(
-            sample_id="observed_numeric_dataset",
-            input=str(config["task"].get("data_files", [])),
+            sample_id=str((config.get("_selected_sample_ids") or ["task_execution"])[0]),
+            input=str(config.get("task", {})),
             output=str(data),
             expected="unknown",
             logs=str(data.get("summary", "")),
@@ -358,8 +373,8 @@ class AgentJudger:
         prompt = f"""
 You are the JUDGER agent in a bounded GEPA-style research loop.
 
-Evaluate whether the executor's result supports the candidate model as a useful
-description of the observed numeric dataset.
+Evaluate whether the executor's result supports the candidate as a useful
+improvement or valid finding for the configured task.
 
 Task goal:
 {config["task"]["goal"]}
@@ -381,11 +396,11 @@ Selected sample ids: {config.get("_selected_sample_ids", [])}
 
 Rubric:
 - Score 0.0 to 1.0.
-- Reward clear quantitative fit, parameter estimates, diagnostics, and honest uncertainty.
-- Reward relevant visual artifacts that make the fit or failure mode inspectable.
-- Penalize missing visual evidence when the task is naturally plottable and plotting was feasible.
-- Penalize unsupported claims, missing metrics, overfitting, or failure to inspect the data.
-- Do not assume any hidden data-generating process.
+- Reward clear execution evidence, relevant metrics, validation checks, diagnostics, and honest uncertainty.
+- Reward relevant artifacts that make the result or failure mode inspectable.
+- Penalize missing evidence when the task naturally requires validation and validation was feasible.
+- Penalize unsupported claims, missing metrics, regressions, overfitting to feedback, or failure to follow the candidate contract.
+- Do not assume hidden task facts that are not present in resources, prior context, or loop feedback.
 - Return actionable feedback that helps the next proposer.
 - Return only a JSON object, no prose outside JSON.
 
@@ -393,7 +408,7 @@ Required JSON schema:
 {{
   "score": 0.0,
   "passed": false,
-  "per_sample_scores": [{{"sample_id": "observed_numeric_dataset", "score": 0.0, "notes": ""}}],
+  "per_sample_scores": [{{"sample_id": "task_execution", "score": 0.0, "notes": ""}}],
   "failure_categories": ["category"],
   "actionable_feedback": ["specific next action"],
   "confidence": "low|medium|high",

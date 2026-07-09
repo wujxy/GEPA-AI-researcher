@@ -15,21 +15,21 @@ class ContextViewsTest(unittest.TestCase):
             round_id=1,
             parent_id="seed_000",
             parent_ids=["seed_000"],
-            hypothesis="Student-t captures mild excess kurtosis.",
-            target_module="distribution_model",
-            proposed_change="Fit Student-t and compare AIC/BIC.",
-            rationale="Prior feedback suggested heavier tails.",
-            expected_improvement="Lower AIC/BIC than normal baseline.",
-            risk="Extra df parameter may not be justified.",
-            prompt_text="Model family: students_t\nPlan: fit t",
+            hypothesis="Candidate tests a bounded task improvement.",
+            scope="task_system",
+            proposed_change="Apply candidate change and compare configured metrics.",
+            rationale="Prior feedback suggested a focused improvement path.",
+            expected_improvement="Improve the configured primary metric over baseline.",
+            risk="Added complexity may not be justified.",
+            prompt_text="Strategy: candidate_strategy\nPlan: execute candidate",
             created_at="now",
-            executor_contract={"instructions": "fit t", "expected_artifacts": ["t_fit_results.json"]},
-            expected_artifacts=["t_fit_results.json"],
-            mutation_note="Responds to excess kurtosis feedback.",
+            executor_contract={"instructions": "execute candidate", "expected_artifacts": ["execution_results.json"]},
+            expected_artifacts=["execution_results.json"],
+            mutation_note="Responds to prior feedback.",
             artifacts={
                 "agent_raw": "very long raw proposer output",
-                "model_family": "students_t",
-                "analysis_plan": ["fit", "compare"],
+                "strategy": "candidate_strategy",
+                "analysis_plan": ["execute", "compare"],
             },
         )
 
@@ -39,25 +39,25 @@ class ContextViewsTest(unittest.TestCase):
             round_id=1,
             samples=[
                 SampleTrace(
-                    sample_id="observed_numeric_dataset",
+                    sample_id="task_execution",
                     input="data.csv",
                     output="very long duplicated structured output",
                     expected="unknown",
-                    logs="Fitted Student-t; AIC worse than normal.",
+                    logs="Executed candidate; metric worse than baseline.",
                     error=None,
                     artifacts={
                         "agent_raw": "very long raw executor output",
-                        "summary": "Fitted Student-t and compared against normal.",
-                        "model_expression": "X ~ t(df=23.29, loc=2.42, scale=1.14)",
-                        "fit_parameters": {"df": 23.29, "loc": 2.42, "scale": 1.14},
-                        "metrics": {"aic": 771.25, "bic": 781.69, "ks_p_value": 0.8381},
+                        "summary": "Executed candidate and compared against baseline_strategy.",
+                        "implementation": "{'changed_files': [], 'commands_run': ['validate'], 'notes': 'candidate executed'}",
+                        "validation": {"passed": True, "checks": ["validate"], "regressions": []},
+                        "metrics": {"primary": 0.61, "baseline": 0.95, "delta": -0.34},
                         "diagnostics": [
-                            "captures mild heavy tails",
-                            "information criteria favor normal",
-                            "extra parameter not justified",
+                            "candidate completed configured execution",
+                            "configured metric favors baseline_strategy",
+                            "added complexity not justified",
                             "fourth diagnostic should be trimmed",
                         ],
-                        "artifact_paths": ["t_fit_results.json", "t_qq_plot.png"],
+                        "artifact_paths": ["execution_results.json", "diagnostic_artifact.txt"],
                         "errors": [],
                     },
                 )
@@ -69,9 +69,9 @@ class ContextViewsTest(unittest.TestCase):
 
         self.assertEqual(view["candidate_id"], "cand_001_000")
         self.assertEqual(view["parent_ids"], ["seed_000"])
-        self.assertEqual(view["model_family"], "students_t")
-        self.assertIn("Fit Student-t", view["proposed_change"])
-        self.assertEqual(view["executor_contract"]["instructions"], "fit t")
+        self.assertEqual(view["strategy"], "candidate_strategy")
+        self.assertIn("candidate change", view["proposed_change"])
+        self.assertEqual(view["executor_contract"]["instructions"], "execute candidate")
         self.assertEqual(view["evidence_refs"], ["traces/round_001/cand_001_000/candidate.json"])
         self.assertNotIn("agent_raw", str(view))
         self.assertNotIn("very long raw proposer output", str(view))
@@ -81,12 +81,12 @@ class ContextViewsTest(unittest.TestCase):
 
         sample = view["samples"][0]
         self.assertEqual(view["candidate_id"], "cand_001_000")
-        self.assertEqual(sample["summary"], "Fitted Student-t and compared against normal.")
-        self.assertEqual(sample["metrics"]["aic"], 771.25)
+        self.assertEqual(sample["summary"], "Executed candidate and compared against baseline_strategy.")
+        self.assertEqual(sample["metrics"]["primary"], 0.61)
         self.assertEqual(sample["diagnostics"], [
-            "captures mild heavy tails",
-            "information criteria favor normal",
-            "extra parameter not justified",
+            "candidate completed configured execution",
+            "configured metric favors baseline_strategy",
+            "added complexity not justified",
         ])
         self.assertEqual(view["evidence_refs"], ["traces/round_001/cand_001_000/trace.json"])
         self.assertNotIn("agent_raw", str(view))
@@ -104,7 +104,7 @@ class ContextViewsTest(unittest.TestCase):
         self.assertEqual(summary["candidate_id"], "cand_001_000")
         self.assertEqual(summary["comparison_to_parent"]["verdict"], "worse_than_parent")
         self.assertEqual(summary["comparison_to_parent"]["parent_id"], "seed_000")
-        self.assertEqual(summary["samples"][0]["key_metrics"]["aic"], 771.25)
+        self.assertEqual(summary["samples"][0]["key_metrics"]["primary"], 0.61)
         self.assertEqual(summary["evidence_refs"], ["traces/round_001/cand_001_000/trace.json"])
         self.assertNotIn("agent_raw", str(summary))
 

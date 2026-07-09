@@ -13,7 +13,7 @@ class Candidate:
     round_id: int
     parent_id: str | None
     hypothesis: str
-    target_module: str
+    scope: str
     proposed_change: str
     rationale: str
     expected_improvement: str

@@ -55,7 +55,7 @@ class RuleBasedProposer:
             round_id=state.round_id,
             parent_id=parent_id,
             hypothesis=hypothesis,
-            target_module="answer_prompt",
+            scope="answer_prompt",
             proposed_change=proposed_change,
             rationale=rationale,
             expected_improvement=expected,

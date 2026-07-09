@@ -139,7 +139,7 @@ def format_trace_summary(trace: Trace, phase: str, sample_ids: list[str] | None 
     summary = artifacts.get("summary") or sample.logs or sample.output
     lines.append(f"  summary: {summary}")
     for key, label in [
-        ("model_expression", "model_expression"),
+        ("implementation", "implementation"),
         ("metrics", "metrics"),
         ("diagnostics", "diagnostics"),
         ("artifact_paths", "artifact_paths"),

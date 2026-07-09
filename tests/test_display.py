@@ -20,15 +20,15 @@ class DisplayFormatterTest(unittest.TestCase):
             parent_ids=["seed_000"],
             generation=1,
             status="generated",
-            hypothesis="fit a compact mixture",
-            target_module="distribution_model",
+            hypothesis="execute a compact mixture",
+            scope="task_system",
             proposed_change="compare two component mixture against the seed",
-            rationale="seed underfits the tail",
+            rationale="seed weak results the tail",
             expected_improvement="higher pareto score",
-            risk="may overfit",
+            risk="may overexecute",
             prompt_text="prompt",
             created_at="now",
-            executor_contract={"instructions": "run one compact fitting script"},
+            executor_contract={"instructions": "run one compact executeting script"},
             mutation_note="responds to tail feedback",
         )
 
@@ -54,8 +54,8 @@ class DisplayFormatterTest(unittest.TestCase):
         self.assertIn("generation: 1", text)
         self.assertIn("status: generated", text)
         self.assertIn("score: 0.4200", text)
-        self.assertIn("hypothesis: fit a compact mixture", text)
-        self.assertIn("executor: run one compact fitting script", text)
+        self.assertIn("hypothesis: execute a compact mixture", text)
+        self.assertIn("executor: run one compact executeting script", text)
 
     def test_trace_summary_includes_metrics_diagnostics_and_errors(self):
         trace = Trace(
@@ -67,12 +67,12 @@ class DisplayFormatterTest(unittest.TestCase):
                     input="data",
                     output="{}",
                     expected="unknown",
-                    logs="ran fit",
-                    error="bad fit",
+                    logs="ran execute",
+                    error="bad execute",
                     artifacts={
-                        "summary": "fit completed with warning",
-                        "model_expression": "x ~ mixture",
-                        "metrics": {"aic": 12.3},
+                        "summary": "execute completed with warning",
+                        "implementation": "changed implementation path",
+                        "metrics": {"primary_metric": 12.3},
                         "diagnostics": ["tail miss"],
                         "artifact_paths": ["plot.png"],
                     },
@@ -85,10 +85,10 @@ class DisplayFormatterTest(unittest.TestCase):
         self.assertIn("Execution Result: cand_000_003", text)
         self.assertIn("phase: feedback", text)
         self.assertIn("sample_ids: ['task_a']", text)
-        self.assertIn("summary: fit completed with warning", text)
-        self.assertIn("metrics: {'aic': 12.3}", text)
+        self.assertIn("summary: execute completed with warning", text)
+        self.assertIn("metrics: {'primary_metric': 12.3}", text)
         self.assertIn("diagnostics: ['tail miss']", text)
-        self.assertIn("errors: bad fit", text)
+        self.assertIn("errors: bad execute", text)
 
     def test_judgment_summary_includes_score_passed_and_feedback(self):
         judgment = Judgment(
@@ -98,7 +98,7 @@ class DisplayFormatterTest(unittest.TestCase):
             passed=False,
             per_sample_scores=[],
             failure_categories=["tail_miss"],
-            actionable_feedback=["improve tail fit"],
+            actionable_feedback=["improve tail execute"],
             confidence="medium",
         )
 
@@ -108,7 +108,7 @@ class DisplayFormatterTest(unittest.TestCase):
         self.assertIn("score: 0.5600", text)
         self.assertIn("passed: False", text)
         self.assertIn("failure_categories: ['tail_miss']", text)
-        self.assertIn("feedback: ['improve tail fit']", text)
+        self.assertIn("feedback: ['improve tail execute']", text)
 
     def test_gate_summary_includes_accepted_discarded_and_reasons(self):
         decision = GateDecision(
