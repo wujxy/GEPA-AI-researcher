@@ -1,0 +1,46 @@
+{
+  "resume": false,
+  "components": {
+    "mode": "claude_code_agents"
+  },
+  "context": {
+    "paths": [
+      "no prior",
+      "i can tell"
+    ],
+    "notes": [
+      "i can tell you the number distribution is a peak"
+    ],
+    "skills": []
+  },
+  "budget": {
+    "max_rounds": 3,
+    "no_improvement_patience": 2
+  },
+  "generation": {
+    "batch_size": 5,
+    "enable_merge": true
+  },
+  "gepa": {
+    "frontier_policy": "pareto",
+    "acceptance_policy": "minibatch_improves_then_pareto",
+    "minibatch_size": 5,
+    "parent_sampling": "pareto_win_weighted"
+  },
+  "executor": {
+    "max_workers": 3,
+    "executor_timeout_seconds": 900,
+    "fail_fast": false,
+    "per_candidate_workspace": true
+  },
+  "judger": {
+    "pass_threshold": 0.85
+  },
+  "task": {
+    "name": "random number discovery",
+    "goal": "find a most most suitable fitting function to describe the random number",
+    "data_files": [
+      "/home/yoru/AI-sci/GEPA-AI-researcher/examples/function_discovery/data/observations.csv"
+    ]
+  }
+}

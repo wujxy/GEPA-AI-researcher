@@ -57,6 +57,22 @@
     "max_rounds": 4,
     "no_improvement_patience": 2
   },
+  "generation": {
+    "batch_size": 10,
+    "enable_merge": false
+  },
+  "gepa": {
+    "frontier_policy": "pareto",
+    "acceptance_policy": "minibatch_improves_then_pareto",
+    "minibatch_size": 3,
+    "parent_sampling": "pareto_win_weighted"
+  },
+  "executor": {
+    "max_workers": 3,
+    "executor_timeout_seconds": 900,
+    "fail_fast": false,
+    "per_candidate_workspace": true
+  },
   "judger": {
     "pass_threshold": 0.85
   },
@@ -66,5 +82,13 @@
     "data_files": [
       "examples/function_discovery/data/observations.csv"
     ]
+  },
+  "context": {
+    "paths": [],
+    "notes": [],
+    "skills": []
+  },
+  "initialization": {
+    "seed_count": 1
   }
 }

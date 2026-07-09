@@ -9,12 +9,16 @@ class PaperQAJudger:
     """Deterministic judge with numeric score and actionable feedback."""
 
     def judge(self, candidate: Candidate, trace: Trace, config: dict[str, Any]) -> Judgment:
-        sample_lookup = {sample["sample_id"]: sample for sample in config["task"]["samples"]}
+        sample_lookup = {sample["sample_id"]: sample for sample in config["task"].get("samples", [])}
         per_sample = []
         failures: set[str] = set()
 
         for item in trace.samples:
-            sample = sample_lookup[item.sample_id]
+            sample = sample_lookup.get(item.sample_id)
+            if sample is None:
+                failures.add("missing_sample")
+                per_sample.append({"sample_id": item.sample_id, "score": 0.0, "notes": "sample missing from selected config"})
+                continue
             output_lower = item.output.lower()
             expected_lower = item.expected.lower()
             expected_present = item.expected.lower() in sample["context"].lower()
@@ -56,10 +60,13 @@ class PaperQAJudger:
             failure_categories=sorted(failures),
             actionable_feedback=feedback,
             confidence="high",
+            artifacts={"eval_phase": config.get("_eval_phase", "pareto"), "sample_ids": config.get("_selected_sample_ids", [])},
         )
 
     def _feedback_for(self, failures: set[str]) -> list[str]:
         feedback = []
+        if "missing_sample" in failures:
+            feedback.append("Ensure the selected evaluation samples are present in the task config.")
         if "missing_evidence" in failures:
             feedback.append("Require the answerer to quote or cite the supporting evidence sentence.")
         if "unsupported_answer" in failures:

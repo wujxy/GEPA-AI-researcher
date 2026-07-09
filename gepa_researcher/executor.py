@@ -7,15 +7,15 @@ from .schemas import Candidate, SampleTrace, Trace
 
 
 class PaperQAExecutor:
-    """Fixed, low-freedom executor for the initial paper-QA MVP.
-
-    This mock harness lets the orchestrator run without an external LLM. Later,
-    replace `_answer_sample` with a real model call while preserving trace fields.
-    """
+    """Fixed, low-freedom executor for the initial paper-QA MVP."""
 
     def execute(self, candidate: Candidate, config: dict[str, Any]) -> Trace:
         samples = []
-        for sample in config["task"]["samples"]:
+        selected_ids = set(config.get("_selected_sample_ids") or [])
+        task_samples = config["task"].get("samples", [])
+        if selected_ids and task_samples:
+            task_samples = [sample for sample in task_samples if str(sample.get("sample_id")) in selected_ids]
+        for sample in task_samples:
             start = perf_counter()
             output, logs = self._answer_sample(candidate.prompt_text, sample)
             latency_ms = int((perf_counter() - start) * 1000)
@@ -27,6 +27,7 @@ class PaperQAExecutor:
                     expected=sample["expected_answer"],
                     logs=logs,
                     latency_ms=latency_ms,
+                    artifacts={"eval_phase": config.get("_eval_phase", "pareto")},
                 )
             )
         return Trace(candidate_id=candidate.candidate_id, round_id=candidate.round_id, samples=samples)

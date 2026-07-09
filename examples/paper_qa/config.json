@@ -7,6 +7,28 @@
   "judger": {
     "pass_threshold": 0.9
   },
+  "gepa": {
+    "frontier_policy": "pareto",
+    "acceptance_policy": "minibatch_improves_then_pareto",
+    "minibatch_size": 3,
+    "parent_sampling": "pareto_win_weighted",
+    "feedback_sample_ids": [
+      "s001"
+    ],
+    "pareto_sample_ids": [
+      "s002",
+      "s003"
+    ]
+  },
+  "generation": {
+    "batch_size": 10,
+    "enable_merge": false
+  },
+  "executor": {
+    "max_workers": 3,
+    "executor_timeout_seconds": 30,
+    "fail_fast": false
+  },
   "task": {
     "name": "paper_qa_prompt_optimization_mvp",
     "initial_prompt": "Read the context and answer the question.",
@@ -33,5 +55,13 @@
         "evidence": ""
       }
     ]
+  },
+  "context": {
+    "paths": [],
+    "notes": [],
+    "skills": []
+  },
+  "initialization": {
+    "seed_count": 1
   }
 }
