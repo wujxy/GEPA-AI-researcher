@@ -3,28 +3,27 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .manager import ResearchManager
+from .orchestrator import ResearchOrchestrator
+from .io_utils import read_json
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="GEPA-AI-researcher CLI")
-    sub = parser.add_subparsers(dest="command", required=True)
-    init = sub.add_parser("init", help="Create a config through a terminal guide.")
-    init.add_argument("--out", default="gepa_config.json", help="Output config path.")
-    chat = sub.add_parser("chat", help="Alias for init.")
-    chat.add_argument("--out", default="gepa_config.json", help="Output config path.")
-    run = sub.add_parser("run", help="Run an existing config.")
-    run.add_argument("--config", required=True, help="Config path.")
+    parser.add_argument("--config", required=True, help="Path to JSON config file.")
     args = parser.parse_args()
-    manager = ResearchManager()
-    if args.command in {"init", "chat"}:
-        out = Path(args.out).expanduser().resolve()
-        manager.init_config(out)
-        print(f"Config written: {out}")
-        print(f"Run with: python -m gepa_researcher.cli run --config {out}")
-        return
-    state = manager.run_config(Path(args.config).expanduser().resolve())
-    print(f"Run complete. Best={state.best_candidate_id} score={state.best_score:.4f}")
+
+    config_path = Path(args.config).expanduser().resolve()
+    config = read_json(config_path)
+
+    orchestrator = ResearchOrchestrator(config=config, config_path=config_path)
+    try:
+        state = orchestrator.run()
+        print(f"Run complete. Best={state.best_candidate_id} score={state.best_score:.4f}")
+        print(f"Artifacts: {orchestrator.run_dir}")
+    except Exception as exc:
+        print(f"Error: {exc}")
+        print(f"Artifacts, if any: {orchestrator.run_dir}")
+        raise SystemExit(2) from exc
 
 
 if __name__ == "__main__":

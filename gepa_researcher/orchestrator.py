@@ -33,7 +33,7 @@ from .pool import CandidatePool
 from .provenance import ProvenanceVerifier
 from .registry import ExecutionRegistry
 from .runtime import config_for_eval, parent_trace_artifacts, recent_trace_summaries, resolve_dataset_split, select_feedback_minibatch
-from .schemas import Candidate, CandidateBatch, Decision, EvaluationBatch, GateDecision, GenerationDecision, Judgment, JudgmentBatch, LoopState, ParetoFrontier, ScoreMatrix, Trace
+from .schemas import Candidate, CandidateBatch, EvaluationBatch, GateDecision, GenerationDecision, Judgment, JudgmentBatch, LoopState, ParetoFrontier, ScoreMatrix, Trace
 from .score_matrix import ScoreMatrixBuilder
 from .usage import UsageTracker, format_round_usage, format_run_usage
 from .workspace import WorkspaceManager
@@ -623,16 +623,6 @@ class ResearchOrchestrator:
             },
         )
 
-    def _persist_round(self, candidate: Candidate, trace: Trace, judgment: Judgment, decision: Decision) -> None:
-        round_dir = self.run_dir / "traces" / f"round_{candidate.round_id:03d}"
-        write_json(round_dir / "candidate.json", candidate.to_dict())
-        write_json(round_dir / "trace.json", trace.to_dict())
-        write_json(round_dir / "judgment.json", judgment.to_dict())
-        write_json(round_dir / "decision.json", decision.to_dict())
-        append_jsonl(self.run_dir / "candidates.jsonl", candidate.to_dict())
-        append_jsonl(self.run_dir / "judgments.jsonl", judgment.to_dict())
-        append_jsonl(self.run_dir / "decisions.jsonl", decision.to_dict())
-
     def _persist_candidate_batch(self, batch: CandidateBatch) -> None:
         round_dir = self.run_dir / "traces" / f"round_{batch.round_id:03d}"
         write_json(round_dir / "candidate_batch.json", batch.to_dict())
@@ -670,17 +660,6 @@ class ResearchOrchestrator:
 
     def _persist_frontier(self, frontier: ParetoFrontier) -> None:
         write_json(self.run_dir / "frontier.json", frontier.to_dict())
-
-    def _update_state(self, state: LoopState, candidate: Candidate, judgment: Judgment, decision: Decision) -> None:
-        improved = judgment.score > state.best_score
-        if improved:
-            state.best_score = judgment.score
-            state.best_candidate_id = candidate.candidate_id
-            state.no_improvement_rounds = 0
-        else:
-            state.no_improvement_rounds += 1
-        state.history.append({"round_id": candidate.round_id, "candidate_id": candidate.candidate_id, "score": judgment.score, "passed": judgment.passed, "decision": decision.decision, "failure_categories": judgment.failure_categories, "actionable_feedback": judgment.actionable_feedback, "prompt_text": candidate.prompt_text})
-        state.round_id = candidate.round_id + 1
 
     def _update_state_from_generation(self, state: LoopState, decision: GenerationDecision) -> None:
         best_score = decision.artifacts.get("best_score")

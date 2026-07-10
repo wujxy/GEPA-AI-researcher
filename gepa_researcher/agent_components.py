@@ -7,7 +7,7 @@ from typing import Any
 
 from .agent_client import ClaudeCodeClient
 from .context_views import candidate_for_agent, evidence_access_policy, state_for_agent, trace_for_agent
-from .schemas import AgentCallContext, Candidate, CandidateBatch, Decision, Judgment, LoopState, SampleTrace, Trace
+from .schemas import AgentCallContext, Candidate, CandidateBatch, Judgment, LoopState, SampleTrace, Trace
 
 
 def format_runtime(config: dict[str, Any]) -> str:
@@ -567,76 +567,3 @@ Required JSON schema:
         )
 
 
-class AgentGater:
-    def __init__(self, client: ClaudeCodeClient):
-        self.client = client
-
-    def decide(self, state: LoopState, candidate: Candidate, judgment: Judgment, config: dict[str, Any]) -> Decision:
-        prompt = f"""
-You are the GATER agent in a bounded GEPA-style research loop.
-
-You decide whether to keep, reject, iterate, or stop. You must respect the
-budget and cannot change scores.
-
-Budget:
-{config["budget"]}
-
-State JSON:
-{state.to_dict()}
-
-Candidate JSON:
-{candidate.to_dict()}
-
-Judgment JSON:
-{judgment.to_dict()}
-
-Rules:
-- Stop if pass_threshold is reached.
-- Stop if this is the final allowed round.
-- Prefer keep/iterate when there is useful feedback and budget remains.
-- Reject candidates that do not improve and have no useful path forward.
-- Return only a JSON object, no prose outside JSON.
-
-Required JSON schema:
-{{
-  "decision": "keep|reject|iterate|stop",
-  "reason": "why",
-  "best_so_far": "candidate id or null",
-  "stop": false,
-  "next_focus": "what the next proposer should focus on"
-}}
-"""
-        result = _run_agent_json(
-            self.client,
-            prompt,
-            "gater",
-            AgentCallContext(
-                role="gater",
-                round_id=candidate.round_id,
-                phase="gate",
-                candidate_id=candidate.candidate_id,
-                parent_candidate_id=candidate.parent_id,
-            ),
-        )
-        data = result.data
-        decision = str(data.get("decision", "reject"))
-        if decision not in {"keep", "reject", "iterate", "stop"}:
-            decision = "reject"
-
-        # Hard safety overlay: never let the agent exceed explicit loop budget.
-        pass_threshold = float(config["judger"].get("pass_threshold", 1.0))
-        max_rounds = int(config["budget"]["max_rounds"])
-        stop = bool(data.get("stop", False))
-        if judgment.score >= pass_threshold or state.round_id + 1 >= max_rounds:
-            stop = True
-            decision = "stop"
-
-        return Decision(
-            candidate_id=candidate.candidate_id,
-            round_id=candidate.round_id,
-            decision=decision,  # type: ignore[arg-type]
-            reason=str(data.get("reason", "")),
-            best_so_far=data.get("best_so_far") or state.best_candidate_id or candidate.candidate_id,
-            stop=stop,
-            artifacts={"agent_raw": result.text, "eval_phase": config.get("_eval_phase", "pareto"), "sample_ids": config.get("_selected_sample_ids", []), **data},
-        )

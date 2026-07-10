@@ -4,9 +4,6 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
 
-DecisionKind = Literal["keep", "reject", "iterate", "stop"]
-
-
 @dataclass
 class Candidate:
     candidate_id: str
@@ -280,19 +277,6 @@ class JudgmentBatch:
 
 
 @dataclass
-class EvaluationResult:
-    candidate_id: str
-    task_id: str
-    score: float
-    passed: bool
-    feedback_text: str = ""
-    artifacts: dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-@dataclass
 class ScoreMatrix:
     round_id: int
     task_scores: dict[str, dict[str, float]] = field(default_factory=dict)
@@ -350,20 +334,6 @@ class CandidatePoolSnapshot:
     discarded_candidate_ids: list[str]
     ancestry: dict[str, list[str]]
     candidates: dict[str, dict[str, Any]]
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-@dataclass
-class Decision:
-    candidate_id: str
-    round_id: int
-    decision: DecisionKind
-    reason: str
-    best_so_far: str | None
-    stop: bool = False
-    artifacts: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
