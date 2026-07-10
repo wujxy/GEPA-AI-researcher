@@ -66,8 +66,9 @@ class WorkspaceManager:
         if actual != start_sha:
             raise WorkspaceError(f"worktree start SHA mismatch: expected={start_sha} actual={actual}")
 
-        for relative in ("build", "InstallArea", "TEMP", "logs", "metrics"):
-            (worktree / relative).mkdir(parents=True, exist_ok=True)
+        # Worktree is ready - let executor create task-specific directories as needed
+        # This makes GEPA framework task-agnostic and avoids OMILREC/JUNO specific hardcoded paths
+
         self._map_readonly_assets(worktree)
         return WorkspaceLease(
             candidate_id=candidate.candidate_id,

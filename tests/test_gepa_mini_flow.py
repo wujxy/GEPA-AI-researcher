@@ -56,7 +56,6 @@ class GEPAMiniFlowTest(unittest.TestCase):
         return Candidate(
             candidate_id=candidate_id,
             round_id=round_id,
-            parent_id=parent_ids[0] if parent_ids else None,
             parent_ids=parent_ids or [],
             hypothesis="h",
             scope="task_system",

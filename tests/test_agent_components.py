@@ -73,7 +73,6 @@ class AgentComponentsTest(unittest.TestCase):
         candidate = Candidate(
             candidate_id="cand_000",
             round_id=0,
-            parent_id=None,
             hypothesis="test baseline candidate",
             scope="task_system",
             proposed_change="test baseline candidate model",
@@ -351,7 +350,6 @@ class AgentComponentsTest(unittest.TestCase):
             candidate = Candidate(
                 candidate_id="cand_000_000",
                 round_id=0,
-                parent_id=None,
                 hypothesis="test baseline candidate",
                 scope="task_system",
                 proposed_change="test baseline candidate model",

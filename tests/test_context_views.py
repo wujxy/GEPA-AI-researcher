@@ -13,7 +13,6 @@ class ContextViewsTest(unittest.TestCase):
         return Candidate(
             candidate_id="cand_001_000",
             round_id=1,
-            parent_id="seed_000",
             parent_ids=["seed_000"],
             hypothesis="Candidate tests a bounded task improvement.",
             scope="task_system",

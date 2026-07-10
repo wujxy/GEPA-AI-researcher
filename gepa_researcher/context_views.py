@@ -38,7 +38,7 @@ def candidate_for_agent(candidate: Candidate, evidence_refs: list[str] | None = 
     return {
         "candidate_id": candidate.candidate_id,
         "round_id": candidate.round_id,
-        "parent_id": candidate.parent_id,
+        # ✅ 删除: "parent_id": candidate.parent_id,
         "parent_ids": list(candidate.parent_ids),
         "generation": candidate.generation,
         "status": candidate.status,

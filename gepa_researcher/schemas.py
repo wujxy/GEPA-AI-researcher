@@ -8,7 +8,7 @@ from typing import Any, Literal
 class Candidate:
     candidate_id: str
     round_id: int
-    parent_id: str | None
+    # 删除: parent_id: str | None (冗余字段)
     hypothesis: str
     scope: str
     proposed_change: str
@@ -17,6 +17,7 @@ class Candidate:
     risk: str
     prompt_text: str
     created_at: str
+    # ✅ 只保留 parent_ids 字段
     parent_ids: list[str] = field(default_factory=list)
     generation: int = 0
     executor_contract: dict[str, Any] = field(default_factory=dict)
@@ -32,11 +33,9 @@ class Candidate:
     admission_status: str = "pending"
     admission_decision_id: str | None = None
 
+    # ✅ 删除 parent_id 同步逻辑
     def __post_init__(self) -> None:
-        if not self.parent_ids and self.parent_id:
-            self.parent_ids = [self.parent_id]
-        if self.parent_ids and not self.parent_id:
-            self.parent_id = self.parent_ids[0]
+        pass
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

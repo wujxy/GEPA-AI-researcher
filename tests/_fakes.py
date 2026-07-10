@@ -23,7 +23,6 @@ class FakeProposer:
             Candidate(
                 candidate_id=f"cand_{state.round_id:03d}_{index:03d}",
                 round_id=state.round_id,
-                parent_id=parent_ids[0] if parent_ids else None,
                 parent_ids=parent_ids,
                 hypothesis="h",
                 scope="task_system",

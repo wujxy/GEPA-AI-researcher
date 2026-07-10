@@ -102,7 +102,6 @@ class OrchestratorSmokeTest(unittest.TestCase):
                 return Candidate(
                     candidate_id=f"raw_{note}",
                     round_id=-1,
-                    parent_id=None,
                     hypothesis="h",
                     scope="task_system",
                     proposed_change="c",

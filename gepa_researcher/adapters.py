@@ -179,7 +179,7 @@ class ExecutorAdapter:
                 execution_id=str(uuid.uuid4()),
                 candidate_id=candidate.candidate_id,
                 round_id=candidate.round_id,
-                parent_candidate_id=candidate.parent_id,
+                parent_candidate_id=candidate.parent_ids[0] if candidate.parent_ids else None,
                 requested_parent_sha=result_sha,
                 actual_start_sha=result_sha,
                 result_sha=result_sha,
@@ -191,17 +191,18 @@ class ExecutorAdapter:
             return eval_lease, record, False
 
         parent_sha = ""
-        if candidate.parent_id:
-            parent_sha = self.registry.verified_result_sha(candidate.parent_id, require_accepted=True) or ""
+        if candidate.parent_ids:
+            parent_id = candidate.parent_ids[0]  # 使用第一个 parent
+            parent_sha = self.registry.verified_result_sha(parent_id, require_accepted=True) or ""
             if not parent_sha and str(config.get("workspace", {}).get("mode")) == "git_worktree":
-                raise RuntimeError(f"parent {candidate.parent_id} has no accepted verified result SHA")
+                raise RuntimeError(f"parent {parent_id} has no accepted verified result SHA")
         lease = self.workspace_manager.prepare(candidate, parent_sha)
         self.registry.record_workspace(lease)
         record = ExecutionRecord(
             execution_id=str(uuid.uuid4()),
             candidate_id=candidate.candidate_id,
             round_id=candidate.round_id,
-            parent_candidate_id=candidate.parent_id,
+            parent_candidate_id=candidate.parent_ids[0] if candidate.parent_ids else None,
             requested_parent_sha=lease.requested_parent_sha,
             actual_start_sha=lease.actual_start_sha,
             result_sha=None,

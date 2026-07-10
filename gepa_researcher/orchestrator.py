@@ -121,51 +121,10 @@ class ResearchOrchestrator:
         print(f"[{stamp}] {message}", flush=True)
 
     def _log_block(self, text: str) -> None:
-        for line in text.splitlines():
-            self._log(line)
+        [self._log(line) for line in text.splitlines()]
 
     def _write_live_artifact(self, round_id: int, name: str, data: dict[str, Any]) -> None:
         write_json(self.run_dir / "live" / f"round_{round_id:03d}_{name}.json", data)
-
-    def _log_candidate(self, candidate: Candidate) -> None:
-        self._log(f"Hypothesis: {candidate.hypothesis}")
-        self._log(f"Proposed change: {candidate.proposed_change}")
-        if candidate.rationale:
-            self._log(f"Rationale: {candidate.rationale}")
-        if candidate.expected_improvement:
-            self._log(f"Expected improvement: {candidate.expected_improvement}")
-        if candidate.risk:
-            self._log(f"Risk: {candidate.risk}")
-
-    def _log_trace(self, trace: Trace) -> None:
-        if not trace.samples:
-            self._log("Executor summary: no samples returned")
-            return
-        sample = trace.samples[0]
-        artifacts = sample.artifacts
-        summary = artifacts.get("summary") or sample.logs or sample.output
-        self._log(f"Executor summary: {summary}")
-        implementation = artifacts.get("implementation")
-        if implementation:
-            self._log(f"Implementation: {implementation}")
-        metrics = artifacts.get("metrics")
-        if metrics:
-            self._log(f"Metrics: {metrics}")
-        diagnostics = artifacts.get("diagnostics")
-        if diagnostics:
-            self._log(f"Diagnostics: {diagnostics}")
-
-    def _log_judgment(self, judgment: Judgment) -> None:
-        self._log(f"Judgment: score={judgment.score:.4f}, passed={judgment.passed}, confidence={judgment.confidence}")
-        if judgment.failure_categories:
-            self._log(f"Failure categories: {judgment.failure_categories}")
-        if judgment.actionable_feedback:
-            self._log(f"Feedback: {judgment.actionable_feedback}")
-
-    def _log_generation_decision(self, decision: GenerationDecision) -> None:
-        self._log(f"Generation decision: kept={decision.kept}, rejected={len(decision.rejected)}, stop={decision.stop}")
-        if decision.next_feedback:
-            self._log(f"Next feedback: {decision.next_feedback}")
 
     def _resolve_run_dir(self, config: dict[str, Any], config_path: Path) -> Path:
         run_dir = config.get("run_dir")
@@ -238,7 +197,7 @@ class ResearchOrchestrator:
         for index, candidate in enumerate(batch.candidates):
             candidate.candidate_id = f"seed_{index:03d}"
             candidate.round_id = -1
-            candidate.parent_id = None
+            # ✅ 删除: candidate.parent_id = None
             candidate.parent_ids = []
             candidate.generation = 0
             candidate.status = "seed"

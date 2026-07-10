@@ -76,7 +76,6 @@ class GEPAUpgradeTest(unittest.TestCase):
         return Candidate(
             candidate_id=candidate_id,
             round_id=0,
-            parent_id="parent",
             parent_ids=["parent"],
             hypothesis="h",
             scope="m",

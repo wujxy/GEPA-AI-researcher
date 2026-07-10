@@ -157,11 +157,13 @@ def _run_agent_json(client, prompt: str, label: str, context: AgentCallContext, 
 
 
 def _expected_gain(data: dict[str, Any]) -> float | None:
+    # Only use the generic expected_gain field - removed OMILREC-specific expected_gain_ms_evt
+    # This makes GEPA framework task-agnostic and avoids OMILREC specific logic
     value = data.get("expected_gain")
     if value is None:
-        value = data.get("expected_gain_ms_evt")
+        return None
     try:
-        return float(value) if value is not None else None
+        return float(value)
     except (TypeError, ValueError):
         return None
 
@@ -247,7 +249,6 @@ Required JSON schema:
         return Candidate(
             candidate_id=candidate_id,
             round_id=state.round_id,
-            parent_id=state.best_candidate_id,
             hypothesis=str(data.get("hypothesis", "")),
             scope=str(data.get("scope", "task_system")),
             proposed_change=str(data.get("proposed_change", "")),
@@ -349,7 +350,6 @@ Required JSON schema:
                 Candidate(
                     candidate_id=candidate_id,
                     round_id=state.round_id,
-                    parent_id=state.best_candidate_id,
                     hypothesis=str(data.get("hypothesis", "")),
                     scope=str(data.get("scope", "task_system")),
                     proposed_change=str(data.get("proposed_change", "")),
@@ -459,7 +459,7 @@ Required JSON schema:
                 phase=str(config.get("_eval_phase", "pareto")),
                 candidate_id=candidate.candidate_id,
                 execution_id=config.get("_execution_id"),
-                parent_candidate_id=candidate.parent_id,
+                parent_candidate_id=candidate.parent_ids[0] if candidate.parent_ids else None,
             ),
             cwd=repo_dir,
             env=dict(config.get("_candidate_env") or {}),
@@ -550,7 +550,7 @@ Required JSON schema:
                 phase=str(config.get("_eval_phase", "pareto")),
                 candidate_id=candidate.candidate_id,
                 execution_id=config.get("_execution_id"),
-                parent_candidate_id=candidate.parent_id,
+                parent_candidate_id=candidate.parent_ids[0] if candidate.parent_ids else None,
             ),
         )
         data = result.data

@@ -56,7 +56,6 @@ def _candidate(candidate_id: str = "cand_000_000", parent_id: str | None = None)
     return Candidate(
         candidate_id=candidate_id,
         round_id=0,
-        parent_id=parent_id,
         parent_ids=[parent_id] if parent_id else [],
         hypothesis="inline hot function",
         scope="src/hot.cc",
