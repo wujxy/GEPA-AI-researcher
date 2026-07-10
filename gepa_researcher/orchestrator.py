@@ -260,9 +260,17 @@ class ResearchOrchestrator:
         matrix = ScoreMatrixBuilder.from_batch(judgment_batch, {candidate.candidate_id for candidate in admitted_seeds})
         ScoreMatrixBuilder.persist(matrix, matrix_path)
         for candidate in admitted_seeds:
-            pool.add_accepted(candidate)
-            self.registry.mark_candidate_status(candidate.candidate_id, "accepted")
+            # 只有通过 provenance 验证的 seed 才能被 accepted
+            judgment = next((j for j in judgment_batch.judgments if j.candidate_id == candidate.candidate_id), None)
+            if judgment and any(cat == "provenance_failed" for cat in judgment.failure_categories):
+                self.registry.mark_candidate_status(candidate.candidate_id, "provenance_failed")
+                self._log(f"seed {candidate.candidate_id} rejected due to provenance failure")
+            else:
+                pool.add_accepted(candidate)
+                self.registry.mark_candidate_status(candidate.candidate_id, "accepted")
         pool.persist()
+        if not pool.active_ids():
+            raise RuntimeError("all seed candidates failed provenance verification - no valid seeds available for mutation")
         frontier = self.pareto.select(matrix, pool.active_ids())
         self._persist_frontier(frontier)
         best = max(matrix.aggregate_scores.items(), key=lambda item: item[1], default=(None, None))
@@ -274,8 +282,8 @@ class ResearchOrchestrator:
             state.best_score = float(best[1])
         state.history.append({
             "round_id": -1,
-            "kept": [candidate.candidate_id for candidate in admitted_seeds],
-            "rejected": [candidate.candidate_id for candidate in batch.candidates if candidate not in admitted_seeds],
+            "kept": pool.active_ids(),
+            "rejected": [candidate.candidate_id for candidate in batch.candidates if candidate.candidate_id not in pool.active_ids()],
             "best_candidate_id": state.best_candidate_id,
             "best_score": state.best_score,
             "next_feedback": list(dict.fromkeys(init_feedback)),
