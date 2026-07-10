@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .admission import CandidateAdmissionGate
 from .agent_client import AgentError, ClaudeCodeClient
 from .agent_components import AgentExecutor, AgentJudger, AgentProposer
 from .adapters import ExecutorAdapter, JudgerAdapter
@@ -27,9 +28,13 @@ from .gate import GEPAGate
 from .io_utils import append_jsonl, read_json, write_json
 from .pareto import ParetoSelector
 from .pool import CandidatePool
+from .provenance import ProvenanceVerifier
+from .registry import ExecutionRegistry
 from .runtime import config_for_eval, parent_trace_artifacts, recent_trace_summaries, resolve_dataset_split, select_feedback_minibatch
 from .schemas import Candidate, CandidateBatch, Decision, EvaluationBatch, GateDecision, GenerationDecision, Judgment, JudgmentBatch, LoopState, ParetoFrontier, ScoreMatrix, Trace
 from .score_matrix import ScoreMatrixBuilder
+from .usage import UsageTracker, format_round_usage, format_run_usage
+from .workspace import WorkspaceManager
 
 
 class ResearchOrchestrator:
@@ -37,6 +42,11 @@ class ResearchOrchestrator:
         self.config = config
         self.config_path = config_path
         self.run_dir = self._resolve_run_dir(config, config_path)
+        self.usage_tracker = UsageTracker(self.run_dir, config.get("usage_tracking", {}))
+        self.registry = ExecutionRegistry(self.run_dir)
+        self.workspace_manager = WorkspaceManager(self.run_dir, config)
+        self.provenance = ProvenanceVerifier()
+        self.admission = CandidateAdmissionGate()
         self.dataset_split = resolve_dataset_split(config)
         self.prior_context = load_prior_context(config, config_path.parent)
         # Dependency injection: callers (and tests) may pass a (proposer, executor,
@@ -50,6 +60,7 @@ class ResearchOrchestrator:
         self.pareto = ParetoSelector()
 
     def run(self) -> LoopState:
+        controller_snapshot = self.workspace_manager.controller_snapshot()
         state = self._load_or_initialize_state()
         self.run_dir.mkdir(parents=True, exist_ok=True)
         write_json(self.run_dir / "config.snapshot.json", self.config)
@@ -65,20 +76,31 @@ class ResearchOrchestrator:
             self.dataset_split,
         ))
         self._initialize_pool_if_needed(state)
+        self.workspace_manager.assert_controller_unchanged(controller_snapshot)
+        if self.config.get("usage_tracking", {}).get("print_round_summary", True):
+            self._log_block(format_round_usage(self.usage_tracker.round_summary(-1)))
 
         for round_id in range(state.round_id, max_rounds):
+            round_controller_snapshot = self.workspace_manager.controller_snapshot()
             state.round_id = round_id
             self._log(f"Round {round_id + 1}/{max_rounds} started")
             decision = self.run_generation(round_id, state)
             self._update_state_from_generation(state, decision)
             write_json(self.run_dir / "state.json", state.to_dict())
             self._log(f"Round {round_id + 1}/{max_rounds} persisted")
+            self.workspace_manager.assert_controller_unchanged(round_controller_snapshot)
+            if self.config.get("usage_tracking", {}).get("print_round_summary", True):
+                self._log_block(format_round_usage(self.usage_tracker.round_summary(round_id)))
 
             if decision.stop:
                 self._log(f"Stopping after round {round_id + 1}")
                 break
 
         self._write_final_report(state)
+        self.workspace_manager.assert_controller_unchanged(controller_snapshot)
+        run_usage = self.usage_tracker.run_summary()
+        if self.config.get("usage_tracking", {}).get("print_run_summary", True):
+            self._log_block(format_run_usage(run_usage))
         self._log_block(format_run_finish(state, str(self.run_dir / "final_report.md"), str(self.run_dir)))
         return state
 
@@ -149,6 +171,7 @@ class ResearchOrchestrator:
                 cwd=Path(agent_config.get("cwd", self.config_path.parent.parent.parent)).resolve(),
                 timeout_seconds=int(agent_config.get("timeout_seconds", 600)),
                 extra_args=list(agent_config.get("extra_args", [])),
+                usage_tracker=self.usage_tracker,
             )
             return (
                 AgentProposer(client),
@@ -177,7 +200,8 @@ class ResearchOrchestrator:
         seed_config = deepcopy(self.config)
         seed_config.setdefault("generation", {})["batch_size"] = seed_count
         seed_config["_prior_context"] = self.prior_context
-        seed_state = LoopState(task_name=state.task_name, round_id=0)
+        seed_config["_agent_phase"] = "initialization"
+        seed_state = LoopState(task_name=state.task_name, round_id=-1)
         if hasattr(self.proposer, "propose_batch"):
             batch = self.proposer.propose_batch(seed_state, seed_config)
         else:
@@ -193,17 +217,22 @@ class ResearchOrchestrator:
             candidate.executor_contract.setdefault("instructions", "Execute this seed candidate on D_pareto.")
         batch.candidates = batch.candidates[:seed_count]
         batch.round_id = -1
+        admissions, admitted_seeds = self._admit_candidates(batch.candidates, pool)
         self._persist_candidate_batch(batch)
+        self._persist_admission_decisions(-1, admissions)
         self._log_block(format_phase_header(-1, 0, "initialization proposer"))
         self._log_block(format_candidate_list(batch.candidates))
         for candidate in batch.candidates:
             self._log_block(format_proposal_summary(candidate, "initialization", role="seed"))
-        trace_batch, judgment_batch = self._evaluate_candidates(batch.candidates, -1, "pareto", self.dataset_split.pareto_ids, max_rounds=0)
+        if not admitted_seeds:
+            raise RuntimeError("all seed candidates were rejected by the admission gate")
+        trace_batch, judgment_batch = self._evaluate_candidates(admitted_seeds, -1, "pareto", self.dataset_split.pareto_ids, max_rounds=0)
         self._persist_judgment_batch(judgment_batch)
-        matrix = ScoreMatrixBuilder.from_batch(judgment_batch, {candidate.candidate_id for candidate in batch.candidates})
+        matrix = ScoreMatrixBuilder.from_batch(judgment_batch, {candidate.candidate_id for candidate in admitted_seeds})
         ScoreMatrixBuilder.persist(matrix, matrix_path)
-        for candidate in batch.candidates:
+        for candidate in admitted_seeds:
             pool.add_accepted(candidate)
+            self.registry.mark_candidate_status(candidate.candidate_id, "accepted")
         pool.persist()
         frontier = self.pareto.select(matrix, pool.active_ids())
         self._persist_frontier(frontier)
@@ -216,8 +245,8 @@ class ResearchOrchestrator:
             state.best_score = float(best[1])
         state.history.append({
             "round_id": -1,
-            "kept": [candidate.candidate_id for candidate in batch.candidates],
-            "rejected": [],
+            "kept": [candidate.candidate_id for candidate in admitted_seeds],
+            "rejected": [candidate.candidate_id for candidate in batch.candidates if candidate not in admitted_seeds],
             "best_candidate_id": state.best_candidate_id,
             "best_score": state.best_score,
             "next_feedback": list(dict.fromkeys(init_feedback)),
@@ -252,13 +281,17 @@ class ResearchOrchestrator:
         self._log_block(format_phase_header(round_id, int(self.config["budget"]["max_rounds"]), "proposer mutation"))
         self._log("proposer mutation started")
         proposal_config = self._config_with_gepa_context(state, pool, active_matrix, frontier, parents)
+        proposal_config["_agent_phase"] = "mutation"
         if hasattr(self.proposer, "propose_batch"):
             candidate_batch = self.proposer.propose_batch(state, proposal_config)
         else:
             candidate_batch = CandidateBatch(round_id=round_id, candidates=[self.proposer.propose(state, proposal_config)])
         self._attach_parent_context(candidate_batch.candidates, parents, round_id)
+        admissions, admitted_candidates = self._admit_candidates(candidate_batch.candidates, pool)
         self._write_live_artifact(round_id, "candidate_batch", candidate_batch.to_dict())
+        self._write_live_artifact(round_id, "admission_decisions", {"decisions": [item.to_dict() for item in admissions]})
         self._persist_candidate_batch(candidate_batch)
+        self._persist_admission_decisions(round_id, admissions)
         self._log(f"proposer mutation finished: {len(candidate_batch.candidates)} candidate(s)")
         self._log_block(format_candidate_list(candidate_batch.candidates))
         for candidate in candidate_batch.candidates:
@@ -270,7 +303,7 @@ class ResearchOrchestrator:
             int(self.config.get("gepa", {}).get("minibatch_size", 1)),
         )
         parent_eval_candidates = [self._candidate_for_round(parent, round_id) for parent in parents]
-        feedback_candidates = parent_eval_candidates + candidate_batch.candidates
+        feedback_candidates = parent_eval_candidates + admitted_candidates if admitted_candidates else []
         known_scores = dict(active_matrix.aggregate_scores)
         self._log("feedback minibatch eval started")
         feedback_trace_batch, feedback_judgment_batch = self._evaluate_candidates(
@@ -281,7 +314,7 @@ class ResearchOrchestrator:
             known_scores=known_scores,
             role_by_candidate={
                 **{parent.candidate_id: "parent" for parent in parent_eval_candidates},
-                **{candidate.candidate_id: "child" for candidate in candidate_batch.candidates},
+                **{candidate.candidate_id: "child" for candidate in admitted_candidates},
             },
         )
         self._write_live_artifact(round_id, "feedback_trace_batch", feedback_trace_batch.to_dict())
@@ -296,9 +329,9 @@ class ResearchOrchestrator:
         }
         child_judgments = [
             judgment for judgment in feedback_judgment_batch.judgments
-            if judgment.candidate_id in {candidate.candidate_id for candidate in candidate_batch.candidates}
+            if judgment.candidate_id in {candidate.candidate_id for candidate in admitted_candidates}
         ]
-        improvers = self.gate.minibatch_improvers(candidate_batch.candidates, child_judgments, parent_judgments)
+        improvers = self.gate.minibatch_improvers(admitted_candidates, child_judgments, parent_judgments)
         improver_ids = {candidate.candidate_id for candidate in improvers}
         self._log(f"feedback gate improvers: {sorted(improver_ids) or 'none'}")
 
@@ -332,8 +365,14 @@ class ResearchOrchestrator:
         all_child_ids = {candidate.candidate_id for candidate in candidate_batch.candidates}
         final_discarded = list(dict.fromkeys([candidate_id for candidate_id in all_child_ids if candidate_id not in gate_decision.accepted]))
         reasons = dict(gate_decision.reason_by_candidate)
+        admission_by_id = {decision.candidate_id: decision for decision in admissions}
         for candidate in candidate_batch.candidates:
-            if candidate.candidate_id not in improver_ids:
+            admission_decision = admission_by_id[candidate.candidate_id]
+            if not admission_decision.admitted:
+                reasons[candidate.candidate_id] = (
+                    "discarded by admission gate: " + ", ".join(admission_decision.failure_codes)
+                )
+            elif candidate.candidate_id not in improver_ids:
                 reasons[candidate.candidate_id] = "discarded: did not improve over parent on D_feedback minibatch"
             elif candidate.candidate_id in final_discarded and candidate.candidate_id not in reasons:
                 reasons[candidate.candidate_id] = "discarded: failed D_pareto add criteria"
@@ -390,7 +429,13 @@ class ResearchOrchestrator:
             ))
         eval_config = config_for_eval(self.config, sample_ids, phase, self.prior_context)
         eval_config["_run_dir"] = str(self.run_dir)
-        trace_batch = ExecutorAdapter(self.executor, self.run_dir).run_many(candidates, round_id, eval_config)
+        trace_batch = ExecutorAdapter(
+            self.executor,
+            self.run_dir,
+            workspace_manager=self.workspace_manager,
+            registry=self.registry,
+            provenance=self.provenance,
+        ).run_many(candidates, round_id, eval_config)
         for trace in trace_batch.traces:
             self._log_block(format_trace_summary(trace, phase, sample_ids))
         judgment_batch = JudgerAdapter(self.judger).evaluate_many(candidates, trace_batch, eval_config)
@@ -429,6 +474,10 @@ class ResearchOrchestrator:
             "pareto_frontier": frontier.to_dict(),
             "parents": [parent.to_dict() for parent in parents],
             "parent_traces": parent_trace_artifacts(self.run_dir, [parent.candidate_id for parent in parents]),
+            "parent_executions": {
+                parent.candidate_id: self.registry.execution(parent.candidate_id) or {}
+                for parent in parents
+            },
             "recent_feedback": self._recent_feedback(state),
             "recent_traces": recent_trace_summaries(self.run_dir),
             "dataset_split": self.dataset_split.to_dict(),
@@ -465,9 +514,34 @@ class ResearchOrchestrator:
         for candidate_id in gate_decision.accepted:
             if candidate_id in by_id:
                 pool.add_accepted(by_id[candidate_id])
+                self.registry.mark_candidate_status(candidate_id, "accepted")
         for candidate_id in gate_decision.discarded:
             if candidate_id in by_id:
                 pool.add_discarded(by_id[candidate_id], gate_decision.reason_by_candidate.get(candidate_id, "discarded"))
+                self.registry.mark_candidate_status(candidate_id, "discarded")
+
+    def _admit_candidates(self, candidates: list[Candidate], pool: CandidatePool):
+        batch_ids = [candidate.candidate_id for candidate in candidates]
+        duplicate_ids = {candidate_id for candidate_id in batch_ids if batch_ids.count(candidate_id) > 1}
+        decisions = []
+        admitted = []
+        known_ids = self.registry.known_candidate_ids()
+        accepted_parents = set(pool.accepted_ids)
+        for candidate in candidates:
+            decision = self.admission.evaluate(
+                candidate,
+                self.config,
+                known_candidate_ids=known_ids | duplicate_ids,
+                accepted_parent_ids=accepted_parents,
+                batch_candidate_ids=set(batch_ids),
+            )
+            decisions.append(decision)
+            self.registry.record_admission(decision)
+            if decision.admitted:
+                admitted.append(candidate)
+            else:
+                self.registry.mark_candidate_status(candidate.candidate_id, "rejected_pre_gate")
+        return decisions, admitted
 
     def _generation_decision_from_gate(
         self,
@@ -535,6 +609,13 @@ class ResearchOrchestrator:
         for candidate in batch.candidates:
             write_json(round_dir / candidate.candidate_id / "candidate.json", candidate.to_dict())
             append_jsonl(self.run_dir / "candidates.jsonl", candidate.to_dict())
+
+    def _persist_admission_decisions(self, round_id: int, decisions) -> None:
+        round_dir = self.run_dir / "traces" / f"round_{round_id:03d}"
+        payload = {"round_id": round_id, "decisions": [decision.to_dict() for decision in decisions]}
+        write_json(round_dir / "admission_decisions.json", payload)
+        for decision in decisions:
+            append_jsonl(self.run_dir / "admission_decisions.jsonl", decision.to_dict())
 
     def _persist_judgment_batch(self, batch: JudgmentBatch) -> None:
         round_dir = self.run_dir / "traces" / f"round_{batch.round_id:03d}"

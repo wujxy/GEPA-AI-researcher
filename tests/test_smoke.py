@@ -7,7 +7,7 @@ from pathlib import Path
 from gepa_researcher.io_utils import read_json
 from gepa_researcher.orchestrator import ResearchOrchestrator
 
-from _fakes import fake_components, make_generic_config
+from tests._fakes import fake_components, make_generic_config
 
 
 class OrchestratorSmokeTest(unittest.TestCase):
@@ -60,13 +60,13 @@ class OrchestratorSmokeTest(unittest.TestCase):
         self.assertEqual(config["runtime"]["conda_env"], "myenv")
         self.assertEqual(config["runtime"]["python_command"], "conda run -n myenv python")
         self.assertIn("Bash(conda run -n myenv python *)", config["agent"]["extra_args"])
-        self.assertEqual(config["generation"]["batch_size"], 10)
+        self.assertEqual(config["generation"]["batch_size"], 5)
         self.assertFalse(config["generation"]["enable_merge"])
         self.assertEqual(config["gepa"]["frontier_policy"], "pareto")
         self.assertEqual(config["gepa"]["acceptance_policy"], "minibatch_improves_then_pareto")
         self.assertEqual(config["gepa"]["parent_sampling"], "pareto_win_weighted")
         self.assertEqual(config["initialization"]["seed_count"], 1)
-        self.assertEqual(config["gepa"]["minibatch_size"], 3)
+        self.assertEqual(config["gepa"]["minibatch_size"], 2)
         self.assertEqual(config["executor"]["max_workers"], 3)
         self.assertEqual(config["executor"]["executor_timeout_seconds"], 900)
         self.assertFalse(config["executor"]["fail_fast"])

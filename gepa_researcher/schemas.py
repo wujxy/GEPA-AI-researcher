@@ -28,12 +28,158 @@ class Candidate:
     merge_note: str = ""
     status: str = "generated"
     artifacts: dict[str, Any] = field(default_factory=dict)
+    target_files: list[str] = field(default_factory=list)
+    safety_class: str = ""
+    strategy: str = ""
+    expected_gain: float | None = None
+    admission_status: str = "pending"
+    admission_decision_id: str | None = None
 
     def __post_init__(self) -> None:
         if not self.parent_ids and self.parent_id:
             self.parent_ids = [self.parent_id]
         if self.parent_ids and not self.parent_id:
             self.parent_id = self.parent_ids[0]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class AdmissionDecision:
+    decision_id: str
+    candidate_id: str
+    round_id: int
+    admitted: bool
+    checks: dict[str, str]
+    failure_codes: list[str] = field(default_factory=list)
+    details: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class WorkspaceLease:
+    candidate_id: str
+    round_id: int
+    requested_parent_sha: str
+    actual_start_sha: str
+    branch_name: str
+    worktree_path: str
+    artifact_path: str
+    mode: str = "artifact_directory"
+    status: str = "ready"
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class ExecutionRecord:
+    execution_id: str
+    candidate_id: str
+    round_id: int
+    parent_candidate_id: str | None
+    requested_parent_sha: str
+    actual_start_sha: str
+    result_sha: str | None
+    branch_name: str
+    worktree_path: str
+    changed_files: list[str] = field(default_factory=list)
+    commit_count: int = 0
+    execution_mode: str = "implement_and_validate"
+    status: str = "created"
+    artifacts: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class ProvenanceReport:
+    execution_id: str
+    candidate_id: str
+    verified: bool
+    checks: dict[str, str]
+    failure_codes: list[str] = field(default_factory=list)
+    details: list[str] = field(default_factory=list)
+    result_sha: str | None = None
+    changed_files: list[str] = field(default_factory=list)
+    commit_count: int = 0
+    artifact_hashes: dict[str, str] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class AgentCallContext:
+    role: str
+    round_id: int
+    phase: str
+    candidate_id: str | None = None
+    execution_id: str | None = None
+    parent_candidate_id: str | None = None
+    candidate_ids: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class TokenUsage:
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_creation_input_tokens: int | None = None
+    cache_read_input_tokens: int | None = None
+    processed_tokens: int | None = None
+    available: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class AgentCallRecord:
+    call_id: str
+    context: AgentCallContext
+    status: str
+    started_at: str
+    finished_at: str
+    duration_ms: int
+    usage: TokenUsage
+    model: str | None = None
+    total_cost_usd: float | None = None
+    model_usage: dict[str, Any] = field(default_factory=dict)
+    session_id: str | None = None
+    error: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class RoundUsageSummary:
+    round_id: int
+    calls: int
+    unavailable_calls: int
+    by_role: dict[str, dict[str, Any]]
+    by_candidate: dict[str, dict[str, Any]]
+    totals: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class RunUsageSummary:
+    calls: int
+    unavailable_calls: int
+    by_role: dict[str, dict[str, Any]]
+    by_round: dict[str, dict[str, Any]]
+    by_candidate: dict[str, dict[str, Any]]
+    totals: dict[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

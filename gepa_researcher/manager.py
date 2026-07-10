@@ -30,6 +30,12 @@ class ResearchManager:
             "generation": {"batch_size": batch_size, "enable_merge": enable_merge},
             "gepa": {"frontier_policy": "pareto", "acceptance_policy": "minibatch_improves_then_pareto", "minibatch_size": minibatch, "parent_sampling": "pareto_win_weighted"},
             "executor": {"max_workers": min(batch_size, 3), "executor_timeout_seconds": 900, "fail_fast": False, "per_candidate_workspace": True},
+            "usage_tracking": {
+                "enabled": True,
+                "persist_raw_envelope": True,
+                "print_round_summary": True,
+                "print_run_summary": True,
+            },
             "judger": {"pass_threshold": pass_threshold},
             "task": {"name": name, "goal": goal, "data_files": data_files},
         }

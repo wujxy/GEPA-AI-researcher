@@ -3,14 +3,19 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import shutil
 import subprocess
 import threading
 import time
+import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from .schemas import AgentCallContext, AgentCallRecord
+from .usage import UsageTracker, normalize_usage
 
 
 class AgentError(RuntimeError):
@@ -21,6 +26,8 @@ class AgentError(RuntimeError):
 class AgentResult:
     text: str
     data: dict[str, Any]
+    envelope: dict[str, Any] | None = None
+    call_record: AgentCallRecord | None = None
 
 
 @dataclass
@@ -46,12 +53,14 @@ class ClaudeCodeClient:
         timeout_seconds: int = 600,
         extra_args: list[str] | None = None,
         heartbeat_seconds: int = 30,
+        usage_tracker: UsageTracker | None = None,
     ):
         self.command = command
         self.cwd = cwd
         self.timeout_seconds = timeout_seconds
         self.extra_args = extra_args or []
         self.heartbeat_seconds = heartbeat_seconds
+        self.usage_tracker = usage_tracker
 
     def ensure_available(self) -> CommandResolution:
         resolved = resolve_command(self.command)
@@ -63,24 +72,38 @@ class ClaudeCodeClient:
             )
         return resolved
 
-    def run_json(self, prompt: str, label: str = "agent") -> AgentResult:
+    def run_json(
+        self,
+        prompt: str,
+        label: str = "agent",
+        *,
+        call_context: AgentCallContext | None = None,
+        cwd: Path | None = None,
+        env: dict[str, str] | None = None,
+        extra_args: list[str] | None = None,
+    ) -> AgentResult:
         command = self.ensure_available()
-        cmd = [*command.argv, "-p", prompt, "--output-format", "text", *self.extra_args]
-        started_at = datetime.now()
+        args = _without_output_format([*self.extra_args, *(extra_args or [])])
+        cmd = [*command.argv, "-p", prompt, *args, "--output-format", "json"]
+        started_at = datetime.now(timezone.utc)
+        call_id = str(uuid.uuid4())
+        context = call_context or AgentCallContext(role=label, round_id=-1, phase="unspecified")
         print(
-            f"[{started_at.strftime('%Y-%m-%d %H:%M:%S')}] {label} Claude call started "
+            f"[{started_at.astimezone().strftime('%Y-%m-%d %H:%M:%S')}] {label} Claude call started "
             f"(timeout={self.timeout_seconds}s)",
             flush=True,
         )
         if command.argv != [self.command]:
-            print(f"[{started_at.strftime('%Y-%m-%d %H:%M:%S')}] resolved Claude command: {command.display}", flush=True)
+            print(f"[{started_at.astimezone().strftime('%Y-%m-%d %H:%M:%S')}] resolved Claude command: {command.display}", flush=True)
         proc = subprocess.Popen(
             cmd,
-            cwd=str(self.cwd) if self.cwd else None,
+            cwd=str(cwd or self.cwd) if (cwd or self.cwd) else None,
+            env={**os.environ, **(env or {})},
             stdin=subprocess.DEVNULL,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            start_new_session=True,
         )
         stdout_lines: list[str] = []
         stderr_lines: list[str] = []
@@ -103,19 +126,21 @@ class ClaudeCodeClient:
         while proc.poll() is None:
             now = time.monotonic()
             if now >= deadline:
-                proc.kill()
+                _terminate_process_group(proc)
                 stdout_thread.join(timeout=1)
                 stderr_thread.join(timeout=1)
-                raise AgentError(
+                error = (
                     f"Claude Code agent call timed out after {self.timeout_seconds}s.\n"
                     f"Command: {' '.join(cmd[:1])} -p <prompt>\n"
                     f"stdout so far:\n{''.join(stdout_lines).strip()}\n"
                     f"stderr so far:\n{''.join(stderr_lines).strip()}"
                 )
+                self._record_call(call_id, context, started_at, "timeout", None, error)
+                raise AgentError(error)
             if now >= next_heartbeat:
-                elapsed = (datetime.now() - started_at).total_seconds()
+                elapsed = (datetime.now(timezone.utc) - started_at).total_seconds()
                 print(
-                    f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+                    f"[{datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S')}] "
                     f"{label} Claude call still running ({elapsed:.1f}s, pid={proc.pid})",
                     flush=True,
                 )
@@ -128,23 +153,79 @@ class ClaudeCodeClient:
             proc.stdout.close()
         if proc.stderr:
             proc.stderr.close()
-        elapsed = (datetime.now() - started_at).total_seconds()
+        elapsed = (datetime.now(timezone.utc) - started_at).total_seconds()
         stdout = "".join(stdout_lines)
         stderr = "".join(stderr_lines)
         if proc.returncode != 0:
-            raise AgentError(
+            error = (
                 "Claude Code agent call failed.\n"
                 f"Command: {' '.join(cmd[:1])} -p <prompt>\n"
                 f"stdout:\n{stdout.strip()}\n"
                 f"stderr:\n{stderr.strip()}"
             )
+            envelope = _try_json_dict(stdout)
+            self._record_call(call_id, context, started_at, "failed", envelope, error)
+            raise AgentError(error)
         print(
-            f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+            f"[{datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S')}] "
             f"{label} Claude call finished ({elapsed:.1f}s)",
             flush=True,
         )
-        data = extract_json_object(stdout)
-        return AgentResult(text=stdout, data=data)
+        try:
+            outer = extract_json_object(stdout)
+            if isinstance(outer.get("result"), str):
+                envelope = outer
+                result_text = str(outer["result"])
+                data = extract_json_object(result_text)
+            else:
+                # Compatibility for fake CLIs and older wrappers that print the
+                # business JSON directly without a Claude result envelope.
+                envelope = {}
+                result_text = stdout
+                data = outer
+        except AgentError as exc:
+            envelope = _try_json_dict(stdout) or {}
+            self._record_call(call_id, context, started_at, "invalid_result", envelope, str(exc))
+            raise
+        record = self._record_call(call_id, context, started_at, "completed", envelope, None)
+        return AgentResult(text=result_text, data=data, envelope=envelope, call_record=record)
+
+    def _record_call(
+        self,
+        call_id: str,
+        context: AgentCallContext,
+        started_at: datetime,
+        status: str,
+        envelope: dict[str, Any] | None,
+        error: str | None,
+    ) -> AgentCallRecord:
+        finished_at = datetime.now(timezone.utc)
+        model_usage = dict((envelope or {}).get("modelUsage") or (envelope or {}).get("model_usage") or {})
+        model = (envelope or {}).get("model")
+        if model is None and len(model_usage) == 1:
+            model = next(iter(model_usage))
+        cost = (envelope or {}).get("total_cost_usd")
+        try:
+            total_cost = float(cost) if cost is not None else None
+        except (TypeError, ValueError):
+            total_cost = None
+        record = AgentCallRecord(
+            call_id=call_id,
+            context=context,
+            status=status,
+            started_at=started_at.isoformat(),
+            finished_at=finished_at.isoformat(),
+            duration_ms=max(0, int((finished_at - started_at).total_seconds() * 1000)),
+            usage=normalize_usage(envelope),
+            model=str(model) if model is not None else None,
+            total_cost_usd=total_cost,
+            model_usage=model_usage,
+            session_id=(envelope or {}).get("session_id"),
+            error=error,
+        )
+        if self.usage_tracker is not None:
+            self.usage_tracker.record(record, envelope)
+        return record
 
 
 def _collect_stream(stream, buffer: list[str], label: str | None) -> None:
@@ -154,6 +235,40 @@ def _collect_stream(stream, buffer: list[str], label: str | None) -> None:
         buffer.append(line)
         if label:
             print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {label}: {line.rstrip()}", flush=True)
+
+
+def _terminate_process_group(proc: subprocess.Popen) -> None:
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+        proc.wait(timeout=2)
+    except (ProcessLookupError, subprocess.TimeoutExpired):
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def _without_output_format(args: list[str]) -> list[str]:
+    result: list[str] = []
+    skip_next = False
+    for item in args:
+        if skip_next:
+            skip_next = False
+            continue
+        if item == "--output-format":
+            skip_next = True
+            continue
+        if item.startswith("--output-format="):
+            continue
+        result.append(item)
+    return result
+
+
+def _try_json_dict(text: str) -> dict[str, Any] | None:
+    try:
+        return extract_json_object(text)
+    except AgentError:
+        return None
 
 
 def resolve_command(command: str) -> CommandResolution | None:
@@ -166,19 +281,15 @@ def resolve_command(command: str) -> CommandResolution | None:
     if command != "claude":
         return None
 
-    candidates: list[Path] = []
     nvm_dir = os.environ.get("NVM_DIR")
     nvm_roots: list[Path] = []
     if nvm_dir:
         nvm_roots.append(Path(nvm_dir).expanduser() / "versions" / "node")
     nvm_roots.append(Path.home() / ".nvm" / "versions" / "node")
     for node_versions in nvm_roots:
-        candidates.extend(sorted(node_versions.glob("*/bin/claude"), reverse=True))
-
-    for candidate in candidates:
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return CommandResolution([str(candidate)])
-    for node_versions in nvm_roots:
+        for candidate in sorted(node_versions.glob("*/bin/claude"), reverse=True):
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return CommandResolution([str(candidate)])
         for wrapper in sorted(
             node_versions.glob("*/lib/node_modules/@anthropic-ai/claude-code/cli-wrapper.cjs"),
             reverse=True,

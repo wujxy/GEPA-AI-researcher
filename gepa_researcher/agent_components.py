@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import inspect
 from pathlib import Path
 from typing import Any
 
 from .agent_client import ClaudeCodeClient
 from .context_views import candidate_for_agent, evidence_access_policy, state_for_agent, trace_for_agent
-from .schemas import Candidate, CandidateBatch, Decision, Judgment, LoopState, SampleTrace, Trace
+from .schemas import AgentCallContext, Candidate, CandidateBatch, Decision, Judgment, LoopState, SampleTrace, Trace
 
 
 def format_runtime(config: dict[str, Any]) -> str:
@@ -114,6 +115,28 @@ def _candidate_prompt_text(data: dict[str, Any]) -> str:
     )
 
 
+def _run_agent_json(client, prompt: str, label: str, context: AgentCallContext, **kwargs):
+    parameters = inspect.signature(client.run_json).parameters
+    if "call_context" in parameters:
+        return client.run_json(prompt, label=label, call_context=context, **kwargs)
+    return client.run_json(prompt, label=label)
+
+
+def _expected_gain(data: dict[str, Any]) -> float | None:
+    value = data.get("expected_gain")
+    if value is None:
+        value = data.get("expected_gain_ms_evt")
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _call_artifact(result) -> dict[str, Any]:
+    record = getattr(result, "call_record", None)
+    return {"agent_call_id": record.call_id} if record is not None else {}
+
+
 class AgentProposer:
     def __init__(self, client: ClaudeCodeClient):
         self.client = client
@@ -161,13 +184,27 @@ Required JSON schema:
   "expected_improvement": "which configured metric or objective should improve",
   "risk": "main risk or failure mode",
   "strategy": "short name for the approach",
+  "target_files": ["file to change"],
+  "safety_class": "task-defined safety class",
+  "candidate_class": "safe-source|exploratory-source|build-tuning|algorithmic|external-compute",
+  "expected_gain": 0.0,
   "analysis_plan": ["step 1", "step 2"],
   "executor_contract": {{"instructions": "what the executor must do", "expected_artifacts": ["artifact"], "success_criteria": ["criterion"]}},
   "expected_artifacts": ["artifact"],
   "mutation_note": "what prior feedback this candidate responds to"
 }}
 """
-        result = self.client.run_json(prompt, label="proposer")
+        result = _run_agent_json(
+            self.client,
+            prompt,
+            "proposer",
+            AgentCallContext(
+                role="proposer",
+                round_id=state.round_id,
+                phase=str(config.get("_agent_phase", "mutation")),
+                candidate_ids=[f"cand_{state.round_id:03d}"],
+            ),
+        )
         data = result.data
         candidate_id = f"cand_{state.round_id:03d}"
         prompt_text = _candidate_prompt_text(data)
@@ -187,7 +224,11 @@ Required JSON schema:
             executor_contract=dict(data.get("executor_contract", {})),
             expected_artifacts=list(data.get("expected_artifacts", [])),
             mutation_note=str(data.get("mutation_note", "")),
-            artifacts={"agent_raw": result.text, "eval_phase": config.get("_eval_phase", "pareto"), "sample_ids": config.get("_selected_sample_ids", []), **data},
+            target_files=list(map(str, data.get("target_files", []))),
+            safety_class=str(data.get("safety_class", "")),
+            strategy=str(data.get("strategy", "")),
+            expected_gain=_expected_gain(data),
+            artifacts={"agent_raw": result.text, "eval_phase": config.get("_eval_phase", "pareto"), "sample_ids": config.get("_selected_sample_ids", []), **_call_artifact(result), **data},
         )
 
     def propose_batch(self, state: LoopState, config: dict[str, Any]) -> CandidateBatch:
@@ -236,6 +277,10 @@ Required JSON schema:
       "expected_improvement": "which configured metric or objective should improve",
       "risk": "main risk or failure mode",
       "strategy": "short name for the approach",
+      "target_files": ["file to change"],
+      "safety_class": "task-defined safety class",
+      "candidate_class": "safe-source|exploratory-source|build-tuning|algorithmic|external-compute",
+      "expected_gain": 0.0,
       "analysis_plan": ["step 1", "step 2"],
       "executor_contract": {{"instructions": "what the executor must do", "expected_artifacts": ["artifact"], "success_criteria": ["criterion"]}},
       "expected_artifacts": ["artifact"],
@@ -244,7 +289,18 @@ Required JSON schema:
   ]
 }}
 """
-        result = self.client.run_json(prompt, label="proposer")
+        planned_ids = [f"cand_{state.round_id:03d}_{index:03d}" for index in range(batch_size)]
+        result = _run_agent_json(
+            self.client,
+            prompt,
+            "proposer",
+            AgentCallContext(
+                role="proposer",
+                round_id=state.round_id,
+                phase=str(config.get("_agent_phase", "mutation")),
+                candidate_ids=planned_ids,
+            ),
+        )
         items = list(result.data.get("candidates", []))[:batch_size]
         parent_ids = list((config.get("_gepa_context") or {}).get("pareto_frontier", {}).get("parent_ids", []))
         candidates = []
@@ -268,7 +324,11 @@ Required JSON schema:
                     executor_contract=dict(data.get("executor_contract", {})),
                     expected_artifacts=list(data.get("expected_artifacts", [])),
                     mutation_note=str(data.get("mutation_note", "")),
-                    artifacts={"agent_raw": result.text, "eval_phase": config.get("_eval_phase", "pareto"), "sample_ids": config.get("_selected_sample_ids", []), **data},
+                    target_files=list(map(str, data.get("target_files", []))),
+                    safety_class=str(data.get("safety_class", "")),
+                    strategy=str(data.get("strategy", "")),
+                    expected_gain=_expected_gain(data),
+                    artifacts={"agent_raw": result.text, "eval_phase": config.get("_eval_phase", "pareto"), "sample_ids": config.get("_selected_sample_ids", []), **_call_artifact(result), **data},
                 )
             )
         return CandidateBatch(round_id=state.round_id, candidates=candidates)
@@ -285,6 +345,8 @@ class AgentExecutor:
             or self.run_dir / "agent_work" / f"round_{candidate.round_id:03d}" / candidate.candidate_id
         )
         round_dir.mkdir(parents=True, exist_ok=True)
+        repo_dir = Path(config.get("_candidate_repo") or getattr(self.client, "cwd", None) or round_dir)
+        execution_mode = str(config.get("_execution_mode", "implement_and_validate"))
         prompt = f"""
 You are the EXECUTOR agent in a bounded GEPA-style research loop.
 
@@ -304,6 +366,7 @@ Task goal:
 {format_prior_context(config)}
 
 Evaluation phase: {config.get("_eval_phase", "pareto")}
+Execution mode: {execution_mode}
 Selected sample ids: {config.get("_selected_sample_ids", [])}
 
 Candidate decision facts:
@@ -313,6 +376,9 @@ Candidate decision facts:
 
 Working directory for any scripts/artifacts you create:
 {round_dir}
+
+Candidate source repository:
+{repo_dir}
 
 Constraints:
 - Do not ask the user for help.
@@ -324,6 +390,9 @@ Constraints:
   and compare against available baselines when useful for this candidate and allowed
   by the runtime policy.
 - Save any scripts or generated artifacts under the working directory above.
+- In implement_and_validate mode, edit only admitted target_files and create no more than the configured commit budget.
+- In evaluate_only mode, do not edit source files, create commits, switch branches, or change HEAD.
+- Never run git checkout, git switch, or git worktree; the orchestrator owns Git lifecycle.
 - When visual evidence is feasible, follow the candidate's visual evidence plan.
   Save plot file(s) under the working directory and list them in artifact_paths.
 - Return only a JSON object, no prose outside JSON.
@@ -340,7 +409,21 @@ Required JSON schema:
 }}
 """
         client = self._client_for_config(config)
-        result = client.run_json(prompt, label="executor")
+        result = _run_agent_json(
+            client,
+            prompt,
+            "executor",
+            AgentCallContext(
+                role="executor",
+                round_id=candidate.round_id,
+                phase=str(config.get("_eval_phase", "pareto")),
+                candidate_id=candidate.candidate_id,
+                execution_id=config.get("_execution_id"),
+                parent_candidate_id=candidate.parent_id,
+            ),
+            cwd=repo_dir,
+            env=dict(config.get("_candidate_env") or {}),
+        )
         data = result.data
         trace = SampleTrace(
             sample_id=str((config.get("_selected_sample_ids") or ["task_execution"])[0]),
@@ -349,7 +432,7 @@ Required JSON schema:
             expected="unknown",
             logs=str(data.get("summary", "")),
             error="; ".join(data.get("errors", [])) if data.get("errors") else None,
-            artifacts={"agent_raw": result.text, "eval_phase": config.get("_eval_phase", "pareto"), "sample_ids": config.get("_selected_sample_ids", []), **data},
+            artifacts={"agent_raw": result.text, "eval_phase": config.get("_eval_phase", "pareto"), "sample_ids": config.get("_selected_sample_ids", []), "execution_mode": execution_mode, **_call_artifact(result), **data},
         )
         return Trace(candidate_id=candidate.candidate_id, round_id=candidate.round_id, samples=[trace])
 
@@ -363,6 +446,7 @@ Required JSON schema:
             timeout_seconds=int(timeout),
             extra_args=list(self.client.extra_args),
             heartbeat_seconds=self.client.heartbeat_seconds,
+            usage_tracker=self.client.usage_tracker,
         )
 
 
@@ -416,7 +500,19 @@ Required JSON schema:
   "best_interpretation": "brief interpretation"
 }}
 """
-        result = self.client.run_json(prompt, label="judger")
+        result = _run_agent_json(
+            self.client,
+            prompt,
+            "judger",
+            AgentCallContext(
+                role="judger",
+                round_id=candidate.round_id,
+                phase=str(config.get("_eval_phase", "pareto")),
+                candidate_id=candidate.candidate_id,
+                execution_id=config.get("_execution_id"),
+                parent_candidate_id=candidate.parent_id,
+            ),
+        )
         data = result.data
         return Judgment(
             candidate_id=candidate.candidate_id,
@@ -427,7 +523,7 @@ Required JSON schema:
             failure_categories=list(data.get("failure_categories", [])),
             actionable_feedback=list(data.get("actionable_feedback", [])),
             confidence=str(data.get("confidence", "medium")),
-            artifacts={"agent_raw": result.text, "eval_phase": config.get("_eval_phase", "pareto"), "sample_ids": config.get("_selected_sample_ids", []), **data},
+            artifacts={"agent_raw": result.text, "eval_phase": config.get("_eval_phase", "pareto"), "sample_ids": config.get("_selected_sample_ids", []), **_call_artifact(result), **data},
         )
 
 
@@ -470,7 +566,18 @@ Required JSON schema:
   "next_focus": "what the next proposer should focus on"
 }}
 """
-        result = self.client.run_json(prompt, label="gater")
+        result = _run_agent_json(
+            self.client,
+            prompt,
+            "gater",
+            AgentCallContext(
+                role="gater",
+                round_id=candidate.round_id,
+                phase="gate",
+                candidate_id=candidate.candidate_id,
+                parent_candidate_id=candidate.parent_id,
+            ),
+        )
         data = result.data
         decision = str(data.get("decision", "reject"))
         if decision not in {"keep", "reject", "iterate", "stop"}:

@@ -5,7 +5,7 @@
   },
   "agent": {
     "command": "claude",
-    "cwd": "/home/yoru/AI-sci/GEPA-AI-researcher",
+    "cwd": "/datafs/users/wujxy/agent-sci/omilrec_opt/GEPA-AI-researcher-p0-dev",
     "timeout_seconds": 900,
     "extra_args": [
       "--bare",
@@ -89,6 +89,6 @@
     "skills": []
   },
   "initialization": {
-    "seed_count": 1
+    "seed_count": 3
   }
 }

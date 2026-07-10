@@ -68,4 +68,14 @@ Useful config additions:
 - `gepa.feedback_sample_ids` and `gepa.pareto_sample_ids`: explicit split; otherwise a deterministic split is used.
 - `gepa.minibatch_size`: number of `D_feedback` samples per mutation round.
 - `gepa.parent_sampling`: defaults to `pareto_win_weighted`.
+- workspace.mode=git_worktree creates an orchestrator-owned Git worktree per
+  candidate; parallel source-editing tasks fail closed without it.
+- candidate_policy defines deterministic proposal admission rules such as
+  allowed targets, frozen paths, safety classes, strategies, and commit budgets.
+- execution.lifecycle=materialize_once implements a candidate once and uses
+  evaluate_only for later feedback/Pareto evaluations.
+- usage_tracking records Claude JSON-envelope input/output/cache tokens,
+  reported cost, and per-round/per-candidate summaries under usage/.
 
+See docs/p0_isolation_admission_provenance_usage.md and
+examples/omilrec/config.p0.template.json for the Git execution contract.

@@ -17,6 +17,10 @@ ARTIFACT_KEYS_FOR_CONTEXT = {
     "errors",
     "executor_wall_seconds",
     "best_interpretation",
+    "execution_mode",
+    "execution_record",
+    "provenance",
+    "agent_call_id",
 }
 
 
@@ -44,7 +48,11 @@ def candidate_for_agent(candidate: Candidate, evidence_refs: list[str] | None = 
         "rationale": candidate.rationale,
         "expected_improvement": candidate.expected_improvement,
         "risk": candidate.risk,
-        "strategy": artifacts.get("strategy"),
+        "strategy": candidate.strategy or artifacts.get("strategy"),
+        "target_files": list(candidate.target_files),
+        "safety_class": candidate.safety_class,
+        "expected_gain": candidate.expected_gain,
+        "admission_status": candidate.admission_status,
         "analysis_plan": artifacts.get("analysis_plan", []),
         "executor_contract": dict(candidate.executor_contract),
         "expected_artifacts": list(candidate.expected_artifacts),

@@ -4,9 +4,23 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from time import perf_counter
 from typing import Any
+import uuid
 
 from .io_utils import append_jsonl, write_json
-from .schemas import Candidate, CandidateBatch, Judgment, JudgmentBatch, SampleTrace, Trace, TraceBatch
+from .provenance import ProvenanceVerifier
+from .registry import ExecutionRegistry
+from .schemas import (
+    Candidate,
+    CandidateBatch,
+    ExecutionRecord,
+    Judgment,
+    JudgmentBatch,
+    SampleTrace,
+    Trace,
+    TraceBatch,
+    WorkspaceLease,
+)
+from .workspace import WorkspaceManager
 
 
 class ExecutorAdapter:
@@ -16,9 +30,19 @@ class ExecutorAdapter:
     HPC. This adapter only preserves workspace isolation and failure archival.
     """
 
-    def __init__(self, executor: Any, run_dir: Path):
+    def __init__(
+        self,
+        executor: Any,
+        run_dir: Path,
+        workspace_manager: WorkspaceManager | None = None,
+        registry: ExecutionRegistry | None = None,
+        provenance: ProvenanceVerifier | None = None,
+    ):
         self.executor = executor
         self.run_dir = run_dir
+        self.workspace_manager = workspace_manager
+        self.registry = registry or ExecutionRegistry(run_dir)
+        self.provenance = provenance or ProvenanceVerifier()
 
     def run_many(self, candidates: list[Candidate], round_id: int, config: dict[str, Any]) -> TraceBatch:
         executor_config = config.get("executor", {})
@@ -28,9 +52,27 @@ class ExecutorAdapter:
         failed_ids: list[str] = []
 
         batch = CandidateBatch(round_id=round_id, candidates=candidates)
+        workspace_mode = str(config.get("workspace", {}).get("mode", "artifact_directory"))
+        if (
+            max_workers > 1
+            and config.get("task", {}).get("repo_paths")
+            and workspace_mode != "git_worktree"
+        ):
+            raise RuntimeError("parallel source execution requires workspace.mode=git_worktree")
+        self.workspace_manager = self.workspace_manager or WorkspaceManager(self.run_dir, config)
+        prepared: dict[str, tuple[WorkspaceLease, ExecutionRecord, bool]] = {}
+        preparation_failures: dict[str, Trace] = {}
+        for candidate in candidates:
+            try:
+                prepared[candidate.candidate_id] = self._prepare_execution(candidate, config)
+            except Exception as exc:
+                preparation_failures[candidate.candidate_id] = self._failure_trace(candidate, exc)
+
         if max_workers <= 1 or len(candidates) <= 1:
             for candidate in candidates:
-                trace = self._run_one_safely(candidate, config)
+                trace = preparation_failures.get(candidate.candidate_id)
+                if trace is None:
+                    trace = self._run_one_safely(candidate, config, prepared[candidate.candidate_id])
                 traces_by_id[candidate.candidate_id] = trace
                 if self._trace_failed(trace):
                     failed_ids.append(candidate.candidate_id)
@@ -39,7 +81,14 @@ class ExecutorAdapter:
             return self._finish_batch(batch, traces_by_id, failed_ids)
 
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futures = {pool.submit(self._run_one_safely, candidate, config): candidate for candidate in candidates}
+            for candidate_id, trace in preparation_failures.items():
+                traces_by_id[candidate_id] = trace
+                failed_ids.append(candidate_id)
+            futures = {
+                pool.submit(self._run_one_safely, candidate, config, prepared[candidate.candidate_id]): candidate
+                for candidate in candidates
+                if candidate.candidate_id in prepared
+            }
             for future in as_completed(futures):
                 candidate = futures[future]
                 trace = future.result()
@@ -50,15 +99,35 @@ class ExecutorAdapter:
                     break
         return self._finish_batch(batch, traces_by_id, failed_ids)
 
-    def _run_one_safely(self, candidate: Candidate, config: dict[str, Any]) -> Trace:
+    def _run_one_safely(
+        self,
+        candidate: Candidate,
+        config: dict[str, Any],
+        prepared: tuple[WorkspaceLease, ExecutionRecord, bool],
+    ) -> Trace:
         try:
-            return self._execute_one(candidate, config)
+            return self._execute_one(candidate, config, prepared)
         except Exception as exc:
             return self._failure_trace(candidate, exc)
 
-    def _execute_one(self, candidate: Candidate, config: dict[str, Any]) -> Trace:
+    def _execute_one(
+        self,
+        candidate: Candidate,
+        config: dict[str, Any],
+        prepared: tuple[WorkspaceLease, ExecutionRecord, bool],
+    ) -> Trace:
+        lease, record, canonical_execution = prepared
         candidate_config = dict(config)
-        candidate_config["_candidate_workspace"] = str(self._workspace(candidate))
+        candidate_config["_candidate_workspace"] = lease.artifact_path
+        candidate_config["_candidate_repo"] = lease.worktree_path
+        candidate_config["_execution_id"] = record.execution_id
+        candidate_config["_execution_mode"] = record.execution_mode
+        candidate_config["_candidate_env"] = {
+            "GEPA_CANDIDATE_ID": candidate.candidate_id,
+            "GEPA_EXECUTION_ID": record.execution_id,
+            "GEPA_PARENT_SHA": record.requested_parent_sha,
+            "GEPA_WORKTREE": lease.worktree_path,
+        }
         candidate_config["_executor_timeout_seconds"] = int(
             config.get("executor", {}).get(
                 "executor_timeout_seconds",
@@ -69,8 +138,80 @@ class ExecutorAdapter:
         trace = self.executor.execute(candidate, candidate_config)
         if trace.samples:
             trace.samples[0].artifacts.setdefault("executor_wall_seconds", round(perf_counter() - start, 4))
-        self._persist_trace(trace)
+        report = self.provenance.verify(candidate, lease, record, candidate_config)
+        if canonical_execution:
+            self.registry.record_execution(record)
+        self.registry.record_provenance(report)
+        if trace.samples:
+            trace.samples[0].artifacts.update(
+                {
+                    "workspace_lease": lease.to_dict(),
+                    "execution_record": record.to_dict(),
+                    "provenance": report.to_dict(),
+                }
+            )
+            if not report.verified:
+                trace.samples[0].error = "provenance verification failed: " + ", ".join(report.failure_codes)
+                trace.samples[0].artifacts["failure_category"] = "provenance_failed"
         return trace
+
+    def _prepare_execution(
+        self,
+        candidate: Candidate,
+        config: dict[str, Any],
+    ) -> tuple[WorkspaceLease, ExecutionRecord, bool]:
+        existing = self.registry.execution(candidate.candidate_id)
+        existing_workspace = self.registry.workspace(candidate.candidate_id)
+        lifecycle = str(config.get("execution", {}).get("lifecycle", "stateless"))
+        if lifecycle == "materialize_once" and existing and existing_workspace:
+            result_sha = str(existing.get("result_sha") or "")
+            if not result_sha:
+                raise RuntimeError(f"candidate {candidate.candidate_id} has no verified result SHA")
+            lease = WorkspaceLease(**existing_workspace)
+            eval_lease = WorkspaceLease(
+                **{
+                    **lease.to_dict(),
+                    "requested_parent_sha": result_sha,
+                    "actual_start_sha": result_sha,
+                }
+            )
+            record = ExecutionRecord(
+                execution_id=str(uuid.uuid4()),
+                candidate_id=candidate.candidate_id,
+                round_id=candidate.round_id,
+                parent_candidate_id=candidate.parent_id,
+                requested_parent_sha=result_sha,
+                actual_start_sha=result_sha,
+                result_sha=result_sha,
+                branch_name=lease.branch_name,
+                worktree_path=lease.worktree_path,
+                execution_mode="evaluate_only",
+                status="evaluating",
+            )
+            return eval_lease, record, False
+
+        parent_sha = ""
+        if candidate.parent_id:
+            parent_sha = self.registry.verified_result_sha(candidate.parent_id, require_accepted=True) or ""
+            if not parent_sha and str(config.get("workspace", {}).get("mode")) == "git_worktree":
+                raise RuntimeError(f"parent {candidate.parent_id} has no accepted verified result SHA")
+        lease = self.workspace_manager.prepare(candidate, parent_sha)
+        self.registry.record_workspace(lease)
+        record = ExecutionRecord(
+            execution_id=str(uuid.uuid4()),
+            candidate_id=candidate.candidate_id,
+            round_id=candidate.round_id,
+            parent_candidate_id=candidate.parent_id,
+            requested_parent_sha=lease.requested_parent_sha,
+            actual_start_sha=lease.actual_start_sha,
+            result_sha=None,
+            branch_name=lease.branch_name,
+            worktree_path=lease.worktree_path,
+            execution_mode="implement_and_validate",
+            status="executing",
+        )
+        self.registry.record_execution(record)
+        return lease, record, True
 
     def _finish_batch(
         self,
@@ -83,6 +224,8 @@ class ExecutorAdapter:
             for candidate in batch.candidates
             if candidate.candidate_id in traces_by_id
         ]
+        for trace in traces:
+            self._persist_trace(trace)
         return TraceBatch(round_id=batch.round_id, traces=traces, failed_candidate_ids=failed_ids)
 
     def _workspace(self, candidate: Candidate) -> Path:
@@ -111,7 +254,6 @@ class ExecutorAdapter:
                 )
             ],
         )
-        self._persist_trace(trace)
         return trace
 
     def _trace_failed(self, trace: Trace) -> bool:
@@ -147,7 +289,26 @@ class JudgerAdapter:
                         )
                     ],
                 )
-            judgments.append(self.judger.judge(candidate, trace, config))
+            provenance_failed = any(
+                sample.artifacts.get("failure_category") == "provenance_failed"
+                for sample in trace.samples
+            )
+            if provenance_failed:
+                judgments.append(
+                    Judgment(
+                        candidate_id=candidate.candidate_id,
+                        round_id=candidate.round_id,
+                        score=0.0,
+                        passed=False,
+                        per_sample_scores=[],
+                        failure_categories=["provenance_failed"],
+                        actionable_feedback=["Fix workspace/commit provenance before judging this candidate."],
+                        confidence="high",
+                        artifacts={"deterministic": True},
+                    )
+                )
+            else:
+                judgments.append(self.judger.judge(candidate, trace, config))
 
         best = max(judgments, key=lambda judgment: judgment.score, default=None)
         summary = {

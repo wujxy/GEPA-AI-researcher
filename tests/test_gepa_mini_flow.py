@@ -262,7 +262,7 @@ class GEPAMiniFlowTest(unittest.TestCase):
 
     def test_orchestrator_writes_gepa_artifacts_and_parent_ids(self):
         from gepa_researcher.orchestrator import ResearchOrchestrator
-        from _fakes import fake_components, make_generic_config
+        from tests._fakes import fake_components, make_generic_config
 
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp) / "run"
