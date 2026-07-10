@@ -35,6 +35,7 @@ from .registry import ExecutionRegistry
 from .runtime import config_for_eval, parent_trace_artifacts, recent_trace_summaries, resolve_dataset_split, select_feedback_minibatch
 from .schemas import Candidate, CandidateBatch, EvaluationBatch, GateDecision, GenerationDecision, Judgment, JudgmentBatch, LoopState, ParetoFrontier, ScoreMatrix, Trace
 from .score_matrix import ScoreMatrixBuilder
+from .store import RunStore
 from .usage import UsageTracker, format_round_usage, format_run_usage
 from .workspace import WorkspaceManager
 
@@ -45,6 +46,7 @@ class ResearchOrchestrator:
         self.config_path = config_path
         self.run_dir = self._resolve_run_dir(config, config_path)
         self.usage_tracker = UsageTracker(self.run_dir, config.get("usage_tracking", {}))
+        self.store = RunStore(self.run_dir)  # ✅ 新增：统一存储管理
         self.registry = ExecutionRegistry(self.run_dir)
         self.workspace_manager = WorkspaceManager(self.run_dir, config)
         self.provenance = ProvenanceVerifier()
@@ -64,11 +66,12 @@ class ResearchOrchestrator:
     def run(self) -> LoopState:
         controller_snapshot = self.workspace_manager.controller_snapshot()
         self._assert_run_dir_reusable()
-        state = self._load_or_initialize_state()
+        state = self.store.load_or_create_state(self.config["task"]["name"], self.config.get("resume", False))
         self.run_dir.mkdir(parents=True, exist_ok=True)
-        write_json(self.run_dir / "config.snapshot.json", self.config)
-        write_json(self.run_dir / "dataset_split.json", self.dataset_split.to_dict())
-        write_json(self.run_dir / "prior_context.json", self.prior_context)
+        # ✅ 使用 RunStore 保存配置和运行时数据
+        self.store.save_config(self.config)
+        self.store.save_dataset_split(self.dataset_split.to_dict())
+        self.store.save_prior_context(self.prior_context)
         max_rounds = int(self.config["budget"]["max_rounds"])
         self._log_block(format_run_header(
             state.task_name,
@@ -89,7 +92,7 @@ class ResearchOrchestrator:
             self._log(f"Round {round_id + 1}/{max_rounds} started")
             decision = self.run_generation(round_id, state)
             self._update_state_from_generation(state, decision)
-            write_json(self.run_dir / "state.json", state.to_dict())
+            self.store.save_state(state)  # ✅ 使用 RunStore 保存状态
             self._log(f"Round {round_id + 1}/{max_rounds} persisted")
             self.workspace_manager.assert_controller_unchanged(round_controller_snapshot)
             if self.config.get("usage_tracking", {}).get("print_round_summary", True):
@@ -158,11 +161,6 @@ class ResearchOrchestrator:
             "or test components."
         )
 
-    def _load_or_initialize_state(self) -> LoopState:
-        state_path = self.run_dir / "state.json"
-        if state_path.exists() and self.config.get("resume", False):
-            return LoopState.from_dict(read_json(state_path))
-        return LoopState(task_name=self.config["task"]["name"])
 
     def _initialize_pool_if_needed(self, state: LoopState) -> None:
         pool = CandidatePool.load(self.run_dir)
@@ -205,7 +203,7 @@ class ResearchOrchestrator:
             candidate.executor_contract.setdefault("instructions", "Execute this seed candidate on D_pareto.")
         batch.round_id = -1
         admissions, admitted_seeds = self._admit_candidates(batch.candidates, pool)
-        self._persist_candidate_batch(batch)
+        self.store.save_candidate_batch(batch)  # ✅ 使用 RunStore
         self._persist_admission_decisions(-1, admissions)
         self._log_block(format_admission_summary(admissions))
         self._log_block(format_phase_header(-1, 0, "initialization proposer"))
@@ -215,7 +213,7 @@ class ResearchOrchestrator:
         if not admitted_seeds:
             raise RuntimeError("all seed candidates were rejected by the admission gate")
         trace_batch, judgment_batch = self._evaluate_candidates(admitted_seeds, -1, "pareto", self.dataset_split.pareto_ids, max_rounds=0)
-        self._persist_judgment_batch(judgment_batch)
+        self.store.save_judgment_batch(judgment_batch)  # ✅ 使用 RunStore
         matrix = ScoreMatrixBuilder.from_batch(judgment_batch, {candidate.candidate_id for candidate in admitted_seeds})
         ScoreMatrixBuilder.persist(matrix, matrix_path)
         for candidate in admitted_seeds:
@@ -287,7 +285,7 @@ class ResearchOrchestrator:
         self._write_live_artifact(round_id, "candidate_batch", candidate_batch.to_dict())
         self._write_live_artifact(round_id, "admission_decisions", {"decisions": [item.to_dict() for item in admissions]})
         self._persist_candidate_batch(candidate_batch)
-        self._persist_admission_decisions(round_id, admissions)
+        self.store.save_admission_decisions(round_id, admissions)  # ✅ 使用 RunStore
         self._log_block(format_admission_summary(admissions))
         self._log(f"proposer mutation finished: {len(candidate_batch.candidates)} candidate(s)")
         self._log_block(format_candidate_list(candidate_batch.candidates))
@@ -439,7 +437,7 @@ class ResearchOrchestrator:
         judgment_batch.artifacts.update({"phase": phase, "sample_ids": list(sample_ids)})
         for judgment in judgment_batch.judgments:
             self._log_block(format_judgment_summary(judgment, phase))
-        self._persist_evaluation_batch(EvaluationBatch(
+        self._persist_evaluation_batch(EvaluationBatch(  # 保留 evaluate_batch 的包装，内部使用 RunStore
             round_id=round_id,
             phase=phase,  # type: ignore[arg-type]
             candidate_ids=[candidate.candidate_id for candidate in candidates],
