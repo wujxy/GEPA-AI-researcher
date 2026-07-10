@@ -142,6 +142,46 @@ class AgentComponentsTest(unittest.TestCase):
         self.assertIn("Propose exactly 10 candidate", prompt)
         self.assertIn('"candidates"', prompt)
 
+    def test_agent_proposer_batch_prompt_includes_candidate_policy_targets(self):
+        client = CapturingClient(
+            {
+                "candidates": [
+                    {
+                        "hypothesis": "hypothesis",
+                        "scope": "task_system",
+                        "proposed_change": "change",
+                        "rationale": "reason",
+                        "expected_improvement": "better primary metric",
+                        "risk": "risk",
+                        "strategy": "safe-pattern #1",
+                        "target_files": ["OMILRECV2/src/RecHelper.cc"],
+                        "safety_class": "safe",
+                        "analysis_plan": ["execute"],
+                    }
+                ]
+            }
+        )
+        config = {
+            "generation": {"batch_size": 1},
+            "workspace": {"baseline_ref": "Br1.0.1"},
+            "task": {"goal": "optimize task", "data_files": ["data.csv"]},
+            "runtime": {"python_command": "python"},
+            "evidence": {},
+            "candidate_policy": {
+                "known_target_files": ["OMILRECV2/src/RecHelper.cc", "OMILRECV2/src/RecHelper.h"],
+                "allowed_strategies": ["safe-pattern #1"],
+                "allowed_safety_classes": ["safe"],
+            },
+        }
+
+        AgentProposer(client).propose_batch(LoopState(task_name="task"), config)
+
+        prompt = client.prompts[0][1]
+        self.assertIn("Candidate policy", prompt)
+        self.assertIn("Source baseline/ref: Br1.0.1", prompt)
+        self.assertIn("OMILRECV2/src/RecHelper.cc", prompt)
+        self.assertIn("safe-pattern #1", prompt)
+
     def test_agent_proposer_batch_prompt_includes_recent_traces_and_dataset_split(self):
         client = CapturingClient(
             {

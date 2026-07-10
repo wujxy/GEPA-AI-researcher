@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .schemas import Candidate, DatasetSplit, GateDecision, GenerationDecision, Judgment, LoopState, ParetoFrontier, Trace
+from .schemas import AdmissionDecision, Candidate, DatasetSplit, GateDecision, GenerationDecision, Judgment, LoopState, ParetoFrontier, Trace
 
 
 def _format_value(value: Any) -> str:
@@ -120,6 +120,15 @@ def format_proposal_summary(
     if candidate.merge_note:
         lines.append(f"  merge: {candidate.merge_note}")
     lines.append(f"  executor: {instruction}")
+    return "\n".join(lines)
+
+
+def format_admission_summary(decisions: list[AdmissionDecision]) -> str:
+    lines = ["Admission Gate", f"  admitted: {_join_ids([item.candidate_id for item in decisions if item.admitted])}"]
+    rejected = [item for item in decisions if not item.admitted]
+    lines.append(f"  rejected: {_join_ids([item.candidate_id for item in rejected])}")
+    for decision in rejected:
+        lines.append(f"  reason[{decision.candidate_id}]: {decision.failure_codes} details={decision.details}")
     return "\n".join(lines)
 
 

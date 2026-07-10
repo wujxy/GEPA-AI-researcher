@@ -107,8 +107,60 @@ class AdmissionGateTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             repo, baseline = _make_repo(Path(tmp))
             candidate = _candidate()
+            candidate.strategy = "safe-pattern #1 (pure code motion)"
             config = {
                 "workspace": {"repo_path": str(repo), "baseline_ref": baseline},
+                "candidate_policy": {
+                    "allowed_target_globs": ["src/**/*.cc"],
+                    "frozen_globs": [],
+                    "allowed_safety_classes": ["safe"],
+                    "allowed_strategies": ["safe-pattern #1"],
+                },
+            }
+            decision = CandidateAdmissionGate().evaluate(
+                candidate,
+                config,
+                accepted_parent_ids=set(),
+                batch_candidate_ids={candidate.candidate_id},
+            )
+            self.assertTrue(decision.admitted, decision.to_dict())
+
+    def test_accepts_strategy_case_and_spacing_variant(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, baseline = _make_repo(Path(tmp))
+            candidate = _candidate()
+            candidate.strategy = "Safe pattern #1 (pure code motion) - inline tiny pure function"
+            config = {
+                "workspace": {"repo_path": str(repo), "baseline_ref": baseline},
+                "candidate_policy": {
+                    "allowed_target_globs": ["src/**/*.cc"],
+                    "frozen_globs": [],
+                    "allowed_safety_classes": ["safe"],
+                    "allowed_strategies": ["safe-pattern #1"],
+                },
+            }
+
+            decision = CandidateAdmissionGate().evaluate(
+                candidate,
+                config,
+                accepted_parent_ids=set(),
+                batch_candidate_ids={candidate.candidate_id},
+            )
+
+            self.assertTrue(decision.admitted, decision.to_dict())
+
+    def test_target_may_exist_in_baseline_even_if_controller_branch_lacks_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, baseline = _make_repo(Path(tmp))
+            _git(repo, "rm", "src/hot.cc")
+            _git(repo, "commit", "-m", "controller branch removes target")
+            self.assertFalse((repo / "src" / "hot.cc").exists())
+            candidate = _candidate()
+            config = {
+                "workspace": {
+                    "repo_path": str(repo),
+                    "baseline_ref": baseline,
+                },
                 "candidate_policy": {
                     "allowed_target_globs": ["src/**/*.cc"],
                     "frozen_globs": [],

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -12,6 +13,7 @@ from .agent_components import AgentExecutor, AgentJudger, AgentProposer
 from .adapters import ExecutorAdapter, JudgerAdapter
 from .context import load_prior_context
 from .display import (
+    format_admission_summary,
     format_agent_action,
     format_candidate_list,
     format_gate_summary,
@@ -61,6 +63,7 @@ class ResearchOrchestrator:
 
     def run(self) -> LoopState:
         controller_snapshot = self.workspace_manager.controller_snapshot()
+        self._assert_run_dir_reusable()
         state = self._load_or_initialize_state()
         self.run_dir.mkdir(parents=True, exist_ok=True)
         write_json(self.run_dir / "config.snapshot.json", self.config)
@@ -103,6 +106,15 @@ class ResearchOrchestrator:
             self._log_block(format_run_usage(run_usage))
         self._log_block(format_run_finish(state, str(self.run_dir / "final_report.md"), str(self.run_dir)))
         return state
+
+    def _assert_run_dir_reusable(self) -> None:
+        if self.config.get("resume", False):
+            return
+        if self.run_dir.exists() and any(self.run_dir.iterdir()):
+            raise RuntimeError(
+                f"run_dir is not empty but resume=false: {self.run_dir}. "
+                "Use a fresh GEPA_RUN_ID or set resume=true deliberately."
+            )
 
     def _log(self, message: str) -> None:
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -158,7 +170,10 @@ class ResearchOrchestrator:
     def _resolve_run_dir(self, config: dict[str, Any], config_path: Path) -> Path:
         run_dir = config.get("run_dir")
         if run_dir:
-            return Path(run_dir).expanduser().resolve()
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            run_id = os.environ.get("GEPA_RUN_ID") or stamp
+            resolved = str(run_dir).replace("<timestamp>", stamp).replace("<run-id>", run_id)
+            return Path(resolved).expanduser().resolve()
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         return (config_path.parent / "runs" / stamp).resolve()
 
@@ -194,7 +209,12 @@ class ResearchOrchestrator:
         pool = CandidatePool.load(self.run_dir)
         matrix_path = self.run_dir / "score_matrix.json"
         if pool.active_ids() and matrix_path.exists():
-            return
+            if self.config.get("resume", False):
+                return
+            raise RuntimeError(
+                f"run_dir already contains initialized GEPA state but resume=false: {self.run_dir}. "
+                "Use a fresh run_dir (for example one containing <run-id>) or set resume=true."
+            )
         self._log("GEPA initialization started")
         seed_count = int(self.config.get("initialization", {}).get("seed_count", 1))
         seed_config = deepcopy(self.config)
@@ -206,7 +226,16 @@ class ResearchOrchestrator:
             batch = self.proposer.propose_batch(seed_state, seed_config)
         else:
             batch = CandidateBatch(round_id=-1, candidates=[self.proposer.propose(seed_state, seed_config)])
-        for index, candidate in enumerate(batch.candidates[:seed_count]):
+        seed_candidates = list(batch.candidates)
+        while len(seed_candidates) < seed_count:
+            missing_index = len(seed_candidates)
+            self._log(
+                f"initialization proposer returned {len(seed_candidates)}/{seed_count} seed(s); "
+                f"requesting seed {missing_index + 1}"
+            )
+            seed_candidates.append(self.proposer.propose(seed_state, seed_config))
+        batch.candidates = seed_candidates[:seed_count]
+        for index, candidate in enumerate(batch.candidates):
             candidate.candidate_id = f"seed_{index:03d}"
             candidate.round_id = -1
             candidate.parent_id = None
@@ -215,11 +244,11 @@ class ResearchOrchestrator:
             candidate.status = "seed"
             candidate.mutation_note = candidate.mutation_note or "Initial GEPA seed candidate."
             candidate.executor_contract.setdefault("instructions", "Execute this seed candidate on D_pareto.")
-        batch.candidates = batch.candidates[:seed_count]
         batch.round_id = -1
         admissions, admitted_seeds = self._admit_candidates(batch.candidates, pool)
         self._persist_candidate_batch(batch)
         self._persist_admission_decisions(-1, admissions)
+        self._log_block(format_admission_summary(admissions))
         self._log_block(format_phase_header(-1, 0, "initialization proposer"))
         self._log_block(format_candidate_list(batch.candidates))
         for candidate in batch.candidates:
@@ -292,6 +321,7 @@ class ResearchOrchestrator:
         self._write_live_artifact(round_id, "admission_decisions", {"decisions": [item.to_dict() for item in admissions]})
         self._persist_candidate_batch(candidate_batch)
         self._persist_admission_decisions(round_id, admissions)
+        self._log_block(format_admission_summary(admissions))
         self._log(f"proposer mutation finished: {len(candidate_batch.candidates)} candidate(s)")
         self._log_block(format_candidate_list(candidate_batch.candidates))
         for candidate in candidate_batch.candidates:

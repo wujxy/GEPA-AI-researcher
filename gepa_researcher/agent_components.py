@@ -106,6 +106,40 @@ def format_task_resources(config: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def format_candidate_policy(config: dict[str, Any]) -> str:
+    policy = config.get("candidate_policy", {})
+    if not policy:
+        return "Candidate policy:\n- No deterministic admission policy configured."
+    lines = ["Candidate policy:"]
+    baseline_ref = config.get("workspace", {}).get("baseline_ref")
+    if baseline_ref:
+        lines.append(f"- Source baseline/ref: {baseline_ref}")
+    known_targets = list(policy.get("known_target_files", []))
+    if known_targets:
+        lines.append("- target_files must be copied exactly from this known source list when applicable:")
+        for target in known_targets:
+            lines.append(f"  - {target}")
+    allowed_globs = policy.get("allowed_target_globs", [])
+    if allowed_globs:
+        lines.append(f"- allowed_target_globs: {allowed_globs}")
+    frozen = policy.get("frozen_globs", [])
+    if frozen:
+        lines.append(f"- frozen_globs: {frozen}")
+    strategies = policy.get("allowed_strategies", [])
+    if strategies:
+        lines.append(f"- strategy must begin with one of: {strategies}")
+    safety = policy.get("allowed_safety_classes", [])
+    if safety:
+        lines.append(f"- safety_class must be one of: {safety}")
+    classes = policy.get("allowed_candidate_classes", [])
+    if classes:
+        lines.append(f"- candidate_class must be one of: {classes}")
+    max_targets = policy.get("max_target_files")
+    if max_targets is not None:
+        lines.append(f"- max_target_files: {max_targets}")
+    return "\n".join(lines)
+
+
 def _candidate_prompt_text(data: dict[str, Any]) -> str:
     strategy = data.get("strategy") or data.get("approach") or "unspecified"
     return (
@@ -149,6 +183,8 @@ Task goal:
 {config["task"]["goal"]}
 
 {format_task_resources(config)}
+
+{format_candidate_policy(config)}
 
 {format_runtime(config)}
 
@@ -240,6 +276,8 @@ Task goal:
 {config["task"]["goal"]}
 
 {format_task_resources(config)}
+
+{format_candidate_policy(config)}
 
 {format_runtime(config)}
 
@@ -358,6 +396,8 @@ Task goal:
 {config["task"]["goal"]}
 
 {format_task_resources(config)}
+
+{format_candidate_policy(config)}
 
 {format_runtime(config)}
 

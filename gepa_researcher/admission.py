@@ -3,6 +3,7 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import re
+import subprocess
 import uuid
 from pathlib import Path
 from typing import Any
@@ -76,12 +77,15 @@ class CandidateAdmissionGate:
             details.append(f"{len(candidate.target_files)} target files exceeds max {max_targets}")
 
         repo_path = Path(config.get("workspace", {}).get("repo_path", ".")).expanduser()
+        baseline_ref = str(config.get("workspace", {}).get("baseline_ref", "HEAD"))
         allowed = list(policy.get("allowed_target_globs", []))
         frozen = list(policy.get("frozen_globs", []))
         paths_ok = True
         for target in candidate.target_files:
             normalized = target.replace("\\", "/").lstrip("./")
-            if not (repo_path / normalized).exists():
+            if not (repo_path / normalized).exists() and not _git_tree_has_path(
+                repo_path, baseline_ref, normalized
+            ):
                 codes.append("TARGET_NOT_FOUND")
                 details.append(normalized)
                 paths_ok = False
@@ -104,7 +108,12 @@ class CandidateAdmissionGate:
             checks["safety"] = "pass"
 
         allowed_strategies = set(policy.get("allowed_strategies", []))
-        if allowed_strategies and candidate.strategy not in allowed_strategies:
+        normalized_strategy = _normalize_strategy(candidate.strategy)
+        if allowed_strategies and not any(
+            normalized_strategy == _normalize_strategy(allowed)
+            or normalized_strategy.startswith(f"{_normalize_strategy(allowed)} ")
+            for allowed in allowed_strategies
+        ):
             codes.append("DISALLOWED_STRATEGY")
             details.append(candidate.strategy)
             checks["strategy"] = "fail"
@@ -185,9 +194,26 @@ def idea_fingerprint(candidate: Candidate) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:20]
 
 
+def _normalize_strategy(value: str) -> str:
+    normalized = re.sub(r"\s+", " ", str(value).strip().lower())
+    normalized = normalized.replace("safe pattern", "safe-pattern")
+    return normalized
+
+
 def _matches_any(path: str, patterns: list[str]) -> bool:
     return any(
         fnmatch.fnmatch(path, pattern)
         or ("**/" in pattern and fnmatch.fnmatch(path, pattern.replace("**/", "")))
         for pattern in patterns
     )
+
+
+def _git_tree_has_path(repo: Path, ref: str, path: str) -> bool:
+    if not (repo / ".git").exists():
+        return False
+    return subprocess.run(
+        ["git", "-C", str(repo), "cat-file", "-e", f"{ref}:{path}"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    ).returncode == 0

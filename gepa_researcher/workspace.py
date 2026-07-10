@@ -41,7 +41,8 @@ class WorkspaceManager:
         if not requested:
             raise WorkspaceError("git_worktree mode requires a parent SHA or workspace.baseline_ref")
         start_sha = _git(repo, "rev-parse", "--verify", f"{requested}^{{commit}}")
-        root = Path(self.config.get("root") or self.run_dir / "worktrees").expanduser().resolve()
+        root_value = self.config.get("root") or self.run_dir / "worktrees"
+        root = Path(str(root_value).replace("<run-id>", self.run_dir.name)).expanduser().resolve()
         worktree = root / f"round_{candidate.round_id:03d}" / candidate.candidate_id / "repo"
         artifacts = root / f"round_{candidate.round_id:03d}" / candidate.candidate_id / "artifacts"
         prefix = str(self.config.get("branch_prefix", "gepa/<run-id>")).replace("<run-id>", self.run_dir.name)
