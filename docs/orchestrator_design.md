@@ -107,10 +107,6 @@ gepa_researcher/
 examples/paper_qa/
   config.json
   runs/
-prompts/
-  proposer.md
-  judger.md
-  gater.md
 docs/
   orchestrator_design.md
 ```

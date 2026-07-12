@@ -6,8 +6,8 @@ from io import StringIO
 from pathlib import Path
 
 from gepa_researcher.agent_client import AgentError, ClaudeCodeClient
-from gepa_researcher.agent_components import AgentExecutor, AgentProposer
-from gepa_researcher.schemas import Candidate, LoopState
+from gepa_researcher.agent_components import AgentExecutor, AgentJudger, AgentProposer
+from gepa_researcher.schemas import Candidate, LoopState, SampleTrace, Trace
 
 
 class CapturingClient:
@@ -457,6 +457,133 @@ class AgentComponentsTest(unittest.TestCase):
         self.assertEqual(sample.error, "prior attempt produced no JSON")
         self.assertTrue(sample.artifacts.get("repair_applied"))
         self.assertIn("Waiting for the actual ms/evt results.", sample.artifacts.get("original_raw_output", ""))
+
+    def test_proposer_prompt_uses_role_context_without_full_candidate_pool(self):
+        client = CapturingClient(
+            {
+                "candidates": [
+                    {
+                        "hypothesis": "hypothesis",
+                        "scope": "task_system",
+                        "proposed_change": "change",
+                        "rationale": "reason",
+                        "expected_improvement": "better primary metric",
+                        "risk": "risk",
+                        "strategy": "baseline_strategy",
+                        "analysis_plan": ["execute"],
+                    }
+                ]
+            }
+        )
+        config = {
+            "generation": {"batch_size": 1},
+            "task": {"goal": "optimize task", "data_files": ["data.csv"]},
+            "runtime": {"python_command": "python"},
+            "evidence": {},
+            "_gepa_context": {
+                "candidate_pool": {"raw": "POOL_RAW_SHOULD_NOT_APPEAR"},
+                "pareto_frontier": {"candidate_ids": ["parent"], "parent_ids": ["parent"]},
+                "parents": [{"candidate_id": "parent", "hypothesis": "baseline", "artifacts": {"agent_raw": "PARENT_RAW_SHOULD_NOT_APPEAR"}}],
+                "score_matrix": {"aggregate_scores": {"parent": 0.4, "unrelated": 0.1}},
+                "parent_executions": {"parent": {"raw": "EXECUTION_SHOULD_NOT_APPEAR"}},
+                "recent_feedback": ["inspect tail behavior"],
+                "recent_traces": [],
+                "dataset_split": {"feedback_ids": ["f1"], "pareto_ids": ["p1"]},
+            },
+        }
+
+        AgentProposer(client).propose_batch(LoopState(task_name="task"), config)
+
+        prompt = client.prompts[0][1]
+        self.assertIn("Proposer role context", prompt)
+        self.assertIn("Parent candidates", prompt)
+        self.assertIn("Score summary", prompt)
+        self.assertIn("inspect tail behavior", prompt)
+        self.assertNotIn("candidate_pool", prompt)
+        self.assertNotIn("POOL_RAW_SHOULD_NOT_APPEAR", prompt)
+        self.assertNotIn("PARENT_RAW_SHOULD_NOT_APPEAR", prompt)
+        self.assertNotIn("EXECUTION_SHOULD_NOT_APPEAR", prompt)
+
+    def test_executor_prompt_uses_role_context_without_gepa_global_state(self):
+        client = CapturingClient({"summary": "", "errors": [], "artifact_paths": []})
+        candidate = _make_candidate("cand_010")
+        candidate.executor_contract = {"instructions": "run the narrow check"}
+        config = {
+            "task": {"goal": "g"},
+            "runtime": {},
+            "evidence": {},
+            "_eval_phase": "feedback",
+            "_selected_sample_ids": ["f1"],
+            "_gepa_context": {
+                "score_matrix": {"raw": "SCORE_SHOULD_NOT_APPEAR"},
+                "pareto_frontier": {"raw": "FRONTIER_SHOULD_NOT_APPEAR"},
+                "recent_feedback": ["FEEDBACK_SHOULD_NOT_APPEAR"],
+                "recent_traces": [{"raw": "TRACE_SHOULD_NOT_APPEAR"}],
+                "gate_decision": {"raw": "GATE_SHOULD_NOT_APPEAR"},
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            AgentExecutor(client, Path(tmp)).execute(candidate, config)
+
+        prompt = client.prompts[0][1]
+        self.assertIn("Candidate decision facts", prompt)
+        self.assertIn("Working directory for any scripts/artifacts you create", prompt)
+        self.assertIn("Candidate source repository", prompt)
+        self.assertIn("run the narrow check", prompt)
+        self.assertNotIn("SCORE_SHOULD_NOT_APPEAR", prompt)
+        self.assertNotIn("FRONTIER_SHOULD_NOT_APPEAR", prompt)
+        self.assertNotIn("FEEDBACK_SHOULD_NOT_APPEAR", prompt)
+        self.assertNotIn("TRACE_SHOULD_NOT_APPEAR", prompt)
+        self.assertNotIn("GATE_SHOULD_NOT_APPEAR", prompt)
+
+    def test_judger_prompt_excludes_expected_gain_and_prior_context(self):
+        client = CapturingClient(
+            {
+                "score": 0.5,
+                "passed": False,
+                "per_sample_scores": [{"sample_id": "task_execution", "score": 0.5}],
+                "failure_categories": [],
+                "actionable_feedback": ["tighten evidence"],
+                "confidence": "medium",
+                "best_interpretation": "partial evidence",
+            }
+        )
+        candidate = _make_candidate("cand_020")
+        candidate.expected_gain = 999.0
+        candidate.expected_improvement = "EXPECTED_IMPROVEMENT_SHOULD_NOT_APPEAR"
+        trace = Trace(
+            candidate_id=candidate.candidate_id,
+            round_id=candidate.round_id,
+            samples=[
+                SampleTrace(
+                    sample_id="task_execution",
+                    input="in",
+                    output="out",
+                    expected="unknown",
+                    logs="ran validation",
+                    artifacts={"metrics": {"primary": 0.5}, "validation": {"passed": False}},
+                )
+            ],
+        )
+        config = {
+            "task": {"goal": "g"},
+            "_run_dir": "/tmp/run",
+            "_eval_phase": "pareto",
+            "_selected_sample_ids": ["p1"],
+            "_prior_context": {"notes": ["PRIOR_SHOULD_NOT_APPEAR"]},
+            "_gepa_context": {"score_matrix": {"raw": "SCORE_SHOULD_NOT_APPEAR"}},
+        }
+
+        AgentJudger(client).judge(candidate, trace, config)
+
+        prompt = client.prompts[0][1]
+        self.assertIn("Trace decision facts", prompt)
+        self.assertIn("'primary': 0.5", prompt)
+        self.assertNotIn("expected_gain", prompt)
+        self.assertNotIn("EXPECTED_IMPROVEMENT_SHOULD_NOT_APPEAR", prompt)
+        self.assertNotIn("PRIOR_SHOULD_NOT_APPEAR", prompt)
+        self.assertNotIn("SCORE_SHOULD_NOT_APPEAR", prompt)
+
 
     def test_executor_repair_skipped_when_disabled(self):
         err = AgentError("Agent did not return a parseable JSON object.")

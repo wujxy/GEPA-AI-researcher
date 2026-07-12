@@ -7,7 +7,13 @@ from typing import Any
 
 from .agent_client import AgentError, ClaudeCodeClient
 from .config.contracts import format_role_contract
-from .context_views import candidate_for_agent, evidence_access_policy, state_for_agent, trace_for_agent
+from .context_views import (
+    build_executor_context,
+    build_judger_context,
+    build_proposer_context,
+    candidate_for_executor,
+    evidence_access_policy,
+)
 from .schemas import AgentCallContext, Candidate, CandidateBatch, Judgment, LoopState, SampleTrace, Trace
 
 
@@ -85,6 +91,62 @@ def format_gepa_context(config: dict[str, Any]) -> str:
         f"- Recent feedback: {context.get('recent_feedback', [])}\n"
         f"- Recent traces: {context.get('recent_traces', [])}\n"
         f"- Dataset split: {context.get('dataset_split', {})}"
+    )
+
+
+def format_proposer_context(context: dict[str, Any]) -> str:
+    if not context:
+        return "Proposer role context:\n- No prior candidate pool exists yet; create seed candidate(s)."
+    prior_context = context.get("prior_context") or {}
+    return (
+        "Prior context:\n"
+        f"- Notes: {prior_context.get('notes', [])}\n"
+        f"- Skills: {prior_context.get('skills', [])}\n"
+        f"- Documents: {prior_context.get('documents', [])}\n"
+        f"- Warnings: {prior_context.get('warnings', [])}\n\n"
+        "Proposer role context:\n"
+        f"- Frontier: {context.get('frontier', {})}\n"
+        f"- Parent candidates: {context.get('parents', [])}\n"
+        f"- Score summary: {context.get('score_summary', {})}\n"
+        f"- Recent feedback: {context.get('recent_feedback', [])}\n"
+        f"- Recent traces: {context.get('recent_traces', [])}\n"
+        f"- Dataset split: {context.get('dataset_split', {})}\n\n"
+        "Current state facts:\n"
+        f"{context.get('state', {})}"
+    )
+
+
+def format_executor_context(context: dict[str, Any]) -> str:
+    prior_context = context.get("prior_context") or {}
+    evaluation = context.get("evaluation") or {}
+    workspace = context.get("workspace") or {}
+    return (
+        "Prior context:\n"
+        f"- Notes: {prior_context.get('notes', [])}\n"
+        f"- Skills: {prior_context.get('skills', [])}\n"
+        f"- Documents: {prior_context.get('documents', [])}\n"
+        f"- Warnings: {prior_context.get('warnings', [])}\n\n"
+        f"Evaluation phase: {evaluation.get('eval_phase', 'pareto')}\n"
+        f"Execution mode: {evaluation.get('execution_mode')}\n"
+        f"Selected sample ids: {evaluation.get('selected_sample_ids', [])}\n\n"
+        "Candidate decision facts:\n"
+        f"{context.get('candidate', {})}\n\n"
+        "Working directory for any scripts/artifacts you create:\n"
+        f"{workspace.get('artifact_dir')}\n\n"
+        "Candidate source repository:\n"
+        f"{workspace.get('source_repo')}"
+    )
+
+
+def format_judger_context(context: dict[str, Any]) -> str:
+    evaluation = context.get("evaluation") or {}
+    return (
+        "Candidate decision facts:\n"
+        f"{context.get('candidate', {})}\n\n"
+        "Trace decision facts:\n"
+        f"{context.get('trace', {})}\n\n"
+        f"Evaluation phase: {evaluation.get('eval_phase', 'pareto')}\n"
+        f"Selected sample ids: {evaluation.get('selected_sample_ids', [])}"
     )
 
 
@@ -204,6 +266,7 @@ class AgentProposer:
         self.client = client
 
     def propose(self, state: LoopState, config: dict[str, Any]) -> Candidate:
+        proposer_context = build_proposer_context(state, config)
         prompt = f"""
 You are the PROPOSER agent in a bounded GEPA-style research loop.
 
@@ -214,14 +277,9 @@ Task goal:
 
 {format_evidence_policy(config)}
 
-{format_prior_context(config)}
-
-{format_gepa_context(config)}
+{format_proposer_context(proposer_context)}
 
 {evidence_access_policy()}
-
-Current state facts:
-{state_for_agent(state)}
 
 Important constraints:
 - Propose exactly one candidate research hypothesis or intervention for the next round.
@@ -292,6 +350,7 @@ Required JSON schema:
 
     def propose_batch(self, state: LoopState, config: dict[str, Any]) -> CandidateBatch:
         batch_size = int(config.get("generation", {}).get("batch_size", 10))
+        proposer_context = build_proposer_context(state, config)
         prompt = f"""
 You are the PROPOSER agent in a bounded GEPA-style research loop.
 
@@ -302,14 +361,9 @@ Task goal:
 
 {format_evidence_policy(config)}
 
-{format_prior_context(config)}
-
-{format_gepa_context(config)}
+{format_proposer_context(proposer_context)}
 
 {evidence_access_policy()}
-
-Current state facts:
-{state_for_agent(state)}
 
 Important constraints:
 - Propose exactly {batch_size} candidate research hypotheses or interventions for the next generation.
@@ -403,6 +457,7 @@ class AgentExecutor:
         round_dir.mkdir(parents=True, exist_ok=True)
         repo_dir = Path(config.get("_candidate_repo") or getattr(self.client, "cwd", None) or round_dir)
         execution_mode = str(config.get("_execution_mode", "implement_and_validate"))
+        executor_context = build_executor_context(candidate, config, self.run_dir, round_dir, repo_dir, execution_mode)
         prompt = f"""
 You are the EXECUTOR agent in a bounded GEPA-style research loop.
 
@@ -417,22 +472,9 @@ Task goal:
 
 {format_evidence_policy(config)}
 
-{format_prior_context(config)}
-
-Evaluation phase: {config.get("_eval_phase", "pareto")}
-Execution mode: {execution_mode}
-Selected sample ids: {config.get("_selected_sample_ids", [])}
-
-Candidate decision facts:
-{candidate_for_agent(candidate, [str(self.run_dir / "traces" / f"round_{candidate.round_id:03d}" / candidate.candidate_id / "candidate.json")])}
+{format_executor_context(executor_context)}
 
 {evidence_access_policy()}
-
-Working directory for any scripts/artifacts you create:
-{round_dir}
-
-Candidate source repository:
-{repo_dir}
 
 Constraints:
 - Do not ask the user for help.
@@ -565,7 +607,7 @@ Required JSON schema:
         round_dir: Path,
         candidate_json_path: str,
     ) -> str:
-        candidate_facts = candidate_for_agent(candidate, [candidate_json_path])
+        candidate_facts = candidate_for_executor(candidate, [candidate_json_path])
         return f"""
 You are the EXECUTOR agent in a bounded GEPA-style research loop. A PREVIOUS attempt
 at this exact task finished WITHOUT returning a parseable JSON object. Your ONLY job now
@@ -607,6 +649,7 @@ class AgentJudger:
         self.client = client
 
     def judge(self, candidate: Candidate, trace: Trace, config: dict[str, Any]) -> Judgment:
+        judger_context = build_judger_context(candidate, trace, config)
         prompt = f"""
 You are the JUDGER agent in a bounded GEPA-style research loop.
 
@@ -618,16 +661,9 @@ Task goal:
 
 {format_config_for_role(config, "judger")}
 
-Candidate decision facts:
-{candidate_for_agent(candidate, [str(Path(config.get("_run_dir", ".")) / "traces" / f"round_{candidate.round_id:03d}" / candidate.candidate_id / "candidate.json")])}
-
-Trace decision facts:
-{trace_for_agent(trace, [str(Path(config.get("_run_dir", ".")) / "traces" / f"round_{trace.round_id:03d}" / trace.candidate_id / "trace.json")])}
+{format_judger_context(judger_context)}
 
 {evidence_access_policy()}
-
-Evaluation phase: {config.get("_eval_phase", "pareto")}
-Selected sample ids: {config.get("_selected_sample_ids", [])}
 
 Rubric:
 - Score 0.0 to 1.0.

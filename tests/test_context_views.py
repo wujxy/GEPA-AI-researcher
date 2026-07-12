@@ -3,7 +3,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from gepa_researcher.context_views import candidate_for_agent, trace_for_agent, trace_summary_for_proposer
+from gepa_researcher.context_views import (
+    build_executor_context,
+    build_judger_context,
+    build_proposer_context,
+    candidate_for_agent,
+    trace_for_agent,
+    trace_summary_for_proposer,
+)
 from gepa_researcher.runtime import recent_trace_summaries
 from gepa_researcher.schemas import Candidate, SampleTrace, Trace
 
@@ -120,6 +127,131 @@ class ContextViewsTest(unittest.TestCase):
             self.assertTrue(ref.startswith(str(run_dir)))
             self.assertTrue(ref.endswith("traces/round_001/cand_001_000/trace.json"))
             self.assertNotIn("agent_raw", str(summaries[0]))
+
+    def test_proposer_context_is_role_scoped_and_deterministic(self):
+        state = type("State", (), {})()
+        state.task_name = "task"
+        state.round_id = 2
+        state.best_candidate_id = "parent"
+        state.best_score = 0.8
+        state.no_improvement_rounds = 1
+        state.history = [
+            {
+                "round_id": 1,
+                "kept": ["parent"],
+                "rejected": ["discarded"],
+                "next_feedback": ["VERBOSE_HISTORY_SHOULD_NOT_APPEAR"],
+                "best_candidate_id": "parent",
+                "best_score": 0.8,
+                "stop": False,
+            }
+        ]
+        config = {
+            "_prior_context": {"notes": ["note"], "skills": ["skill"], "documents": [], "warnings": []},
+            "_gepa_context": {
+                "candidate_pool": {"raw": "POOL_RAW_SHOULD_NOT_APPEAR"},
+                "pareto_frontier": {
+                    "round_id": 1,
+                    "candidate_ids": ["parent"],
+                    "parent_ids": ["parent"],
+                    "per_task_best": {"task_execution": ["parent"]},
+                    "artifacts": {"controller_only": "DROP_ME"},
+                },
+                "parents": [
+                    {
+                        "candidate_id": "parent",
+                        "round_id": 1,
+                        "hypothesis": "baseline",
+                        "artifacts": {"agent_raw": "PARENT_RAW_SHOULD_NOT_APPEAR", "analysis_plan": ["compare"]},
+                    }
+                ],
+                "score_matrix": {
+                    "round_id": 1,
+                    "aggregate_scores": {"parent": 0.8, "unrelated": 0.1},
+                    "task_scores": {"task_execution": {"parent": 0.8, "unrelated": 0.1}},
+                },
+                "parent_executions": {"parent": {"raw": "EXECUTION_SHOULD_NOT_APPEAR"}},
+                "recent_feedback": ["compact feedback"],
+                "recent_traces": [
+                    {
+                        "candidate_id": "parent",
+                        "samples": [
+                            {
+                                "sample_id": "task_execution",
+                                "logs": "ran parent",
+                                "artifacts": {"agent_raw": "TRACE_RAW_SHOULD_NOT_APPEAR", "metrics": {"primary": 0.8}},
+                            }
+                        ],
+                        "evidence_refs": ["trace.json"],
+                    }
+                ],
+                "dataset_split": {"feedback_ids": ["f1"], "pareto_ids": ["p1"], "artifacts": {"source": "config"}},
+            },
+        }
+
+        first = build_proposer_context(state, config)
+        second = build_proposer_context(state, config)
+
+        self.assertEqual(first, second)
+        self.assertEqual(first["frontier"]["parent_ids"], ["parent"])
+        self.assertEqual(first["recent_feedback"], ["compact feedback"])
+        self.assertEqual(first["recent_traces"][0]["evidence_refs"], ["trace.json"])
+        self.assertEqual(first["dataset_split"]["pareto_ids"], ["p1"])
+        self.assertEqual(first["score_summary"]["aggregate_scores"], {"parent": 0.8})
+        self.assertNotIn("candidate_pool", str(first))
+        self.assertNotIn("agent_raw", str(first))
+        self.assertNotIn("POOL_RAW_SHOULD_NOT_APPEAR", str(first))
+        self.assertNotIn("EXECUTION_SHOULD_NOT_APPEAR", str(first))
+        self.assertNotIn("unrelated", str(first["score_summary"]))
+
+    def test_executor_context_excludes_global_gepa_state(self):
+        candidate = self._candidate()
+        config = {
+            "_prior_context": {"notes": ["note"], "skills": [], "documents": [], "warnings": []},
+            "_eval_phase": "feedback",
+            "_selected_sample_ids": ["f1"],
+            "_gepa_context": {
+                "score_matrix": {"aggregate_scores": {"parent": 0.8}},
+                "pareto_frontier": {"parent_ids": ["parent"]},
+                "recent_feedback": ["GLOBAL_FEEDBACK_SHOULD_NOT_APPEAR"],
+                "recent_traces": [{"candidate_id": "other"}],
+                "gate_decision": {"raw": "GATE_SHOULD_NOT_APPEAR"},
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            context = build_executor_context(candidate, config, run_dir, run_dir / "work", run_dir / "repo", "implement_and_validate")
+
+        self.assertEqual(context["evaluation"]["eval_phase"], "feedback")
+        self.assertEqual(context["candidate"]["candidate_id"], "cand_001_000")
+        self.assertEqual(context["workspace"]["source_repo"].split("/")[-1], "repo")
+        self.assertNotIn("score_matrix", str(context))
+        self.assertNotIn("pareto_frontier", str(context))
+        self.assertNotIn("GLOBAL_FEEDBACK_SHOULD_NOT_APPEAR", str(context))
+        self.assertNotIn("GATE_SHOULD_NOT_APPEAR", str(context))
+
+    def test_judger_context_is_blind_to_proposer_expected_gain(self):
+        candidate = self._candidate()
+        candidate.expected_gain = 123.4
+        candidate.expected_improvement = "EXPECTED_IMPROVEMENT_SHOULD_NOT_APPEAR"
+        config = {
+            "_run_dir": "/tmp/run",
+            "_eval_phase": "pareto",
+            "_selected_sample_ids": ["p1"],
+            "_prior_context": {"notes": ["PRIOR_SHOULD_NOT_APPEAR"]},
+            "_gepa_context": {"score_matrix": {"raw": "SCORE_SHOULD_NOT_APPEAR"}},
+        }
+
+        context = build_judger_context(candidate, self._trace(), config)
+
+        self.assertEqual(context["evaluation"]["selected_sample_ids"], ["p1"])
+        self.assertEqual(context["trace"]["samples"][0]["metrics"]["primary"], 0.61)
+        self.assertTrue(context["candidate"]["evidence_refs"][0].endswith("candidate.json"))
+        self.assertNotIn("expected_gain", str(context))
+        self.assertNotIn("EXPECTED_IMPROVEMENT_SHOULD_NOT_APPEAR", str(context))
+        self.assertNotIn("PRIOR_SHOULD_NOT_APPEAR", str(context))
+        self.assertNotIn("SCORE_SHOULD_NOT_APPEAR", str(context))
+
 
 
 if __name__ == "__main__":
