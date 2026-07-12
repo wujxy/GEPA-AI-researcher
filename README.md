@@ -179,6 +179,24 @@ execution:
   lifecycle: materialize_once       # materialize_once or stateless
   max_parallel_candidates: 3
   fail_fast: false
+  runtime_backend: local            # local or apptainer
+  # Optional: run only executor agent subprocesses inside Apptainer. GEPA core,
+  # Git/worktree management, gates, score matrix, and context stay on the host.
+  apptainer:
+    image: /absolute/or/profile-relative/executor.sif
+    executable: apptainer
+    command: claude                 # command inside the container
+    cleanenv: true
+    containall: true
+    writable_tmpfs: true
+    container_repo: /workspace/repo
+    container_artifacts: /workspace/artifacts
+    container_scratch: /workspace/scratch
+    container_home: /workspace/home
+    claude_home_template: /absolute/or/profile-relative/claude-home-template
+    env_allowlist: []
+    readonly_binds: []
+    extra_binds: []
 
 safety:
   editable_paths: [src/**]
@@ -215,8 +233,27 @@ samples. With one sample, both feedback and Pareto use that sample.
 threshold after `min_rounds`.
 
 `resources.readonly_assets` are symlinked into git worktrees if the target does
-not already exist. Use them for large read-only fixtures that should not be
-committed by candidates.
+not already exist in local execution. With `execution.runtime_backend: apptainer`,
+the same assets are also mounted read-only into the executor container under the
+configured `container_repo` path. Use them for large read-only fixtures that
+should not be committed by candidates.
+
+`execution.runtime_backend` controls only the executor subprocess boundary. The
+default `local` backend preserves the historical behavior. The `apptainer`
+backend keeps GEPA core, Git/worktree lifecycle, gates, score matrix, and context
+on the host, but starts each executor Claude Code call with `apptainer exec`.
+The executor sees container paths such as `/workspace/repo` and
+`/workspace/artifacts`; host-side commit auditing still reads the original
+worktree path.
+
+When `runtime_backend: apptainer` is selected, `execution.apptainer.image` is
+required and missing Apptainer/image configuration fails fast. GEPA does not
+automatically fall back to host execution. By default the backend uses strict
+`--cleanenv`/`--containall`, creates per-candidate HOME, scratch, and tmp
+directories under the candidate artifact directory, copies `claude_home_template`
+there when configured, and passes only PATH plus `env_allowlist` variables into
+the executor process. Do not bind the host `$HOME` directly; use a minimal
+per-run Claude home template instead.
 
 `resources.pre_materialized_lfs_paths` documents LFS-backed files that are
 already materialized inside the project repository. GEPA preserves this metadata
@@ -240,6 +277,26 @@ role-specific authoritative views:
 
 Backend details such as agent command arguments are kept out of proposer and
 judger contracts.
+
+## Apptainer Executor Validation
+
+The unit test suite covers command-prefix construction, strict executor
+environment handling, config resolution, runtime lease generation, read-only
+binds, per-candidate HOME/scratch/tmp paths, and repair-call reuse of the same
+runtime launch options. Before using Apptainer for a production optimization
+run, also perform an environment smoke test with the real image:
+
+```bash
+python -m gepa_researcher.cli validate --config examples/omilrec/task.template.yaml
+python -m gepa_researcher.cli resolve --config examples/omilrec/task.template.yaml
+python -m gepa_researcher.cli run --config examples/omilrec/task.template.yaml --run-dir /tmp/gepa-apptainer-smoke
+```
+
+For that smoke test, use a tiny budget and confirm from the trace artifacts that
+the executor prompt reports `/workspace/repo` and `/workspace/artifacts`, the
+container can run `claude`, compilers, Python, validation commands, and benchmark
+commands, generated files land under the candidate artifacts/scratch area, and
+host-side commit audit still records the expected worktree diff.
 
 ## Loop and Artifacts
 

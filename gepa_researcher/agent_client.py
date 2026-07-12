@@ -81,10 +81,13 @@ class ClaudeCodeClient:
         cwd: Path | None = None,
         env: dict[str, str] | None = None,
         extra_args: list[str] | None = None,
+        command_prefix: list[str] | None = None,
+        inherit_host_env: bool = True,
+        resolve_command_on_host: bool = True,
     ) -> AgentResult:
-        command = self.ensure_available()
+        command = self.ensure_available() if resolve_command_on_host else CommandResolution([self.command])
         args = _without_output_format([*self.extra_args, *(extra_args or [])])
-        cmd = [*command.argv, "-p", prompt, *args, "--output-format", "json"]
+        cmd = [*(command_prefix or []), *command.argv, "-p", prompt, *args, "--output-format", "json"]
         started_at = datetime.now(timezone.utc)
         call_id = str(uuid.uuid4())
         context = call_context or AgentCallContext(role=label, round_id=-1, phase="unspecified")
@@ -95,10 +98,13 @@ class ClaudeCodeClient:
         )
         if command.argv != [self.command]:
             print(f"[{started_at.astimezone().strftime('%Y-%m-%d %H:%M:%S')}] resolved Claude command: {command.display}", flush=True)
+        if command_prefix:
+            print(f"[{started_at.astimezone().strftime('%Y-%m-%d %H:%M:%S')}] command prefix: {' '.join(command_prefix)}", flush=True)
+        process_env = {**os.environ, **(env or {})} if inherit_host_env else dict(env or {})
         proc = subprocess.Popen(
             cmd,
             cwd=str(cwd or self.cwd) if (cwd or self.cwd) else None,
-            env={**os.environ, **(env or {})},
+            env=process_env,
             stdin=subprocess.DEVNULL,
             text=True,
             stdout=subprocess.PIPE,

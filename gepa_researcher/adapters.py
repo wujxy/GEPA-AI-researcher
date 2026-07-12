@@ -9,6 +9,7 @@ import uuid
 from .io_utils import append_jsonl, write_json
 from .provenance import audit_commit
 from .registry import ExecutionRegistry
+from .runtime_backend import runtime_backend_for
 from .schemas import (
     Candidate,
     CandidateBatch,
@@ -119,17 +120,21 @@ class ExecutorAdapter:
         prepared: tuple[WorkspaceLease, ExecutionRecord, bool],
     ) -> Trace:
         lease, record, canonical_execution = prepared
+        runtime_lease = runtime_backend_for(config, self.run_dir).prepare(candidate, lease, record)
         candidate_config = dict(config)
-        candidate_config["_candidate_workspace"] = lease.artifact_path
-        candidate_config["_candidate_repo"] = lease.worktree_path
+        candidate_config["_candidate_workspace"] = runtime_lease.artifact_path
+        candidate_config["_candidate_repo"] = runtime_lease.repo_path
+        candidate_config["_candidate_workspace_host"] = lease.artifact_path
+        candidate_config["_candidate_repo_host"] = lease.worktree_path
+        candidate_config["_executor_host_cwd"] = runtime_lease.host_cwd
+        candidate_config["_executor_command"] = runtime_lease.command
+        candidate_config["_executor_command_prefix"] = runtime_lease.command_prefix
+        candidate_config["_executor_inherit_host_env"] = runtime_lease.inherit_host_env
+        candidate_config["_executor_resolve_command_on_host"] = runtime_lease.backend != "apptainer"
+        candidate_config["_runtime_lease"] = runtime_lease.to_dict()
         candidate_config["_execution_id"] = record.execution_id
         candidate_config["_execution_mode"] = record.execution_mode
-        candidate_config["_candidate_env"] = {
-            "GEPA_CANDIDATE_ID": candidate.candidate_id,
-            "GEPA_EXECUTION_ID": record.execution_id,
-            "GEPA_PARENT_SHA": record.requested_parent_sha,
-            "GEPA_WORKTREE": lease.worktree_path,
-        }
+        candidate_config["_candidate_env"] = dict(runtime_lease.env)
         candidate_config["_executor_timeout_seconds"] = int(
             config.get("executor", {}).get(
                 "executor_timeout_seconds",
@@ -165,6 +170,7 @@ class ExecutorAdapter:
         if trace.samples:
             artifacts_update = {
                 "workspace_lease": lease.to_dict(),
+                "runtime_lease": runtime_lease.to_dict(),
                 "execution_record": record.to_dict(),
             }
             if audit is not None:

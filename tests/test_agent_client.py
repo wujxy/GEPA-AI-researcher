@@ -155,6 +155,47 @@ class ClaudeCodeClientTest(unittest.TestCase):
                 getattr(ctx.exception, "raw_output", None),
             )
 
+    def test_run_json_supports_command_prefix_clean_env_and_container_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            launcher = root / "fake_apptainer.py"
+            launcher.write_text(
+                "\n".join(
+                    [
+                        f"#!{sys.executable}",
+                        "import json, os, sys",
+                        "print(json.dumps({",
+                        "    'argv': sys.argv[1:],",
+                        "    'cwd': os.getcwd(),",
+                        "    'allowed': os.environ.get('ALLOWED_ENV'),",
+                        "    'secret': os.environ.get('SECRET_ENV'),",
+                        "}), flush=True)",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            os.chmod(launcher, 0o755)
+            host_cwd = root / "host_repo"
+            host_cwd.mkdir()
+
+            client = ClaudeCodeClient(command="claude-inside-container", timeout_seconds=5)
+            with patch.dict(os.environ, {"SECRET_ENV": "leak-me"}, clear=False):
+                result = client.run_json(
+                    "hello",
+                    label="fake",
+                    cwd=host_cwd,
+                    env={"ALLOWED_ENV": "kept", "PATH": os.environ.get("PATH", "")},
+                    command_prefix=[str(launcher), "exec", "--pwd", "/workspace/repo"],
+                    inherit_host_env=False,
+                    resolve_command_on_host=False,
+                )
+
+            self.assertEqual(result.data["cwd"], str(host_cwd))
+            self.assertEqual(result.data["allowed"], "kept")
+            self.assertIsNone(result.data["secret"])
+            self.assertIn("claude-inside-container", result.data["argv"])
+            self.assertIn("--pwd", result.data["argv"])
+
 
 if __name__ == "__main__":
     unittest.main()

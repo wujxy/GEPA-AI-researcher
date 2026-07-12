@@ -421,14 +421,17 @@ class AgentExecutor:
         self.run_dir = run_dir
 
     def execute(self, candidate: Candidate, config: dict[str, Any]) -> Trace:
-        round_dir = Path(
+        visible_round_dir = Path(
             config.get("_candidate_workspace")
             or self.run_dir / "agent_work" / f"round_{candidate.round_id:03d}" / candidate.candidate_id
         )
-        round_dir.mkdir(parents=True, exist_ok=True)
-        repo_dir = Path(config.get("_candidate_repo") or getattr(self.client, "cwd", None) or round_dir)
+        host_round_dir = Path(config.get("_candidate_workspace_host") or visible_round_dir)
+        host_round_dir.mkdir(parents=True, exist_ok=True)
+        visible_repo_dir = Path(config.get("_candidate_repo") or getattr(self.client, "cwd", None) or visible_round_dir)
+        host_cwd_value = config.get("_executor_host_cwd") or config.get("_candidate_repo_host")
+        host_cwd = Path(host_cwd_value) if host_cwd_value else visible_repo_dir
         execution_mode = str(config.get("_execution_mode", "implement_and_validate"))
-        executor_context = build_executor_context(candidate, config, self.run_dir, round_dir, repo_dir, execution_mode)
+        executor_context = build_executor_context(candidate, config, self.run_dir, visible_round_dir, visible_repo_dir, execution_mode)
         prompt = f"""
 You are the EXECUTOR agent in a bounded GEPA-style research loop.
 
@@ -493,8 +496,11 @@ Required JSON schema:
                 prompt,
                 "executor",
                 call_context,
-                cwd=repo_dir,
+                cwd=host_cwd,
                 env=dict(config.get("_candidate_env") or {}),
+                command_prefix=list(config.get("_executor_command_prefix") or []),
+                inherit_host_env=bool(config.get("_executor_inherit_host_env", True)),
+                resolve_command_on_host=bool(config.get("_executor_resolve_command_on_host", True)),
             )
         except AgentError as exc:
             # The agent returned no parseable JSON (typically it stopped early and
@@ -510,8 +516,8 @@ Required JSON schema:
             repair_prompt = self._repair_prompt(
                 candidate=candidate,
                 raw_output=raw_output,
-                repo_dir=repo_dir,
-                round_dir=round_dir,
+                repo_dir=visible_repo_dir,
+                round_dir=visible_round_dir,
                 candidate_json_path=candidate_json_path,
             )
             repair_client = self._repair_client_for_config(config)
@@ -520,8 +526,11 @@ Required JSON schema:
                 repair_prompt,
                 "executor",
                 call_context,
-                cwd=repo_dir,
+                cwd=host_cwd,
                 env=dict(config.get("_candidate_env") or {}),
+                command_prefix=list(config.get("_executor_command_prefix") or []),
+                inherit_host_env=bool(config.get("_executor_inherit_host_env", True)),
+                resolve_command_on_host=bool(config.get("_executor_resolve_command_on_host", True)),
             )
             repair_meta = {"repair_applied": True, "original_raw_output": raw_output}
         data = result.data
@@ -541,7 +550,7 @@ Required JSON schema:
         if timeout is None:
             return self.client
         return ClaudeCodeClient(
-            command=self.client.command,
+            command=str(config.get("_executor_command") or self.client.command),
             cwd=self.client.cwd,
             timeout_seconds=int(timeout),
             extra_args=list(self.client.extra_args),
@@ -562,7 +571,7 @@ Required JSON schema:
         repair_timeout = int(config.get("executor", {}).get("repair_timeout_seconds", 600))
         timeout_seconds = min(int(executor_timeout), repair_timeout)
         return ClaudeCodeClient(
-            command=self.client.command,
+            command=str(config.get("_executor_command") or self.client.command),
             cwd=self.client.cwd,
             timeout_seconds=timeout_seconds,
             extra_args=list(self.client.extra_args),

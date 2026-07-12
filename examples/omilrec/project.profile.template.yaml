@@ -53,6 +53,22 @@ execution:
   lifecycle: materialize_once
   max_parallel_candidates: 3
   fail_fast: false
+  runtime_backend: apptainer
+  apptainer:
+    image: /abs/path/omilrec-executor.sif
+    executable: apptainer
+    command: claude
+    cleanenv: true
+    containall: true
+    writable_tmpfs: true
+    container_repo: /workspace/repo
+    container_artifacts: /workspace/artifacts
+    container_scratch: /workspace/scratch
+    container_home: /workspace/home
+    claude_home_template: /abs/path/claude-home-template
+    env_allowlist: []
+    readonly_binds: []
+    extra_binds: []
 
 safety:
   editable_paths:

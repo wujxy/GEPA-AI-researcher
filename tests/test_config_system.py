@@ -201,6 +201,55 @@ class ConfigSystemTest(unittest.TestCase):
             self.assertTrue(config["evidence"]["visualize_when_applicable"])
             self.assertEqual(config["evidence"]["artifact_formats"], ["png"])
 
+    def test_apptainer_execution_profile_resolves_to_executor_backend(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_path, _ = self._write_fixture(root)
+            profile_path = root / "profile.yaml"
+            profile = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
+            image = root / "executor.sif"
+            image.write_text("image", encoding="utf-8")
+            home_template = root / "claude-home-template"
+            home_template.mkdir()
+            profile["execution"]["runtime_backend"] = "apptainer"
+            profile["execution"]["apptainer"] = {
+                "image": "executor.sif",
+                "command": "claude",
+                "cleanenv": True,
+                "containall": True,
+                "writable_tmpfs": True,
+                "container_repo": "/workspace/repo",
+                "container_artifacts": "/workspace/artifacts",
+                "container_scratch": "/workspace/scratch",
+                "container_home": "/workspace/home",
+                "claude_home_template": "claude-home-template",
+                "env_allowlist": ["HTTP_PROXY"],
+                "readonly_binds": [{"source": "executor.sif", "target": "/readonly/executor.sif"}],
+                "extra_binds": [],
+            }
+            profile_path.write_text(yaml.safe_dump(profile, sort_keys=False), encoding="utf-8")
+
+            config = load_and_resolve(task_path)
+
+            self.assertEqual(config["executor"]["runtime_backend"], "apptainer")
+            apptainer = config["executor"]["apptainer"]
+            self.assertEqual(apptainer["image"], str(image.resolve()))
+            self.assertEqual(apptainer["claude_home_template"], str(home_template.resolve()))
+            self.assertEqual(apptainer["readonly_binds"][0]["source"], str(image.resolve()))
+
+    def test_apptainer_execution_profile_requires_image(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_path, _ = self._write_fixture(root)
+            profile_path = root / "profile.yaml"
+            profile = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
+            profile["execution"]["runtime_backend"] = "apptainer"
+            profile["execution"]["apptainer"] = {"command": "claude"}
+            profile_path.write_text(yaml.safe_dump(profile, sort_keys=False), encoding="utf-8")
+
+            with self.assertRaisesRegex(ConfigError, r"execution\.apptainer\.image"):
+                load_and_resolve(task_path)
+
     def test_new_schema_rejects_unknown_field_with_precise_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

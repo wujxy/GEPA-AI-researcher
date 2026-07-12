@@ -45,8 +45,14 @@ SECTION_KEYS = {
         "pre_materialized_lfs_paths", "generated_tracked_paths", "hash_artifacts",
     },
     "asset": {"source", "target"},
+    "bind": {"source", "target", "mode"},
     "agent": {"command", "timeout_seconds", "extra_args"},
-    "execution": {"lifecycle", "max_parallel_candidates", "fail_fast"},
+    "execution": {"lifecycle", "max_parallel_candidates", "fail_fast", "runtime_backend", "apptainer"},
+    "apptainer": {
+        "image", "executable", "command", "cleanenv", "containall", "writable_tmpfs",
+        "container_repo", "container_artifacts", "container_scratch", "container_home",
+        "claude_home_template", "env_allowlist", "readonly_binds", "extra_binds",
+    },
 }
 LEGACY_UNUSED_FIELDS = (
     "gepa.frontier_policy",
@@ -154,6 +160,8 @@ def _resolve_task(task_config: dict[str, Any], task_path: Path) -> dict[str, Any
     min_rounds = int(budget.get("min_rounds", min(max_rounds, 2)))
     execution_profile = deepcopy(profile.get("execution") or {})
     worker_cap = int(execution_profile.get("max_parallel_candidates", 3))
+    runtime_backend = str(execution_profile.get("runtime_backend", "local"))
+    apptainer_config = _resolve_apptainer(execution_profile.get("apptainer") or {}, profile_base)
     agent_profile = deepcopy(profile.get("agent") or {})
 
     benchmark_commands = [metric["command"]] if metric.get("command") else []
@@ -246,6 +254,8 @@ def _resolve_task(task_config: dict[str, Any], task_path: Path) -> dict[str, Any
             "max_workers": min(candidates, worker_cap),
             "executor_timeout_seconds": timeout,
             "fail_fast": bool(execution_profile.get("fail_fast", False)),
+            "runtime_backend": runtime_backend,
+            **({"apptainer": apptainer_config} if runtime_backend == "apptainer" else {}),
         },
         "judger": {"pass_threshold": float(judger_config.get("pass_threshold", 0.85))},
         "initialization": {"seed_count": seed_count},
@@ -496,6 +506,13 @@ def _validate_profile(data: dict[str, Any]) -> None:
         _positive_int(execution["max_parallel_candidates"], "execution.max_parallel_candidates")
     if execution.get("lifecycle", "stateless") not in {"stateless", "materialize_once"}:
         raise ConfigError("execution.lifecycle: expected 'stateless' or 'materialize_once'")
+    runtime_backend = execution.get("runtime_backend", "local")
+    if runtime_backend not in {"local", "apptainer"}:
+        raise ConfigError("execution.runtime_backend: expected 'local' or 'apptainer'")
+    if runtime_backend == "apptainer":
+        _validate_apptainer(_section(execution.get("apptainer"), "apptainer", "execution.apptainer"))
+    elif "apptainer" in execution:
+        _validate_apptainer(_section(execution.get("apptainer"), "apptainer", "execution.apptainer"), require_image=False)
     _validate_safety(_section(data.get("safety") or {}, "safety"), "safety")
 
 
@@ -505,6 +522,35 @@ def _validate_safety(safety: dict[str, Any], path: str) -> None:
     for name in ("max_files_per_candidate", "max_commits_per_candidate"):
         if name in safety:
             _positive_int(safety[name], f"{path}.{name}")
+
+
+def _validate_apptainer(apptainer: dict[str, Any], require_image: bool = True) -> None:
+    if require_image:
+        _required_text(apptainer, "image", "execution.apptainer.image")
+    _optional_text_fields(
+        apptainer,
+        (
+            "image", "executable", "command", "container_repo", "container_artifacts",
+            "container_scratch", "container_home", "claude_home_template",
+        ),
+        "execution.apptainer",
+    )
+    for field in ("cleanenv", "containall", "writable_tmpfs"):
+        if field in apptainer and not isinstance(apptainer[field], bool):
+            raise ConfigError(f"execution.apptainer.{field}: expected boolean")
+    _string_list(apptainer.get("env_allowlist", []), "execution.apptainer.env_allowlist")
+    for field in ("readonly_binds", "extra_binds"):
+        values = apptainer.get(field, [])
+        if not isinstance(values, list):
+            raise ConfigError(f"execution.apptainer.{field}: expected list")
+        for index, value in enumerate(values):
+            if isinstance(value, str):
+                continue
+            bind = _section(value, "bind", f"execution.apptainer.{field}[{index}]")
+            _required_text(bind, "source", f"execution.apptainer.{field}[{index}].source")
+            _required_text(bind, "target", f"execution.apptainer.{field}[{index}].target")
+            if "mode" in bind:
+                _required_text(bind, "mode", f"execution.apptainer.{field}[{index}].mode")
 
 
 def _merge_safety(profile: dict[str, Any], task: dict[str, Any]) -> dict[str, Any]:
@@ -549,6 +595,22 @@ def _resolve_resources(resources: dict[str, Any], base: Path) -> dict[str, Any]:
         "generated_tracked_paths": list(resources.get("generated_tracked_paths") or []),
         "hash_artifacts": list(resources.get("hash_artifacts") or []),
     }
+
+
+def _resolve_apptainer(apptainer: dict[str, Any], base: Path) -> dict[str, Any]:
+    result = deepcopy(apptainer)
+    for field in ("image", "claude_home_template"):
+        if result.get(field):
+            result[field] = str(_path(result[field], base))
+    for field in ("readonly_binds", "extra_binds"):
+        values = []
+        for item in result.get(field, []) or []:
+            if isinstance(item, dict):
+                values.append({**item, "source": str(_path(item["source"], base))})
+            else:
+                values.append(item)
+        result[field] = values
+    return result
 
 
 def _resolve_git_ref(repo: Path, ref: str) -> str:

@@ -39,6 +39,19 @@ class QueuedClient:
         return response
 
 
+
+class RuntimeQueuedClient:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def run_json(self, prompt: str, label: str = "agent", call_context=None, **kwargs):
+        self.calls.append({"label": label, "prompt": prompt, "call_context": call_context, "kwargs": kwargs})
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
 def _make_candidate(candidate_id: str = "cand_000") -> Candidate:
     return Candidate(
         candidate_id=candidate_id,
@@ -608,6 +621,57 @@ class AgentComponentsTest(unittest.TestCase):
                 AgentExecutor(client, Path(tmp)).execute(_make_candidate("cand_003"), config)
         # Exactly one repair attempt, then the failure propagates.
         self.assertEqual(len(client.prompts), 2)
+
+    def test_executor_repair_uses_same_runtime_launch_options(self):
+        first_error = AgentError("not json")
+        first_error.raw_output = "partial non-json output"
+        result = type("Result", (), {
+            "text": "{}",
+            "data": {
+                "summary": "repair summarized",
+                "implementation": {"changed_files": [], "commands_run": [], "notes": ""},
+                "metrics": {"primary": None, "baseline": None, "delta": None},
+                "validation": {"passed": False, "checks": [], "regressions": []},
+                "diagnostics": [],
+                "artifact_paths": [],
+                "errors": [],
+            },
+        })()
+        client = RuntimeQueuedClient([first_error, result])
+        candidate = _make_candidate()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            host_repo = root / "repo"
+            host_artifacts = root / "artifacts"
+            host_repo.mkdir()
+            config = {
+                "task": {"goal": "optimize task"},
+                "executor": {"repair_retries": 1},
+                "_candidate_repo": "/workspace/repo",
+                "_candidate_workspace": "/workspace/artifacts",
+                "_candidate_repo_host": str(host_repo),
+                "_candidate_workspace_host": str(host_artifacts),
+                "_executor_host_cwd": str(host_repo),
+                "_executor_command_prefix": ["apptainer", "exec"],
+                "_executor_inherit_host_env": False,
+                "_executor_resolve_command_on_host": False,
+                "_candidate_env": {"HOME": "/workspace/home"},
+            }
+
+            AgentExecutor(client, root).execute(candidate, config)
+
+        self.assertEqual(len(client.calls), 2)
+        for call in client.calls:
+            self.assertEqual(call["kwargs"]["cwd"], host_repo)
+            self.assertEqual(call["kwargs"]["command_prefix"], ["apptainer", "exec"])
+            self.assertFalse(call["kwargs"]["inherit_host_env"])
+            self.assertFalse(call["kwargs"]["resolve_command_on_host"])
+            self.assertEqual(call["kwargs"]["env"]["HOME"], "/workspace/home")
+        self.assertIn("/workspace/repo", client.calls[0]["prompt"])
+        self.assertIn("/workspace/artifacts", client.calls[0]["prompt"])
+        self.assertIn("/workspace/repo", client.calls[1]["prompt"])
+        self.assertIn("/workspace/artifacts", client.calls[1]["prompt"])
 
 
 if __name__ == "__main__":

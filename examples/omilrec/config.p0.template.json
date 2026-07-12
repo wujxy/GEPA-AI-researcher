@@ -103,7 +103,24 @@
     "max_workers": 2,
     "executor_timeout_seconds": 2400,
     "fail_fast": false,
-    "per_candidate_workspace": true
+    "per_candidate_workspace": true,
+    "runtime_backend": "apptainer",
+    "apptainer": {
+      "image": "/abs/path/omilrec-executor.sif",
+      "executable": "apptainer",
+      "command": "claude",
+      "cleanenv": true,
+      "containall": true,
+      "writable_tmpfs": true,
+      "container_repo": "/workspace/repo",
+      "container_artifacts": "/workspace/artifacts",
+      "container_scratch": "/workspace/scratch",
+      "container_home": "/workspace/home",
+      "claude_home_template": "/abs/path/claude-home-template",
+      "env_allowlist": [],
+      "readonly_binds": [],
+      "extra_binds": []
+    }
   },
   "judger": {
     "pass_threshold": 0.85
