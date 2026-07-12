@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import random
 
-from .schemas import ParetoFrontier, ScoreMatrix
+from ..models.schemas import ParetoFrontier, ScoreMatrix
 
 
 class ParetoSelector:

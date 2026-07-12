@@ -1,0 +1,104 @@
+# GEPA-AI-researcher Requirements
+
+## 核心依赖（必需）
+
+### Python包依赖
+pyyaml>=6.0
+dataclasses>=0.6; python_version < '3.7'
+
+## 运行时依赖
+
+### 基础工具
+- git (用于工作树管理)
+- python3.11+ (推荐Python 3.11)
+
+### Claude Code接口
+- Claude Code CLI (用于executor agent执行)
+  - 可通过: `pip install claude-ai` 或使用官方发布版本
+
+## 可选依赖
+
+### Apptainer容器化（推荐用于生产环境）
+
+#### Apptainer运行时
+- apptainer>=1.0
+  - EL9: `sudo dnf install apptainer`
+  - 或从源码: https://apptainer.org/docs/install.html
+
+#### 容器镜像
+- 基础Python镜像: `docker://python:3.11-slim`
+- 或项目特定镜像（见docs/apptainer_setup_guide.md）
+
+### JUNO项目专用（如运行OMILREC优化）
+- JUNO软件环境 (CVMFS)
+- CVMFS客户端配置
+- GCC 11编译工具链
+- ROOT6框架
+
+## 开发依赖
+
+### 测试框架
+pytest>=7.0
+unittest (Python标准库)
+
+### 代码质量
+black>=22.0
+mypy>=0.900
+
+## 系统要求
+
+### 操作系统
+- Linux (EL9/Ubuntu 22.04推荐)
+- 4GB+ RAM
+- 10GB+ 磁盘空间
+
+### 权限
+- Git仓库读写权限
+- 创建工作树的权限
+- 容器执行权限（如使用Apptainer）
+
+## 环境变量
+
+### 可选但推荐
+- PATH: 包含git, python3
+- EDITOR: 文本编辑器
+- GIT_*: Git配置变量
+
+## Claude Code配置
+
+### API认证（可选但推荐）
+- Anthropic API密钥: 用于Claude Code高级功能
+- 或使用本地Claude模型
+
+### 配置文件
+- ~/.claude/config.json: Claude配置
+- 或项目特定配置
+
+## 安全建议
+
+### 容器隔离
+- 推荐使用Apptainer进行容器化隔离
+- 启用--cleanenv和--containall
+- 使用最小权限原则
+
+### 网络隔离
+- 生产环境建议网络隔离
+- 限制容器间不必要通信
+
+## 快速验证安装
+
+运行环境检查：
+```bash
+python -c "
+import sys
+import shutil
+import subprocess
+
+print('Python版本:', sys.version_info)
+print('Git可用:', shutil.which('git') is not None)
+print('Apptainer可用:', shutil.which('apptainer') is not None)
+print('Claude可用:', shutil.which('claude') is not None)
+"
+```
+
+详细设置指南见: docs/apptainer_setup_guide.md

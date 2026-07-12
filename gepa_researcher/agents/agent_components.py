@@ -6,15 +6,15 @@ from pathlib import Path
 from typing import Any
 
 from .agent_client import AgentError, ClaudeCodeClient
-from .config.contracts import format_role_contract
-from .context_views import (
+from ..config.contracts import format_role_contract
+from ..loop.context_views import (
     build_executor_context,
     build_judger_context,
     build_proposer_context,
     candidate_for_executor,
     evidence_access_policy,
 )
-from .schemas import AgentCallContext, Candidate, CandidateBatch, Judgment, LoopState, SampleTrace, Trace
+from ..models.schemas import AgentCallContext, Candidate, CandidateBatch, Judgment, LoopState, SampleTrace, Trace
 
 
 def format_runtime(config: dict[str, Any]) -> str:

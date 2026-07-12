@@ -7,11 +7,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .admission import CandidateAdmissionGate
-from .agent_client import AgentError, ClaudeCodeClient
-from .agent_components import AgentExecutor, AgentJudger, AgentProposer
-from .adapters import ExecutorAdapter, JudgerAdapter
-from .context import load_prior_context
+from .loop.admission import CandidateAdmissionGate
+from .agents.agent_client import AgentError, ClaudeCodeClient
+from .agents.agent_components import AgentExecutor, AgentJudger, AgentProposer
+from .agents.adapters import ExecutorAdapter, JudgerAdapter
+from .loop.context import load_prior_context
 from .display import (
     format_admission_summary,
     format_agent_action,
@@ -26,18 +26,18 @@ from .display import (
     format_run_header,
     format_trace_summary,
 )
-from .gate import GEPAGate
+from .loop.gate import GEPAGate
 from .config import ConfigError, load_and_resolve
-from .io_utils import append_jsonl, write_json
-from .pareto import ParetoSelector
-from .pool import CandidatePool
-from .registry import ExecutionRegistry
-from .runtime import config_for_eval, parent_trace_artifacts, recent_trace_summaries, resolve_dataset_split, select_feedback_minibatch
-from .schemas import Candidate, CandidateBatch, EvaluationBatch, GateDecision, GenerationDecision, Judgment, JudgmentBatch, LoopState, ParetoFrontier, ScoreMatrix, Trace
-from .score_matrix import ScoreMatrixBuilder
-from .store import RunStore
-from .usage import UsageTracker, format_round_usage, format_run_usage
-from .workspace import WorkspaceManager
+from .storage.io_utils import append_jsonl, write_json
+from .loop.pareto import ParetoSelector
+from .storage.pool import CandidatePool
+from .storage.registry import ExecutionRegistry
+from .loop.runtime import config_for_eval, parent_trace_artifacts, recent_trace_summaries, resolve_dataset_split, select_feedback_minibatch
+from .models.schemas import Candidate, CandidateBatch, EvaluationBatch, GateDecision, GenerationDecision, Judgment, JudgmentBatch, LoopState, ParetoFrontier, ScoreMatrix, Trace
+from .loop.score_matrix import ScoreMatrixBuilder
+from .storage.store import RunStore
+from .storage.usage import UsageTracker, format_round_usage, format_run_usage
+from .execution.workspace import WorkspaceManager
 
 
 class ResearchOrchestrator:

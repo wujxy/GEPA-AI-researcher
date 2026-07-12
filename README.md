@@ -5,9 +5,76 @@ human research objective into repeated proposer, executor, and judger agent
 cycles while keeping project resources, runtime contracts, workspaces, safety
 limits, and artifacts explicit.
 
-The current recommended configuration format is schema version 1: one task file
-plus one project profile file. Legacy single-file JSON configs are still loaded,
-but new runs should use the task/profile split.
+## 🚀 Quick Setup for Production Use
+
+### Prerequisite Installation
+
+To run GEPA with Apptainer isolation you only need:
+
+1. **Apptainer installed** (containerized execution). Docker is *not* required.
+```bash
+sudo dnf install -y apptainer   # EL9 systems
+apptainer --version
+```
+   GEPA builds the executor image by pulling OCI layers directly
+   (`apptainer build out.sif docker://...`), which works without any Docker
+   daemon. On hosts where Apptainer's setuid helper is unavailable, GEPA
+   auto-detects this and runs exec under `--userns` (unprivileged user
+   namespaces) instead.
+
+2. **Claude Code available on the host** (for executor agents). GEPA binds the
+   host Claude + node installation read-only into the executor container, so no
+   Claude needs to be baked into the image. Just ensure the configured
+   `agent.command` resolves on the host.
+
+### Quick Start
+
+Set `execution.runtime_backend: apptainer` in your project profile and run — the
+executor image is built automatically and reused from a content-addressed cache:
+
+```bash
+# Validate configuration (also materializes/reuses the image once)
+python -m gepa_researcher.cli validate --config your_task.yaml
+
+# Run with Apptainer isolation
+python -m gepa_researcher.cli run --config your_task.yaml --run-dir ./gepa-run
+```
+
+The image is derived from the resolved config (not file-extension heuristics): a
+thin `almalinux:9` base when `/cvmfs` or build tools are referenced (the JUNO
+toolchain comes from a read-only `/cvmfs` bind), or `python:3.11-slim` for
+pure-Python tasks. See [Apptainer Setup Guide](docs/apptainer_setup_guide.md).
+
+## 📋 Detailed Requirements
+
+See [requirements.txt](requirements.txt) for complete dependency list and [docs/apptainer_setup_guide.md](docs/apptainer_setup_guide.md) for detailed Apptainer configuration instructions.
+
+## 🛠️ Automatic Image Materialization
+
+When `execution.runtime_backend: apptainer` is set, GEPA materializes the executor
+image for you — there is **no separate setup step** and **no Docker requirement**.
+It derives the image from the resolved config, builds/reuses a thin SIF, binds the
+host Claude+node and (when referenced) `/cvmfs` read-only, auto-detects `--userns`
+when setuid is unavailable, and validates the result by really executing commands
+inside the container.
+
+```bash
+# Build/reuse + validate the image explicitly, and print diagnostics:
+python -m gepa_researcher.cli setup-apptainer --config your_task.yaml
+python -m gepa_researcher.cli setup-apptainer --config your_task.yaml --force   # rebuild
+
+# Or just run/validate — the image materializes lazily on first use and is reused
+# thereafter from a content-addressed cache (~/.cache/gepa/images by default).
+python -m gepa_researcher.cli run      --config your_task.yaml --run-dir ./gepa-run
+python -m gepa_researcher.cli validate --config your_task.yaml
+```
+
+Override the cache location with `GEPA_IMAGE_CACHE_DIR`. To skip materialization
+entirely (pure schema resolve/validate), pass `--no-materialize`. To supply your
+own prebuilt SIF instead, set `execution.apptainer.image` and
+`execution.apptainer.auto_image: false`.
+
+## Configuration Model
 
 ## Configuration Model
 
@@ -247,13 +314,19 @@ The executor sees container paths such as `/workspace/repo` and
 worktree path.
 
 When `runtime_backend: apptainer` is selected, `execution.apptainer.image` is
-required and missing Apptainer/image configuration fails fast. GEPA does not
-automatically fall back to host execution. By default the backend uses strict
-`--cleanenv`/`--containall`, creates per-candidate HOME, scratch, and tmp
-directories under the candidate artifact directory, copies `claude_home_template`
-there when configured, and passes only PATH plus `env_allowlist` variables into
-the executor process. Do not bind the host `$HOME` directly; use a minimal
-per-run Claude home template instead.
+**optional** by default: GEPA auto-materializes a thin executor image from the
+resolved config (see *Automatic Image Materialization* above) and reuses it from a
+content-addressed cache. Set `execution.apptainer.auto_image: false` to require an
+explicit `image` instead. GEPA does not automatically fall back to host execution.
+The backend uses strict `--cleanenv`/`--containall`, sets a per-execution `HOME`
+via `--home` (apptainer ignores `HOME` passed through `--env`), creates per-candidate
+scratch and tmp directories under the candidate artifact directory, copies
+`claude_home_template` there when configured, and passes only PATH plus
+`env_allowlist` variables into the executor process. If the host Apptainer lacks a
+setuid helper, GEPA auto-detects this and adds `--userns` (also settable manually
+via `execution.apptainer.userns`, with arbitrary extra flags in `extra_exec_args`).
+Do not bind the host `$HOME` directly; use a minimal per-run Claude home template
+instead.
 
 `resources.pre_materialized_lfs_paths` documents LFS-backed files that are
 already materialized inside the project repository. GEPA preserves this metadata

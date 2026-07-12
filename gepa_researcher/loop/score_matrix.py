@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .io_utils import read_json, write_json
-from .schemas import Judgment, JudgmentBatch, ScoreMatrix
+from ..storage.io_utils import read_json, write_json
+from ..models.schemas import Judgment, JudgmentBatch, ScoreMatrix
 
 
 class ScoreMatrixBuilder:

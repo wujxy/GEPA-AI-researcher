@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .context_views import trace_summary_for_proposer
-from .schemas import DatasetSplit
+from ..models.schemas import DatasetSplit
 
 
 def all_sample_ids(config: dict[str, Any]) -> list[str]:
@@ -75,7 +75,7 @@ def recent_trace_summaries(run_dir: Path, limit: int = 5) -> list[dict[str, Any]
             data = json.loads(row)
         except Exception:
             continue
-        from .schemas import SampleTrace, Trace
+        from ..models.schemas import SampleTrace, Trace
 
         trace = Trace(
             candidate_id=str(data.get("candidate_id")),

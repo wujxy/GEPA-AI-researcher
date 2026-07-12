@@ -5,7 +5,7 @@ loop runs end-to-end without Claude. These live in ``tests/`` (test scaffolding)
 NOT in the ``gepa_researcher`` package, so the package stays free of any
 task-specific or mock component code.
 """
-from gepa_researcher.schemas import Candidate, CandidateBatch, Judgment, SampleTrace, Trace
+from gepa_researcher.models.schemas import Candidate, CandidateBatch, Judgment, SampleTrace, Trace
 
 
 class FakeProposer:

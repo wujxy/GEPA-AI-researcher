@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .schemas import AdmissionDecision, Candidate, DatasetSplit, GateDecision, GenerationDecision, Judgment, LoopState, ParetoFrontier, Trace
+from .models.schemas import AdmissionDecision, Candidate, DatasetSplit, GateDecision, GenerationDecision, Judgment, LoopState, ParetoFrontier, Trace
 
 
 def _format_value(value: Any) -> str:

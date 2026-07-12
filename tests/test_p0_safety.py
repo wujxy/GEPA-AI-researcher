@@ -7,12 +7,12 @@ import threading
 import unittest
 from pathlib import Path
 
-from gepa_researcher.admission import CandidateAdmissionGate
-from gepa_researcher.agent_client import AgentError, ClaudeCodeClient
-from gepa_researcher.adapters import ExecutorAdapter, JudgerAdapter
-from gepa_researcher.provenance import audit_commit
-from gepa_researcher.registry import ExecutionRegistry
-from gepa_researcher.schemas import (
+from gepa_researcher.loop.admission import CandidateAdmissionGate
+from gepa_researcher.agents.agent_client import AgentError, ClaudeCodeClient
+from gepa_researcher.agents.adapters import ExecutorAdapter, JudgerAdapter
+from gepa_researcher.storage.provenance import audit_commit
+from gepa_researcher.storage.registry import ExecutionRegistry
+from gepa_researcher.models.schemas import (
     AgentCallContext,
     AgentCallRecord,
     Candidate,
@@ -22,8 +22,8 @@ from gepa_researcher.schemas import (
     SampleTrace,
     Trace,
 )
-from gepa_researcher.usage import UsageTracker, normalize_usage
-from gepa_researcher.workspace import WorkspaceManager
+from gepa_researcher.storage.usage import UsageTracker, normalize_usage
+from gepa_researcher.execution.workspace import WorkspaceManager
 
 
 def _git(repo: Path, *args: str) -> str:

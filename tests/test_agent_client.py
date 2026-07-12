@@ -7,7 +7,7 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
-from gepa_researcher.agent_client import AgentError, ClaudeCodeClient
+from gepa_researcher.agents.agent_client import AgentError, ClaudeCodeClient
 
 
 class ClaudeCodeClientTest(unittest.TestCase):

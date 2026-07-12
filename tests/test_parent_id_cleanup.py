@@ -12,8 +12,8 @@ from __future__ import annotations
 import unittest
 from datetime import datetime, timezone
 
-from gepa_researcher.schemas import Candidate
-from gepa_researcher.context_views import candidate_for_agent
+from gepa_researcher.models.schemas import Candidate
+from gepa_researcher.loop.context_views import candidate_for_agent
 
 
 class TestParentIdCleanup(unittest.TestCase):

@@ -6,3 +6,6 @@ __pycache__/
 .venv/
 venv/
 examples/*/runs/
+
+# stale run transcripts (regenerable)
+docs/*.log

@@ -52,6 +52,10 @@ SECTION_KEYS = {
         "image", "executable", "command", "cleanenv", "containall", "writable_tmpfs",
         "container_repo", "container_artifacts", "container_scratch", "container_home",
         "claude_home_template", "env_allowlist", "readonly_binds", "extra_binds",
+        # Auto-materialization knobs (all optional). When `auto_image` is unset or
+        # true, `image` is optional — the container_image materializer fills it.
+        "userns", "extra_exec_args", "auto_image", "base_image",
+        "extra_packages", "container_claude_dir",
     },
 }
 LEGACY_UNUSED_FIELDS = (
@@ -525,20 +529,30 @@ def _validate_safety(safety: dict[str, Any], path: str) -> None:
 
 
 def _validate_apptainer(apptainer: dict[str, Any], require_image: bool = True) -> None:
-    if require_image:
+    auto_image = apptainer.get("auto_image", None)
+    if auto_image is not None and not isinstance(auto_image, bool):
+        raise ConfigError("execution.apptainer.auto_image: expected boolean or null")
+    # `image` is required only when auto-materialization is definitively disabled.
+    # When `auto_image` is null (auto) or true, the container_image materializer
+    # builds/fills the image at run time, so a missing image is not a schema error.
+    effective_require_image = require_image and (auto_image is False)
+    if effective_require_image:
         _required_text(apptainer, "image", "execution.apptainer.image")
     _optional_text_fields(
         apptainer,
         (
             "image", "executable", "command", "container_repo", "container_artifacts",
             "container_scratch", "container_home", "claude_home_template",
+            "base_image", "container_claude_dir",
         ),
         "execution.apptainer",
     )
-    for field in ("cleanenv", "containall", "writable_tmpfs"):
+    for field in ("cleanenv", "containall", "writable_tmpfs", "userns"):
         if field in apptainer and not isinstance(apptainer[field], bool):
             raise ConfigError(f"execution.apptainer.{field}: expected boolean")
     _string_list(apptainer.get("env_allowlist", []), "execution.apptainer.env_allowlist")
+    _string_list(apptainer.get("extra_exec_args", []), "execution.apptainer.extra_exec_args")
+    _string_list(apptainer.get("extra_packages", []), "execution.apptainer.extra_packages")
     for field in ("readonly_binds", "extra_binds"):
         values = apptainer.get(field, [])
         if not isinstance(values, list):

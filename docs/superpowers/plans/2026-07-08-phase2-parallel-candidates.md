@@ -57,7 +57,7 @@
 ```python
 import unittest
 
-from gepa_researcher.schemas import (
+from gepa_researcher.models.schemas import (
     Candidate,
     CandidateBatch,
     GenerationDecision,
@@ -198,7 +198,7 @@ Append to `Phase2BatchFlowTest`:
 ```python
     def test_rule_based_proposer_returns_default_batch_of_ten(self):
         from gepa_researcher.proposer import RuleBasedProposer
-        from gepa_researcher.schemas import LoopState
+        from gepa_researcher.models.schemas import LoopState
 
         config = {
             "generation": {"batch_size": 10},
@@ -342,7 +342,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from gepa_researcher.schemas import SampleTrace
+from gepa_researcher.models.schemas import SampleTrace
 
 
 class RecordingExecutor:
@@ -644,7 +644,7 @@ Append:
 
 ```python
     def test_topk_gater_keeps_best_candidates_and_feedback(self):
-        from gepa_researcher.schemas import LoopState
+        from gepa_researcher.models.schemas import LoopState
         from gepa_researcher.topk_gater import TopKGater
 
         judgments = [
@@ -761,8 +761,8 @@ Append:
 ```python
     def test_orchestrator_run_generation_archives_all_phase2_outputs(self):
         from gepa_researcher.orchestrator import ResearchOrchestrator
-        from gepa_researcher.io_utils import read_json
-        from gepa_researcher.schemas import LoopState
+        from gepa_researcher.storage.io_utils import read_json
+        from gepa_researcher.models.schemas import LoopState
 
         config_path = Path("examples/paper_qa/config.json").resolve()
         config = read_json(config_path)

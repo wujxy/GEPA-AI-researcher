@@ -6,11 +6,11 @@ from time import perf_counter
 from typing import Any
 import uuid
 
-from .io_utils import append_jsonl, write_json
-from .provenance import audit_commit
-from .registry import ExecutionRegistry
-from .runtime_backend import runtime_backend_for
-from .schemas import (
+from ..storage.io_utils import append_jsonl, write_json
+from ..storage.provenance import audit_commit
+from ..storage.registry import ExecutionRegistry
+from ..execution.runtime_backend import runtime_backend_for
+from ..models.schemas import (
     Candidate,
     CandidateBatch,
     ExecutionRecord,
@@ -21,7 +21,7 @@ from .schemas import (
     TraceBatch,
     WorkspaceLease,
 )
-from .workspace import WorkspaceManager
+from ..execution.workspace import WorkspaceManager
 
 
 class ExecutorAdapter:
@@ -141,8 +141,26 @@ class ExecutorAdapter:
                 config.get("agent", {}).get("timeout_seconds", 600),
             )
         )
+
+        # Worktree integrity validation for evaluate_only mode
+        worktree_before_snapshot = None
+        if record.execution_mode == "evaluate_only" and lease.mode == "git_worktree":
+            worktree_before_snapshot = self.workspace_manager.worktree_snapshot(lease.worktree_path)
+
         start = perf_counter()
         trace = self.executor.execute(candidate, candidate_config)
+
+        # Post-execution worktree integrity check
+        if record.execution_mode == "evaluate_only" and lease.mode == "git_worktree" and worktree_before_snapshot:
+            worktree_after_snapshot = self.workspace_manager.worktree_snapshot(lease.worktree_path)
+            if worktree_before_snapshot != worktree_after_snapshot:
+                # Log warning but continue execution for backward compatibility
+                if trace.samples:
+                    trace.samples[0].artifacts["_worktree_integrity_warning"] = {
+                        "before": worktree_before_snapshot,
+                        "after": worktree_after_snapshot,
+                        "note": "Worktree state changed during evaluate_only execution"
+                    }
         if trace.samples:
             trace.samples[0].artifacts.setdefault("executor_wall_seconds", round(perf_counter() - start, 4))
         # Audit the delivered commit (read-only). No "provenance" layer: we keep

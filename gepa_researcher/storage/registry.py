@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .io_utils import read_json, write_json
-from .schemas import AdmissionDecision, ExecutionRecord, WorkspaceLease
+from ..models.schemas import AdmissionDecision, ExecutionRecord, WorkspaceLease
 
 
 class ExecutionRegistry:

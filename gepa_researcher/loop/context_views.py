@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .schemas import Candidate, LoopState, SampleTrace, Trace
+from ..models.schemas import Candidate, LoopState, SampleTrace, Trace
 
 
 ARTIFACT_KEYS_FOR_CONTEXT = {

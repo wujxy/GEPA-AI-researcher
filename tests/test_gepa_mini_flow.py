@@ -6,7 +6,7 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 
-from gepa_researcher.schemas import Candidate, GateDecision, Judgment, JudgmentBatch, ParetoFrontier, SampleTrace, ScoreMatrix, Trace
+from gepa_researcher.models.schemas import Candidate, GateDecision, Judgment, JudgmentBatch, ParetoFrontier, SampleTrace, ScoreMatrix, Trace
 
 
 class RecordingExecutor:
@@ -68,7 +68,7 @@ class GEPAMiniFlowTest(unittest.TestCase):
         )
 
     def test_executor_adapter_isolates_workspaces_and_records_failures(self):
-        from gepa_researcher.adapters import ExecutorAdapter
+        from gepa_researcher.agents.adapters import ExecutorAdapter
 
         candidates = [self._candidate(f"cand_000_{index:03d}") for index in range(4)]
         inner = RecordingExecutor()
@@ -92,8 +92,8 @@ class GEPAMiniFlowTest(unittest.TestCase):
             self.assertEqual(len((run_dir / "traces.jsonl").read_text(encoding="utf-8").splitlines()), 4)
 
     def test_judger_adapter_emits_per_candidate_judgments(self):
-        from gepa_researcher.adapters import JudgerAdapter
-        from gepa_researcher.schemas import TraceBatch
+        from gepa_researcher.agents.adapters import JudgerAdapter
+        from gepa_researcher.models.schemas import TraceBatch
 
         candidates = [self._candidate(f"cand_000_{index:03d}") for index in range(3)]
         trace_batch = TraceBatch(
@@ -109,7 +109,7 @@ class GEPAMiniFlowTest(unittest.TestCase):
         self.assertEqual(judgment_batch.summary["best_candidate_id"], "cand_000_000")
 
     def test_score_matrix_uses_per_task_scores(self):
-        from gepa_researcher.score_matrix import ScoreMatrixBuilder
+        from gepa_researcher.loop.score_matrix import ScoreMatrixBuilder
 
         judgments = [
             Judgment(
@@ -141,7 +141,7 @@ class GEPAMiniFlowTest(unittest.TestCase):
         self.assertAlmostEqual(matrix.aggregate_scores["cand_a"], 0.5)
 
     def test_pareto_selector_keeps_per_task_winners(self):
-        from gepa_researcher.pareto import ParetoSelector
+        from gepa_researcher.loop.pareto import ParetoSelector
 
         matrix = ScoreMatrix(
             round_id=0,
@@ -159,7 +159,7 @@ class GEPAMiniFlowTest(unittest.TestCase):
         self.assertEqual(frontier.per_task_best["task_2"], ["cand_b"])
 
     def test_gepa_gate_accepts_task_best_and_discards_non_improver(self):
-        from gepa_researcher.gate import GEPAGate
+        from gepa_researcher.loop.gate import GEPAGate
 
         candidates = [
             self._candidate("child_good", 1, ["parent"]),
@@ -183,7 +183,7 @@ class GEPAMiniFlowTest(unittest.TestCase):
 
     def test_generation_decision_merges_feedback_and_accepted_pareto_feedback(self):
         from gepa_researcher.orchestrator import ResearchOrchestrator
-        from gepa_researcher.schemas import LoopState
+        from gepa_researcher.models.schemas import LoopState
 
         orchestrator = ResearchOrchestrator(
             config={
@@ -225,7 +225,7 @@ class GEPAMiniFlowTest(unittest.TestCase):
 
     def test_generation_decision_uses_pareto_feedback_when_no_candidate_accepted(self):
         from gepa_researcher.orchestrator import ResearchOrchestrator
-        from gepa_researcher.schemas import LoopState
+        from gepa_researcher.models.schemas import LoopState
 
         orchestrator = ResearchOrchestrator(
             config={

@@ -5,9 +5,9 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 
-from gepa_researcher.agent_client import AgentError, ClaudeCodeClient
-from gepa_researcher.agent_components import AgentExecutor, AgentJudger, AgentProposer
-from gepa_researcher.schemas import Candidate, LoopState, SampleTrace, Trace
+from gepa_researcher.agents.agent_client import AgentError, ClaudeCodeClient
+from gepa_researcher.agents.agent_components import AgentExecutor, AgentJudger, AgentProposer
+from gepa_researcher.models.schemas import Candidate, LoopState, SampleTrace, Trace
 
 
 class CapturingClient:

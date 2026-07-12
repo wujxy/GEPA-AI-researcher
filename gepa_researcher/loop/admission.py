@@ -8,7 +8,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from .schemas import AdmissionDecision, Candidate
+from ..models.schemas import AdmissionDecision, Candidate
 
 
 class CandidateAdmissionGate:

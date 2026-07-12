@@ -11,12 +11,12 @@ from pathlib import Path
 import yaml
 
 from gepa_researcher.cli import main as cli_main
-from gepa_researcher.agent_components import AgentJudger, AgentProposer
+from gepa_researcher.agents.agent_components import AgentJudger, AgentProposer
 from gepa_researcher.config import ConfigError, load_and_resolve, sanitize_snapshot
 from gepa_researcher.config.contracts import role_contract
-from gepa_researcher.io_utils import read_json
+from gepa_researcher.storage.io_utils import read_json
 from gepa_researcher.orchestrator import ResearchOrchestrator
-from gepa_researcher.schemas import Candidate, LoopState, SampleTrace, Trace
+from gepa_researcher.models.schemas import Candidate, LoopState, SampleTrace, Trace
 from tests._fakes import fake_components
 
 
@@ -237,16 +237,25 @@ class ConfigSystemTest(unittest.TestCase):
             self.assertEqual(apptainer["claude_home_template"], str(home_template.resolve()))
             self.assertEqual(apptainer["readonly_binds"][0]["source"], str(image.resolve()))
 
-    def test_apptainer_execution_profile_requires_image(self):
+    def test_apptainer_execution_profile_requires_image_only_when_auto_disabled(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             task_path, _ = self._write_fixture(root)
             profile_path = root / "profile.yaml"
+
+            # image is optional when auto_image is unset (auto) or true: the
+            # container_image materializer fills it at run time.
             profile = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
             profile["execution"]["runtime_backend"] = "apptainer"
             profile["execution"]["apptainer"] = {"command": "claude"}
             profile_path.write_text(yaml.safe_dump(profile, sort_keys=False), encoding="utf-8")
+            resolved = load_and_resolve(task_path)
+            self.assertNotIn("image", resolved["executor"]["apptainer"])
 
+            # image is required only when auto_image is explicitly false.
+            profile = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
+            profile["execution"]["apptainer"] = {"command": "claude", "auto_image": False}
+            profile_path.write_text(yaml.safe_dump(profile, sort_keys=False), encoding="utf-8")
             with self.assertRaisesRegex(ConfigError, r"execution\.apptainer\.image"):
                 load_and_resolve(task_path)
 

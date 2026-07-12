@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .io_utils import append_jsonl, read_json, write_json
-from .schemas import Candidate, CandidatePoolSnapshot
+from ..models.schemas import Candidate, CandidatePoolSnapshot
 
 
 class CandidatePool:

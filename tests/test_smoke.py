@@ -5,8 +5,8 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 
-from gepa_researcher.io_utils import read_json
-from gepa_researcher.schemas import Candidate, CandidateBatch
+from gepa_researcher.storage.io_utils import read_json
+from gepa_researcher.models.schemas import Candidate, CandidateBatch
 from gepa_researcher.orchestrator import ResearchOrchestrator
 
 from tests._fakes import FakeExecutor, FakeJudger, fake_components, make_generic_config

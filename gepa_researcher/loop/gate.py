@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .schemas import Candidate, GateDecision, Judgment, ParetoFrontier, ScoreMatrix
+from ..models.schemas import Candidate, GateDecision, Judgment, ParetoFrontier, ScoreMatrix
 
 
 class GEPAGate:

@@ -55,12 +55,19 @@ execution:
   fail_fast: false
   runtime_backend: apptainer
   apptainer:
-    image: /abs/path/omilrec-executor.sif
+    # `image` is OPTIONAL: with auto_image enabled (the default), GEPA derives a
+    # thin almalinux:9 base from the config, builds/reuses it from
+    # ~/.cache/gepa/images, and binds /cvmfs + the host claude/node read-only.
+    # Set `auto_image: false` and provide `image:` to use your own prebuilt SIF.
+    auto_image: true
+    # image: /abs/path/omilrec-executor.sif
     executable: apptainer
     command: claude
     cleanenv: true
     containall: true
     writable_tmpfs: true
+    # `userns` is auto-detected; set explicitly only to override the probe.
+    # userns: true
     container_repo: /workspace/repo
     container_artifacts: /workspace/artifacts
     container_scratch: /workspace/scratch

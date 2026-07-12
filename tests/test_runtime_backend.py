@@ -4,8 +4,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from gepa_researcher.runtime_backend import ApptainerRuntimeBackend, RuntimeBackendError, runtime_backend_for
-from gepa_researcher.schemas import Candidate, ExecutionRecord, WorkspaceLease
+from gepa_researcher.execution.runtime_backend import ApptainerRuntimeBackend, RuntimeBackendError, RuntimeLease, runtime_backend_for
+from gepa_researcher.models.schemas import Candidate, ExecutionRecord, WorkspaceLease
 
 
 def _candidate():
@@ -106,20 +106,181 @@ class RuntimeBackendTest(unittest.TestCase):
             self.assertEqual(runtime.artifact_path, "/workspace/artifacts")
             self.assertFalse(runtime.inherit_host_env)
             self.assertEqual(runtime.command, "claude-in-container")
-            self.assertEqual(runtime.env["GEPA_WORKTREE"], "/workspace/repo")
-            self.assertEqual(runtime.env["GEPA_ARTIFACTS"], "/workspace/artifacts")
-            self.assertEqual(runtime.env["HOME"], "/workspace/home")
-            self.assertEqual(runtime.env["TMPDIR"], "/workspace/scratch/tmp")
-            self.assertEqual(runtime.env["GEPA_ALLOW_TEST"], "allowed")
-            self.assertNotIn("SECRET_TEST", runtime.env)
+            # Environment variables now passed via --env, not in env dict
+            self.assertEqual(runtime.env, {})  # Empty since --env used
             self.assertTrue((Path(runtime.artifacts["host_home"]) / "auth.json").exists())
             self.assertTrue((Path(runtime.artifacts["host_scratch"]) / "tmp").is_dir())
             joined = "\n".join(runtime.command_prefix)
             self.assertIn("--cleanenv", runtime.command_prefix)
             self.assertIn("--containall", runtime.command_prefix)
+            # Verify --env arguments for GEPA variables
+            self.assertIn("--env", runtime.command_prefix)
+            self.assertIn("GEPA_WORKTREE=/workspace/repo", runtime.command_prefix)
+            self.assertIn("GEPA_ARTIFACTS=/workspace/artifacts", runtime.command_prefix)
+            # HOME is set via --home (apptainer silently ignores HOME via --env);
+            # TMPDIR is still passed via --env.
+            self.assertIn("--home", runtime.command_prefix)
+            home_idx = runtime.command_prefix.index("--home")
+            self.assertTrue(
+                runtime.command_prefix[home_idx + 1].endswith(":/workspace/artifacts/home_exec-1"),
+                runtime.command_prefix[home_idx + 1],
+            )
+            self.assertNotIn("HOME=/workspace/artifacts/home_exec-1", runtime.command_prefix)
+            self.assertIn("TMPDIR=/workspace/artifacts/scratch_exec-1/tmp", runtime.command_prefix)
+            self.assertIn("GEPA_ALLOW_TEST=allowed", runtime.command_prefix)
+            # Verify SECRET_TEST is not in --env arguments
+            self.assertNotIn("SECRET_TEST", joined)
             self.assertIn(f"{readonly}:/workspace/repo/TEMP/fixtures/time_pdf.bin:ro", joined)
             self.assertIn(f"{readonly}:/readonly/fixture.bin:ro", joined)
             self.assertIn(f"{root}:/extra:rw", joined)
+
+    def test_apptainer_backend_redacts_environment_values_in_to_dict(self):
+        """Security: Verify environment variable values are redacted in to_dict()"""
+        runtime_lease = RuntimeLease(
+            backend="apptainer",
+            repo_path="/workspace/repo",
+            artifact_path="/workspace/artifacts",
+            host_cwd="/host/repo",
+            command="claude",
+            command_prefix=["apptainer", "exec"],
+            env={
+                "SECRET_KEY": "super_secret_value_12345",
+                "API_TOKEN": "api_token_xyz",
+                "GEPA_CANDIDATE_ID": "cand_000"
+            },
+            inherit_host_env=False,
+        )
+
+        # Convert to dict (as happens when persisting to trace artifacts)
+        lease_dict = runtime_lease.to_dict()
+
+        # Verify environment values are redacted but keys are preserved
+        self.assertIn("env", lease_dict)
+        self.assertTrue(lease_dict["env"].get("_redacted"))
+        self.assertEqual(lease_dict["env"]["_count"], 3)
+        self.assertIn("SECRET_KEY", lease_dict["env"]["_keys"])
+        self.assertIn("API_TOKEN", lease_dict["env"]["_keys"])
+        self.assertIn("GEPA_CANDIDATE_ID", lease_dict["env"]["_keys"])
+
+        # Verify actual secret values are NOT in the dict
+        dict_string = str(lease_dict)
+        self.assertNotIn("super_secret_value_12345", dict_string)
+        self.assertNotIn("api_token_xyz", dict_string)
+
+    def test_local_backend_redacts_environment_values_in_to_dict(self):
+        """Security: Verify local backend also redacts environment values"""
+        runtime_lease = RuntimeLease(
+            backend="local",
+            repo_path="/local/repo",
+            artifact_path="/local/artifacts",
+            host_cwd="/local/repo",
+            env={
+                "PASSWORD": "my_password",
+                "USERNAME": "admin"
+            },
+            inherit_host_env=True,
+        )
+
+        lease_dict = runtime_lease.to_dict()
+
+        # Verify redaction
+        self.assertTrue(lease_dict["env"].get("_redacted"))
+        self.assertEqual(lease_dict["env"]["_count"], 2)
+        self.assertNotIn("my_password", str(lease_dict))
+
+    def test_workspace_manager_worktree_snapshot_and_validation(self):
+        """Test worktree integrity validation methods"""
+        from gepa_researcher.execution.workspace import WorkspaceManager, WorkspaceError
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "test_repo"
+            repo.mkdir()
+
+            # Initialize a git repository
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True, capture_output=True)
+
+            # Create initial commit
+            (repo / "test.txt").write_text("content", encoding="utf-8")
+            subprocess.run(["git", "add", "test.txt"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "initial"], cwd=repo, check=True, capture_output=True)
+
+            # Create WorkspaceManager in git_worktree mode
+            config = {
+                "workspace": {
+                    "mode": "git_worktree",
+                    "repo_path": str(repo),
+                    "baseline_ref": "HEAD",
+                }
+            }
+            wm = WorkspaceManager(root / "run_dir", config)
+
+            # Test worktree_snapshot
+            snapshot = wm.worktree_snapshot(str(repo))
+            self.assertIn("head", snapshot)
+            self.assertIn("status", snapshot)
+            self.assertNotIn("error", snapshot)
+
+            # Test assert_worktree_unchanged with no changes
+            wm.assert_worktree_unchanged(snapshot, str(repo))  # Should not raise
+
+            # Modify the worktree
+            (repo / "modified.txt").write_text("modified", encoding="utf-8")
+
+            # Get new snapshot
+            modified_snapshot = wm.worktree_snapshot(str(repo))
+
+            # Test assert_worktree_unchanged with changes (should raise)
+            with self.assertRaises(WorkspaceError) as ctx:
+                wm.assert_worktree_unchanged(snapshot, str(repo))
+            self.assertIn("Worktree corrupted during execution", str(ctx.exception))
+
+    def test_workspace_manager_worktree_snapshot_handles_errors_gracefully(self):
+        """Test worktree_snapshot handles non-git directories gracefully"""
+        from gepa_researcher.execution.workspace import WorkspaceManager
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # Test with non-git directory
+            non_git_dir = Path(tmp) / "not_a_repo"
+            non_git_dir.mkdir()
+
+            config = {"workspace": {"mode": "artifact_directory"}}
+            wm = WorkspaceManager(Path(tmp) / "run_dir", config)
+
+            # Should return empty dict for non-git directories
+            snapshot = wm.worktree_snapshot(str(non_git_dir))
+            self.assertEqual(snapshot, {})
+
+            # Should not raise error with empty snapshot
+            wm.assert_worktree_unchanged({}, str(non_git_dir))
+
+    def test_apptainer_backend_injects_userns_and_extra_exec_args(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image = root / "executor.sif"
+            image.write_text("image", encoding="utf-8")
+            apptainer = root / "apptainer"
+            apptainer.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            os.chmod(apptainer, 0o755)
+            lease = _lease(root)
+            config = {
+                "executor": {
+                    "runtime_backend": "apptainer",
+                    "apptainer": {
+                        "image": str(image),
+                        "executable": str(apptainer),
+                        "userns": True,
+                        "extra_exec_args": ["--no-mount", "home"],
+                    },
+                },
+            }
+            runtime = ApptainerRuntimeBackend(root, config).prepare(_candidate(), lease, _record())
+            self.assertIn("--userns", runtime.command_prefix)
+            self.assertIn("--no-mount", runtime.command_prefix)
+            self.assertIn("home", runtime.command_prefix)
 
     def test_apptainer_backend_fails_without_image(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -9,9 +9,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .config import sanitize_snapshot
+from ..config import sanitize_snapshot
 from .io_utils import append_jsonl, read_json, write_json
-from .schemas import (
+from ..models.schemas import (
     Candidate,
     CandidateBatch,
     EvaluationBatch,
@@ -147,12 +147,12 @@ class RunStore:
 
     def save_score_matrix(self, matrix: ScoreMatrix) -> None:
         """Save score matrix (global, not round-specific)."""
-        from .score_matrix import ScoreMatrixBuilder
+        from ..loop.score_matrix import ScoreMatrixBuilder
         ScoreMatrixBuilder.persist(matrix, self.run_dir / "score_matrix.json")
 
     def load_score_matrix(self, round_id: int = 0) -> ScoreMatrix:
         """Load score matrix."""
-        from .score_matrix import ScoreMatrixBuilder
+        from ..loop.score_matrix import ScoreMatrixBuilder
         return ScoreMatrixBuilder.load(self.run_dir / "score_matrix.json", round_id=round_id)
 
     # ============================================================================

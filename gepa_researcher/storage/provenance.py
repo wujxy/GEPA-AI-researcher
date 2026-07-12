@@ -4,7 +4,7 @@ import fnmatch
 import subprocess
 from pathlib import Path
 
-from .schemas import CommitAudit
+from ..models.schemas import CommitAudit
 
 
 def audit_commit(

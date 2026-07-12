@@ -2,12 +2,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from gepa_researcher.context import load_prior_context
-from gepa_researcher.gate import GEPAGate
-from gepa_researcher.pareto import ParetoSelector
-from gepa_researcher.runtime import config_for_eval, resolve_dataset_split, select_feedback_minibatch
-from gepa_researcher.schemas import Candidate, Judgment, JudgmentBatch, ScoreMatrix
-from gepa_researcher.score_matrix import ScoreMatrixBuilder
+from gepa_researcher.loop.context import load_prior_context
+from gepa_researcher.loop.gate import GEPAGate
+from gepa_researcher.loop.pareto import ParetoSelector
+from gepa_researcher.loop.runtime import config_for_eval, resolve_dataset_split, select_feedback_minibatch
+from gepa_researcher.models.schemas import Candidate, Judgment, JudgmentBatch, ScoreMatrix
+from gepa_researcher.loop.score_matrix import ScoreMatrixBuilder
 
 
 class GEPAUpgradeTest(unittest.TestCase):

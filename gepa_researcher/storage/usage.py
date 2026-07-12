@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .io_utils import write_json
-from .schemas import AgentCallRecord, RoundUsageSummary, RunUsageSummary, TokenUsage
+from ..models.schemas import AgentCallRecord, RoundUsageSummary, RunUsageSummary, TokenUsage
 
 
 KNOWN_ROLES = ("proposer", "executor", "judger", "gater")
@@ -217,7 +217,7 @@ def _empty_totals() -> dict[str, Any]:
 
 
 def _record_from_dict(data: dict[str, Any]) -> AgentCallRecord:
-    from .schemas import AgentCallContext
+    from ..models.schemas import AgentCallContext
 
     usage_data = dict(data.get("usage") or {})
     context_data = dict(data.get("context") or {})

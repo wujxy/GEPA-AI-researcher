@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .schemas import Candidate, ExecutionRecord, WorkspaceLease
+from ..models.schemas import Candidate, ExecutionRecord, WorkspaceLease
 
 
 class RuntimeBackendError(RuntimeError):
@@ -26,7 +26,17 @@ class RuntimeLease:
     artifacts: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        # Security: Redact environment variable values while preserving keys for debugging
+        if "env" in data and isinstance(data["env"], dict):
+            env_keys = list(data["env"].keys())
+            data["env"] = {
+                "_keys": env_keys,
+                "_count": len(env_keys),
+                "_redacted": True,
+                "_note": "Environment variable values redacted for security"
+            }
+        return data
 
 
 class LocalRuntimeBackend:
@@ -86,9 +96,13 @@ class ApptainerRuntimeBackend:
 
         host_artifacts = Path(lease.artifact_path).expanduser().resolve()
         host_repo = Path(lease.worktree_path).expanduser().resolve()
-        host_scratch = host_artifacts / "scratch"
-        host_home = host_artifacts / "home"
+
+        # Per-execution directory structure using execution_id
+        execution_id = record.execution_id
+        host_scratch = host_artifacts / f"scratch_{execution_id}"
+        host_home = host_artifacts / f"home_{execution_id}"
         host_tmp = host_scratch / "tmp"
+
         for path in (host_artifacts, host_scratch, host_home, host_tmp):
             path.mkdir(parents=True, exist_ok=True)
         self._copy_home_template(host_home)
@@ -100,11 +114,21 @@ class ApptainerRuntimeBackend:
             prefix.append("--containall")
         if bool(self.apptainer_config.get("writable_tmpfs", True)):
             prefix.append("--writable-tmpfs")
-        prefix.extend(["--pwd", self.container_repo])
-        for bind in self._binds(host_repo, host_artifacts, host_scratch, host_home):
-            prefix.extend(["--bind", bind])
-        prefix.append(image)
+        if bool(self.apptainer_config.get("userns", False)):
+            prefix.append("--userns")
+        prefix.extend(str(a) for a in self.apptainer_config.get("extra_exec_args", []) or [])
+        # Update container paths for per-execution structure
+        container_scratch = f"{self.container_artifacts}/scratch_{execution_id}"
+        container_home = f"{self.container_artifacts}/home_{execution_id}"
 
+        # --home both bind-mounts host_home->container_home AND sets HOME=container_home
+        # inside the container. (Passing HOME via --env is silently ignored by apptainer.)
+        prefix.extend(["--home", f"{host_home}:{container_home}"])
+        prefix.extend(["--pwd", self.container_repo])
+        for bind in self._binds(host_repo, host_artifacts, host_scratch):
+            prefix.extend(["--bind", bind])
+
+        # Build environment variables for --env passing
         env = self._allowed_host_env()
         env.update(
             {
@@ -113,10 +137,17 @@ class ApptainerRuntimeBackend:
                 "GEPA_PARENT_SHA": record.requested_parent_sha,
                 "GEPA_WORKTREE": self.container_repo,
                 "GEPA_ARTIFACTS": self.container_artifacts,
-                "HOME": self.container_home,
-                "TMPDIR": f"{self.container_scratch}/tmp",
+                "TMPDIR": f"{container_scratch}/tmp",
             }
         )
+
+        # Add environment variables via --env mechanism (Apptainer best practice)
+        for key, value in env.items():
+            # Properly escape the value for shell command line
+            escaped_value = self._escape_env_value(value)
+            prefix.extend(["--env", f"{key}={escaped_value}"])
+
+        prefix.append(image)
         return RuntimeLease(
             backend=self.name,
             repo_path=self.container_repo,
@@ -124,7 +155,7 @@ class ApptainerRuntimeBackend:
             host_cwd=str(host_repo),
             command=str(self.apptainer_config.get("command", self.config.get("agent", {}).get("command", "claude"))),
             command_prefix=prefix,
-            env=env,
+            env={},  # Empty since environment variables passed via --env
             inherit_host_env=False,
             artifacts={
                 "host_repo": str(host_repo),
@@ -151,12 +182,13 @@ class ApptainerRuntimeBackend:
             raise RuntimeBackendError("executor.apptainer.claude_home_template must be a directory")
         shutil.copytree(source, host_home, dirs_exist_ok=True)
 
-    def _binds(self, host_repo: Path, host_artifacts: Path, host_scratch: Path, host_home: Path) -> list[str]:
+    def _binds(self, host_repo: Path, host_artifacts: Path, host_scratch: Path) -> list[str]:
+        # NOTE: host_home->container_home is intentionally NOT bound here; it is
+        # established by the ``--home`` flag in prepare() (which also sets HOME).
         binds = [
             f"{host_repo}:{self.container_repo}",
             f"{host_artifacts}:{self.container_artifacts}",
             f"{host_scratch}:{self.container_scratch}",
-            f"{host_home}:{self.container_home}",
         ]
         for item in self.config.get("workspace", {}).get("readonly_assets", []):
             source = Path(str(item["source"])).expanduser().resolve()
@@ -186,6 +218,25 @@ class ApptainerRuntimeBackend:
         names = ["PATH"]
         names.extend(str(item) for item in self.apptainer_config.get("env_allowlist", []))
         return {name: os.environ[name] for name in dict.fromkeys(names) if name in os.environ}
+
+    def _escape_env_value(self, value: str) -> str:
+        """Escape environment variable value for shell command line arguments.
+
+        This method properly handles quotes, spaces, and special characters
+        to ensure safe passing of environment values via Apptainer's --env.
+        """
+        if not value:
+            return ""
+
+        # If the value contains only safe characters, no escaping needed
+        safe_chars = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-/:=@")
+        if all(c in safe_chars for c in value):
+            return value
+
+        # Otherwise, wrap in single quotes and escape embedded single quotes
+        # Single quote escaping: 'value_with_'`'"'embedded'quotes''
+        escaped = value.replace("'", "'\"'\"'")
+        return f"'{escaped}'"
 
 
 def runtime_backend_for(config: dict[str, Any], run_dir: Path):

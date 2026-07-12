@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from gepa_researcher.context_views import (
+from gepa_researcher.loop.context_views import (
     build_executor_context,
     build_judger_context,
     build_proposer_context,
@@ -11,8 +11,8 @@ from gepa_researcher.context_views import (
     trace_for_agent,
     trace_summary_for_proposer,
 )
-from gepa_researcher.runtime import recent_trace_summaries
-from gepa_researcher.schemas import Candidate, SampleTrace, Trace
+from gepa_researcher.loop.runtime import recent_trace_summaries
+from gepa_researcher.models.schemas import Candidate, SampleTrace, Trace
 
 
 class ContextViewsTest(unittest.TestCase):

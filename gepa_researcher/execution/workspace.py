@@ -6,7 +6,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from .schemas import Candidate, WorkspaceLease
+from ..models.schemas import Candidate, WorkspaceLease
 
 
 class WorkspaceError(RuntimeError):
@@ -98,6 +98,52 @@ class WorkspaceManager:
             raise WorkspaceError(
                 "controller repository changed during candidate execution: "
                 f"before={snapshot} after={current}"
+            )
+
+    def worktree_snapshot(self, worktree_path: str) -> dict[str, str]:
+        """Capture worktree state snapshot for integrity validation.
+
+        Args:
+            worktree_path: Path to the worktree directory
+
+        Returns:
+            Dictionary with 'head' (commit SHA) and 'status' (git status output)
+            Returns empty dict if not in git_worktree mode or worktree doesn't exist
+        """
+        if self.mode != "git_worktree":
+            return {}
+        worktree = Path(worktree_path).expanduser().resolve()
+        if not (worktree / ".git").exists():
+            return {}
+        try:
+            return {
+                "head": _git(worktree, "rev-parse", "HEAD"),
+                "status": _git(worktree, "status", "--porcelain=v1", "--untracked-files=all"),
+            }
+        except WorkspaceError:
+            # Worktree exists but git commands fail (e.g., corrupted .git)
+            return {"error": "git_command_failed", "path": str(worktree)}
+
+    def assert_worktree_unchanged(self, snapshot: dict[str, str], worktree_path: str) -> None:
+        """Assert worktree has not been modified during execution.
+
+        Args:
+            snapshot: Previous worktree snapshot from worktree_snapshot()
+            worktree_path: Path to the worktree directory
+
+        Raises:
+            WorkspaceError: If worktree state has changed (excluding untracked files)
+        """
+        if not snapshot or "error" in snapshot:
+            # Skip validation if snapshot was empty or had errors
+            return
+        current = self.worktree_snapshot(worktree_path)
+        if not current:
+            return  # Skip if can't get current state
+        if current != snapshot:
+            raise WorkspaceError(
+                f"Worktree corrupted during execution: "
+                f"path={worktree_path} before={snapshot} after={current}"
             )
 
     def _map_readonly_assets(self, worktree: Path) -> None:
