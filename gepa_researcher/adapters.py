@@ -7,7 +7,7 @@ from typing import Any
 import uuid
 
 from .io_utils import append_jsonl, write_json
-from .provenance import ProvenanceVerifier
+from .provenance import audit_commit
 from .registry import ExecutionRegistry
 from .schemas import (
     Candidate,
@@ -36,13 +36,11 @@ class ExecutorAdapter:
         run_dir: Path,
         workspace_manager: WorkspaceManager | None = None,
         registry: ExecutionRegistry | None = None,
-        provenance: ProvenanceVerifier | None = None,
     ):
         self.executor = executor
         self.run_dir = run_dir
         self.workspace_manager = workspace_manager
         self.registry = registry or ExecutionRegistry(run_dir)
-        self.provenance = provenance or ProvenanceVerifier()
 
     def run_many(self, candidates: list[Candidate], round_id: int, config: dict[str, Any]) -> TraceBatch:
         executor_config = config.get("executor", {})
@@ -108,7 +106,11 @@ class ExecutorAdapter:
         try:
             return self._execute_one(candidate, config, prepared)
         except Exception as exc:
-            return self._failure_trace(candidate, exc)
+            lease, record, canonical_execution = prepared
+            record.status = "failed"
+            if canonical_execution:
+                self.registry.record_execution(record)
+            return self._failure_trace(candidate, exc, lease=lease, record=record)
 
     def _execute_one(
         self,
@@ -138,21 +140,39 @@ class ExecutorAdapter:
         trace = self.executor.execute(candidate, candidate_config)
         if trace.samples:
             trace.samples[0].artifacts.setdefault("executor_wall_seconds", round(perf_counter() - start, 4))
-        report = self.provenance.verify(candidate, lease, record, candidate_config)
+        # Audit the delivered commit (read-only). No "provenance" layer: we keep
+        # commit metadata for attribution and apply the one retained hard guard --
+        # the executor must not edit a frozen path. Whether the candidate actually
+        # worked (build, metric, validation) is the judger's call via the trace.
+        # The audit only applies to git-worktree workspaces (the only mode that
+        # produces a real commit to diff); other modes have no commit to audit.
+        audit = None
+        if lease.mode == "git_worktree":
+            frozen_globs = list((config.get("candidate_policy") or {}).get("frozen_globs", []))
+            audit = audit_commit(
+                repo=Path(lease.worktree_path),
+                parent_sha=lease.requested_parent_sha,
+                frozen_globs=frozen_globs,
+            )
+            record.result_sha = audit.result_sha
+            record.changed_files = audit.changed_files
+            record.commit_count = audit.commit_count
+            record.status = "frozen_violation" if audit.frozen_violations else "recorded"
+        else:
+            record.status = "recorded"
         if canonical_execution:
             self.registry.record_execution(record)
-        self.registry.record_provenance(report)
         if trace.samples:
-            trace.samples[0].artifacts.update(
-                {
-                    "workspace_lease": lease.to_dict(),
-                    "execution_record": record.to_dict(),
-                    "provenance": report.to_dict(),
-                }
-            )
-            if not report.verified:
-                trace.samples[0].error = "provenance verification failed: " + ", ".join(report.failure_codes)
-                trace.samples[0].artifacts["failure_category"] = "provenance_failed"
+            artifacts_update = {
+                "workspace_lease": lease.to_dict(),
+                "execution_record": record.to_dict(),
+            }
+            if audit is not None:
+                artifacts_update["commit_audit"] = audit.to_dict()
+            trace.samples[0].artifacts.update(artifacts_update)
+            if audit is not None and audit.frozen_violations:
+                trace.samples[0].error = "frozen path edited: " + ", ".join(audit.frozen_violations)
+                trace.samples[0].artifacts["failure_category"] = "frozen_violation"
         return trace
 
     def _prepare_execution(
@@ -193,9 +213,9 @@ class ExecutorAdapter:
         parent_sha = ""
         if candidate.parent_ids:
             parent_id = candidate.parent_ids[0]  # 使用第一个 parent
-            parent_sha = self.registry.verified_result_sha(parent_id, require_accepted=True) or ""
+            parent_sha = self.registry.accepted_result_sha(parent_id, require_accepted=True) or ""
             if not parent_sha and str(config.get("workspace", {}).get("mode")) == "git_worktree":
-                raise RuntimeError(f"parent {parent_id} has no accepted verified result SHA")
+                raise RuntimeError(f"parent {parent_id} has no accepted result SHA")
         lease = self.workspace_manager.prepare(candidate, parent_sha)
         self.registry.record_workspace(lease)
         record = ExecutionRecord(
@@ -239,7 +259,22 @@ class ExecutorAdapter:
         write_json(self._trace_path(trace), trace.to_dict())
         append_jsonl(self.run_dir / "traces.jsonl", trace.to_dict())
 
-    def _failure_trace(self, candidate: Candidate, exc: Exception) -> Trace:
+    def _failure_trace(
+        self,
+        candidate: Candidate,
+        exc: Exception,
+        *,
+        lease: WorkspaceLease | None = None,
+        record: ExecutionRecord | None = None,
+    ) -> Trace:
+        artifacts = {
+            "workspace": lease.artifact_path if lease is not None else str(self._workspace(candidate)),
+        }
+        if lease is not None:
+            artifacts["workspace_lease"] = lease.to_dict()
+            artifacts["worktree_path"] = lease.worktree_path
+        if record is not None:
+            artifacts["execution_record"] = record.to_dict()
         trace = Trace(
             candidate_id=candidate.candidate_id,
             round_id=candidate.round_id,
@@ -251,7 +286,7 @@ class ExecutorAdapter:
                     expected="executor completed",
                     logs="executor failed",
                     error=f"{type(exc).__name__}: {exc}",
-                    artifacts={"workspace": str(self._workspace(candidate))},
+                    artifacts=artifacts,
                 )
             ],
         )
@@ -290,11 +325,13 @@ class JudgerAdapter:
                         )
                     ],
                 )
-            provenance_failed = any(
-                sample.artifacts.get("failure_category") == "provenance_failed"
+            frozen_violation = any(
+                sample.artifacts.get("failure_category") == "frozen_violation"
                 for sample in trace.samples
             )
-            if provenance_failed:
+            if frozen_violation:
+                # The one hard reject: the executor edited a frozen path, which is
+                # a silent-corruption risk the judger cannot infer from metrics.
                 judgments.append(
                     Judgment(
                         candidate_id=candidate.candidate_id,
@@ -302,8 +339,8 @@ class JudgerAdapter:
                         score=0.0,
                         passed=False,
                         per_sample_scores=[],
-                        failure_categories=["provenance_failed"],
-                        actionable_feedback=["Fix workspace/commit provenance before judging this candidate."],
+                        failure_categories=["frozen_violation"],
+                        actionable_feedback=["Candidate edited a frozen path; reject and do not mutate from it."],
                         confidence="high",
                         artifacts={"deterministic": True},
                     )

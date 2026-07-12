@@ -93,17 +93,20 @@ class ExecutionRecord:
 
 
 @dataclass
-class ProvenanceReport:
-    execution_id: str
-    candidate_id: str
-    verified: bool
-    checks: dict[str, str]
-    failure_codes: list[str] = field(default_factory=list)
-    details: list[str] = field(default_factory=list)
-    result_sha: str | None = None
+class CommitAudit:
+    """What the executor's commit actually changed (read-only metadata).
+
+    Replaces the former ProvenanceReport. There is no ``verified`` verdict and
+    no failure-code taxonomy: whether the candidate *worked* is the judger's
+    call (via the trace's metrics/validation). The only hard signal carried here
+    is ``frozen_violations`` -- paths the commit touched that match a frozen
+    glob, which is a silent-corruption risk the judger cannot see from metrics.
+    """
+
+    result_sha: str | None
     changed_files: list[str] = field(default_factory=list)
     commit_count: int = 0
-    artifact_hashes: dict[str, str] = field(default_factory=dict)
+    frozen_violations: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

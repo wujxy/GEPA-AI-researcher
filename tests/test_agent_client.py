@@ -7,7 +7,7 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
-from gepa_researcher.agent_client import ClaudeCodeClient
+from gepa_researcher.agent_client import AgentError, ClaudeCodeClient
 
 
 class ClaudeCodeClientTest(unittest.TestCase):
@@ -128,6 +128,32 @@ class ClaudeCodeClientTest(unittest.TestCase):
             text = output.getvalue()
             self.assertIn(str(node), text)
             self.assertIn(str(wrapper), text)
+
+    def test_run_json_attaches_raw_output_on_non_json(self):
+        # When the agent emits prose with no JSON, run_json must raise AgentError
+        # AND surface the raw text via .raw_output so the executor repair path can
+        # quote it back.
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "fake_claude.py"
+            script.write_text(
+                "\n".join(
+                    [
+                        "#!/usr/bin/env python3",
+                        "print('That is just the run-1 header. Waiting for the actual ms/evt results.')",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            os.chmod(script, 0o755)
+            client = ClaudeCodeClient(command=str(script), timeout_seconds=5)
+            output = StringIO()
+            with redirect_stdout(output):
+                with self.assertRaises(AgentError) as ctx:
+                    client.run_json("hello", label="fake")
+            self.assertIn(
+                "Waiting for the actual ms/evt results.",
+                getattr(ctx.exception, "raw_output", None),
+            )
 
 
 if __name__ == "__main__":

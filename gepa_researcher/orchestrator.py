@@ -27,10 +27,10 @@ from .display import (
     format_trace_summary,
 )
 from .gate import GEPAGate
-from .io_utils import append_jsonl, read_json, write_json
+from .config import ConfigError, load_and_resolve
+from .io_utils import append_jsonl, write_json
 from .pareto import ParetoSelector
 from .pool import CandidatePool
-from .provenance import ProvenanceVerifier
 from .registry import ExecutionRegistry
 from .runtime import config_for_eval, parent_trace_artifacts, recent_trace_summaries, resolve_dataset_split, select_feedback_minibatch
 from .schemas import Candidate, CandidateBatch, EvaluationBatch, GateDecision, GenerationDecision, Judgment, JudgmentBatch, LoopState, ParetoFrontier, ScoreMatrix, Trace
@@ -42,17 +42,21 @@ from .workspace import WorkspaceManager
 
 class ResearchOrchestrator:
     def __init__(self, config: dict[str, Any], config_path: Path, components: tuple | None = None):
-        self.config = config
+        self.config = deepcopy(config)
         self.config_path = config_path
-        self.run_dir = self._resolve_run_dir(config, config_path)
-        self.usage_tracker = UsageTracker(self.run_dir, config.get("usage_tracking", {}))
+        self.run_dir = self._resolve_run_dir(self.config, config_path)
+        self.config["run_dir"] = str(self.run_dir)
+        if self.config.get("workspace", {}).get("mode") == "git_worktree":
+            workspace = self.config.setdefault("workspace", {})
+            workspace.setdefault("root", str(self.run_dir / "worktrees"))
+            workspace.setdefault("branch_prefix", "gepa/<run-id>")
+        self.usage_tracker = UsageTracker(self.run_dir, self.config.get("usage_tracking", {}))
         self.store = RunStore(self.run_dir)  # ✅ 新增：统一存储管理
         self.registry = ExecutionRegistry(self.run_dir)
-        self.workspace_manager = WorkspaceManager(self.run_dir, config)
-        self.provenance = ProvenanceVerifier()
+        self.workspace_manager = WorkspaceManager(self.run_dir, self.config)
         self.admission = CandidateAdmissionGate()
-        self.dataset_split = resolve_dataset_split(config)
-        self.prior_context = load_prior_context(config, config_path.parent)
+        self.dataset_split = resolve_dataset_split(self.config)
+        self.prior_context = load_prior_context(self.config, config_path.parent)
         # Dependency injection: callers (and tests) may pass a (proposer, executor,
         # judger) tuple directly; otherwise components are built from config. This
         # keeps the orchestrator free of any task-specific or mock component code.
@@ -217,17 +221,19 @@ class ResearchOrchestrator:
         matrix = ScoreMatrixBuilder.from_batch(judgment_batch, {candidate.candidate_id for candidate in admitted_seeds})
         ScoreMatrixBuilder.persist(matrix, matrix_path)
         for candidate in admitted_seeds:
-            # 只有通过 provenance 验证的 seed 才能被 accepted
+            # A seed is rejected only if it committed a frozen-path violation; a
+            # missing metric or partial validation is scored by the judger, not a
+            # seed-killer.
             judgment = next((j for j in judgment_batch.judgments if j.candidate_id == candidate.candidate_id), None)
-            if judgment and any(cat == "provenance_failed" for cat in judgment.failure_categories):
-                self.registry.mark_candidate_status(candidate.candidate_id, "provenance_failed")
-                self._log(f"seed {candidate.candidate_id} rejected due to provenance failure")
+            if judgment and any(cat == "frozen_violation" for cat in judgment.failure_categories):
+                self.registry.mark_candidate_status(candidate.candidate_id, "frozen_violation")
+                self._log(f"seed {candidate.candidate_id} rejected due to frozen-path violation")
             else:
                 pool.add_accepted(candidate)
                 self.registry.mark_candidate_status(candidate.candidate_id, "accepted")
         pool.persist()
         if not pool.active_ids():
-            raise RuntimeError("all seed candidates failed provenance verification - no valid seeds available for mutation")
+            raise RuntimeError("all seed candidates were rejected (frozen-path violation or executor failure) - no valid seeds available for mutation")
         frontier = self.pareto.select(matrix, pool.active_ids())
         self._persist_frontier(frontier)
         best = max(matrix.aggregate_scores.items(), key=lambda item: item[1], default=(None, None))
@@ -429,7 +435,6 @@ class ResearchOrchestrator:
             self.run_dir,
             workspace_manager=self.workspace_manager,
             registry=self.registry,
-            provenance=self.provenance,
         ).run_many(candidates, round_id, eval_config)
         for trace in trace_batch.traces:
             self._log_block(format_trace_summary(trace, phase, sample_ids))
@@ -668,11 +673,23 @@ class ResearchOrchestrator:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the bounded GEPA-style research loop.")
-    parser.add_argument("--config", required=True, help="Path to a JSON config file.")
+    parser.add_argument("--config", required=True, help="Path to a task YAML/JSON or legacy JSON config.")
+    parser.add_argument("--run-dir", help="Explicit run directory.")
+    parser.add_argument("--resume", action="store_true", help="Resume an explicit run directory.")
     args = parser.parse_args()
 
     config_path = Path(args.config).expanduser().resolve()
-    config = read_json(config_path)
+    try:
+        config = load_and_resolve(
+            config_path,
+            run_dir=Path(args.run_dir) if args.run_dir else None,
+            resume=args.resume,
+        )
+    except ConfigError as exc:
+        parser.error(str(exc))
+    for warning in config.get("_meta", {}).get("warnings", []):
+        print(f"Config warning: {warning}")
+    print("Compatibility entrypoint: prefer python -m gepa_researcher.cli run --config ...")
     orchestrator = ResearchOrchestrator(config=config, config_path=config_path)
     try:
         state = orchestrator.run()

@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from .config import sanitize_snapshot
 from .io_utils import append_jsonl, read_json, write_json
 from .schemas import (
     Candidate,
@@ -71,7 +72,7 @@ class RunStore:
     def save_config(self, config: dict[str, Any]) -> None:
         """Save configuration snapshot."""
         self._ensure_directories()  # ✅ 延迟创建目录
-        write_json(self.run_dir / "config.snapshot.json", config)
+        write_json(self.run_dir / "config.snapshot.json", sanitize_snapshot(config))
 
     def save_dataset_split(self, dataset_split: dict[str, Any]) -> None:
         """Save dataset split information."""

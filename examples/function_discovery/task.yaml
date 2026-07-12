@@ -1,0 +1,95 @@
+# Complete GEPA task configuration example.
+# Paths here are relative to this task file. Profile paths are relative to the
+# profile file itself.
+schema_version: 1
+kind: task
+
+task:
+  name: numeric_function_discovery
+  goal: Infer a compact mathematical or statistical model for the observed one-dimensional measurements.
+  # Optional. If omitted, GEPA creates one generic sample named task_execution.
+  # Use multiple samples when feedback and Pareto evaluation should cover
+  # different subsets of a task.
+  samples:
+    - sample_id: observations_fit
+      description: Fit and explain the configured observations.csv file.
+    - sample_id: residual_diagnostics
+      description: Check residuals, uncertainty, and overfitting risk.
+
+project:
+  # Exactly one of profile or inline is required.
+  profile: project.profile.yaml
+  # Optional. Overrides profile.source.default_ref for git worktree projects.
+  ref: HEAD
+
+metric:
+  name: model_quality
+  direction: maximize
+  description: Reward compact models with strong evidence, reproducibility, and honest uncertainty.
+  # Optional command. If present, it is exposed to the executor as the benchmark.
+  command: >-
+    conda run -n myenv python -c "print('executor should run the configured analysis, then report evidence')"
+  unit: score
+  repeats: 1
+  improvement:
+    mode: absolute
+    minimum: 0.01
+
+validation:
+  checks:
+    - name: reproducible_analysis
+      command: >-
+        conda run -n myenv python -c "import csv; rows=list(csv.reader(open('examples/function_discovery/data/observations.csv'))); assert rows"
+      success_criteria: Analysis uses only configured observations and produces reproducible evidence.
+
+# Task safety may tighten profile safety, but cannot broaden it.
+safety:
+  editable_paths:
+    - examples/function_discovery/runs/**
+  frozen_paths:
+    - gepa_researcher/**
+    - tests/**
+  max_files_per_candidate: 3
+  max_commits_per_candidate: 1
+
+budget:
+  max_rounds: 4
+  min_rounds: 1
+  patience: 2
+  candidates_per_round: 5
+
+initialization:
+  seed_count: 3
+
+generation:
+  # If set, overrides budget.candidates_per_round for mutation batches.
+  batch_size: 5
+  enable_merge: false
+
+gepa:
+  frontier_policy: pareto
+  acceptance_policy: minibatch_improves_then_pareto
+  minibatch_size: 2
+  parent_sampling: pareto_win_weighted
+  feedback_sample_ids:
+    - observations_fit
+  pareto_sample_ids:
+    - observations_fit
+    - residual_diagnostics
+
+judger:
+  pass_threshold: 0.85
+
+usage_tracking:
+  enabled: true
+  persist_raw_envelope: true
+  print_round_summary: true
+  print_run_summary: true
+
+evidence:
+  visualize_when_applicable: true
+  plot_selection_policy: proposer_selects
+  artifact_formats:
+    - png
+    - svg
+  guidance: Create compact diagnostics only when they help prove or falsify the model.

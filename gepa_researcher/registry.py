@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .io_utils import read_json, write_json
-from .schemas import AdmissionDecision, ExecutionRecord, ProvenanceReport, WorkspaceLease
+from .schemas import AdmissionDecision, ExecutionRecord, WorkspaceLease
 
 
 class ExecutionRegistry:
@@ -18,7 +18,6 @@ class ExecutionRegistry:
             "admissions": {},
             "workspaces": {},
             "executions": {},
-            "provenance": {},
             "candidate_status": {},
         }
         if self.path.exists():
@@ -35,9 +34,6 @@ class ExecutionRegistry:
     def record_execution(self, record: ExecutionRecord) -> None:
         self._put("executions", record.candidate_id, record.to_dict())
 
-    def record_provenance(self, report: ProvenanceReport) -> None:
-        self._put("provenance", report.candidate_id, report.to_dict())
-
     def mark_candidate_status(self, candidate_id: str, status: str) -> None:
         self._put("candidate_status", candidate_id, status)
 
@@ -49,14 +45,17 @@ class ExecutionRegistry:
         value = self._data["executions"].get(candidate_id)
         return dict(value) if value else None
 
-    def verified_result_sha(self, candidate_id: str, require_accepted: bool = True) -> str | None:
-        provenance = dict(self._data["provenance"].get(candidate_id) or {})
+    def accepted_result_sha(self, candidate_id: str, require_accepted: bool = True) -> str | None:
+        """Result commit SHA for a candidate, gated on acceptance.
+
+        Replaces the former ``verified_result_sha``: there is no separate
+        "provenance verification" gate anymore, so stackability is simply
+        "the candidate was accepted and recorded a commit".
+        """
         execution = dict(self._data["executions"].get(candidate_id) or {})
-        if not provenance.get("verified"):
-            return None
         if require_accepted and self._data["candidate_status"].get(candidate_id) != "accepted":
             return None
-        return provenance.get("result_sha") or execution.get("result_sha")
+        return execution.get("result_sha")
 
     def known_candidate_ids(self) -> set[str]:
         ids: set[str] = set()

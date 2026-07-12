@@ -171,6 +171,7 @@ class ClaudeCodeClient:
             f"{label} Claude call finished ({elapsed:.1f}s)",
             flush=True,
         )
+        result_text = stdout
         try:
             outer = extract_json_object(stdout)
             if isinstance(outer.get("result"), str):
@@ -181,11 +182,15 @@ class ClaudeCodeClient:
                 # Compatibility for fake CLIs and older wrappers that print the
                 # business JSON directly without a Claude result envelope.
                 envelope = {}
-                result_text = stdout
                 data = outer
         except AgentError as exc:
             envelope = _try_json_dict(stdout) or {}
             self._record_call(call_id, context, started_at, "invalid_result", envelope, str(exc))
+            # Surface the agent's raw text so a caller (e.g. the executor repair
+            # path) can quote it back in a follow-up "transcribe to JSON" call.
+            # result_text is the inner agent string when an envelope parsed, else
+            # the full process stdout (initialized before the try).
+            exc.raw_output = result_text
             raise
         record = self._record_call(call_id, context, started_at, "completed", envelope, None)
         return AgentResult(text=result_text, data=data, envelope=envelope, call_record=record)

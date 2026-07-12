@@ -5,7 +5,8 @@ import inspect
 from pathlib import Path
 from typing import Any
 
-from .agent_client import ClaudeCodeClient
+from .agent_client import AgentError, ClaudeCodeClient
+from .config.contracts import format_role_contract
 from .context_views import candidate_for_agent, evidence_access_policy, state_for_agent, trace_for_agent
 from .schemas import AgentCallContext, Candidate, CandidateBatch, Judgment, LoopState, SampleTrace, Trace
 
@@ -140,6 +141,19 @@ def format_candidate_policy(config: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def format_config_for_role(config: dict[str, Any], role: str) -> str:
+    contract = format_role_contract(config, role)
+    if contract:
+        return contract
+    if role == "judger":
+        return ""
+    return "\n\n".join([
+        format_task_resources(config),
+        format_candidate_policy(config),
+        format_runtime(config),
+    ])
+
+
 def _candidate_prompt_text(data: dict[str, Any]) -> str:
     strategy = data.get("strategy") or data.get("approach") or "unspecified"
     return (
@@ -173,6 +187,18 @@ def _call_artifact(result) -> dict[str, Any]:
     return {"agent_call_id": record.call_id} if record is not None else {}
 
 
+# Shared by the executor's normal and repair prompts so the two cannot drift.
+_EXECUTOR_RESULT_SCHEMA = """{
+  "summary": "what you executed",
+  "implementation": {"changed_files": [], "commands_run": [], "notes": ""},
+  "metrics": {"primary": null, "baseline": null, "delta": null},
+  "validation": {"passed": false, "checks": [], "regressions": []},
+  "diagnostics": ["diagnostic or failure finding"],
+  "artifact_paths": ["relative or absolute paths"],
+  "errors": []
+}"""
+
+
 class AgentProposer:
     def __init__(self, client: ClaudeCodeClient):
         self.client = client
@@ -184,11 +210,7 @@ You are the PROPOSER agent in a bounded GEPA-style research loop.
 Task goal:
 {config["task"]["goal"]}
 
-{format_task_resources(config)}
-
-{format_candidate_policy(config)}
-
-{format_runtime(config)}
+{format_config_for_role(config, "proposer")}
 
 {format_evidence_policy(config)}
 
@@ -276,11 +298,7 @@ You are the PROPOSER agent in a bounded GEPA-style research loop.
 Task goal:
 {config["task"]["goal"]}
 
-{format_task_resources(config)}
-
-{format_candidate_policy(config)}
-
-{format_runtime(config)}
+{format_config_for_role(config, "proposer")}
 
 {format_evidence_policy(config)}
 
@@ -395,11 +413,7 @@ structured evidence about what happened.
 Task goal:
 {config["task"]["goal"]}
 
-{format_task_resources(config)}
-
-{format_candidate_policy(config)}
-
-{format_runtime(config)}
+{format_config_for_role(config, "executor")}
 
 {format_evidence_policy(config)}
 
@@ -435,35 +449,68 @@ Constraints:
 - Never run git checkout, git switch, or git worktree; the orchestrator owns Git lifecycle.
 - When visual evidence is feasible, follow the candidate's visual evidence plan.
   Save plot file(s) under the working directory and list them in artifact_paths.
-- Return only a JSON object, no prose outside JSON.
+
+Final delivery contract (mandatory):
+- Your final response MUST be exactly one parseable JSON object matching the schema below.
+- Wrapping the JSON in a ```json code fence is acceptable; any prose, status updates, apologies, commentary, or natural-language wrap-up outside the JSON is forbidden.
+- NEVER finish with natural-language status such as "waiting for results", "still running", "will continue", or "need more time".
+- Do NOT run benchmark/validation/test/build commands in the background. Run them in the foreground and block until they exit, then parse their output before responding.
+- If a command is still running, wait for it to finish unless the configured timeout forces you to stop.
+- If execution is incomplete, blocked, interrupted, or a command produced no metric, you MUST still return the JSON object with validation.passed=false, null metrics, the reason in errors, and the partial state in diagnostics/artifact_paths.
+- A partial or failed run is acceptable ONLY if it is reported as JSON.
+- Set validation.passed=true only when all required validation and metric gates actually passed.
 
 Required JSON schema:
-{{
-  "summary": "what you executed",
-  "implementation": {{"changed_files": [], "commands_run": [], "notes": ""}},
-  "metrics": {{"primary": null, "baseline": null, "delta": null}},
-  "validation": {{"passed": false, "checks": [], "regressions": []}},
-  "diagnostics": ["diagnostic or failure finding"],
-  "artifact_paths": ["relative or absolute paths"],
-  "errors": []
-}}
+{_EXECUTOR_RESULT_SCHEMA}
 """
         client = self._client_for_config(config)
-        result = _run_agent_json(
-            client,
-            prompt,
-            "executor",
-            AgentCallContext(
-                role="executor",
-                round_id=candidate.round_id,
-                phase=str(config.get("_eval_phase", "pareto")),
-                candidate_id=candidate.candidate_id,
-                execution_id=config.get("_execution_id"),
-                parent_candidate_id=candidate.parent_ids[0] if candidate.parent_ids else None,
-            ),
-            cwd=repo_dir,
-            env=dict(config.get("_candidate_env") or {}),
+        call_context = AgentCallContext(
+            role="executor",
+            round_id=candidate.round_id,
+            phase=str(config.get("_eval_phase", "pareto")),
+            candidate_id=candidate.candidate_id,
+            execution_id=config.get("_execution_id"),
+            parent_candidate_id=candidate.parent_ids[0] if candidate.parent_ids else None,
         )
+        repair_retries = int(config.get("executor", {}).get("repair_retries", 1))
+        repair_meta: dict[str, Any] = {}
+        try:
+            result = _run_agent_json(
+                client,
+                prompt,
+                "executor",
+                call_context,
+                cwd=repo_dir,
+                env=dict(config.get("_candidate_env") or {}),
+            )
+        except AgentError as exc:
+            # The agent returned no parseable JSON (typically it stopped early and
+            # narrated status). Before recording a terminal infrastructure failure,
+            # give the same agent ONE cheap "transcribe the current state into JSON"
+            # call — it must NOT re-run the task, just summarize what already exists.
+            if repair_retries <= 0:
+                raise
+            raw_output = str(getattr(exc, "raw_output", None) or exc)[:4000]
+            candidate_json_path = str(
+                self.run_dir / "traces" / f"round_{candidate.round_id:03d}" / candidate.candidate_id / "candidate.json"
+            )
+            repair_prompt = self._repair_prompt(
+                candidate=candidate,
+                raw_output=raw_output,
+                repo_dir=repo_dir,
+                round_dir=round_dir,
+                candidate_json_path=candidate_json_path,
+            )
+            repair_client = self._repair_client_for_config(config)
+            result = _run_agent_json(
+                repair_client,
+                repair_prompt,
+                "executor",
+                call_context,
+                cwd=repo_dir,
+                env=dict(config.get("_candidate_env") or {}),
+            )
+            repair_meta = {"repair_applied": True, "original_raw_output": raw_output}
         data = result.data
         trace = SampleTrace(
             sample_id=str((config.get("_selected_sample_ids") or ["task_execution"])[0]),
@@ -472,7 +519,7 @@ Required JSON schema:
             expected="unknown",
             logs=str(data.get("summary", "")),
             error="; ".join(data.get("errors", [])) if data.get("errors") else None,
-            artifacts={"agent_raw": result.text, "eval_phase": config.get("_eval_phase", "pareto"), "sample_ids": config.get("_selected_sample_ids", []), "execution_mode": execution_mode, **_call_artifact(result), **data},
+            artifacts={"agent_raw": result.text, "eval_phase": config.get("_eval_phase", "pareto"), "sample_ids": config.get("_selected_sample_ids", []), "execution_mode": execution_mode, **_call_artifact(result), **data, **repair_meta},
         )
         return Trace(candidate_id=candidate.candidate_id, round_id=candidate.round_id, samples=[trace])
 
@@ -489,6 +536,71 @@ Required JSON schema:
             usage_tracker=self.client.usage_tracker,
         )
 
+    def _repair_client_for_config(self, config: dict[str, Any]) -> ClaudeCodeClient:
+        # The repair call only transcribes existing state into JSON (it is told
+        # not to run commands), so cap its timeout well below the executor budget.
+        # Reuse injected non-ClaudeCodeClient clients as-is so tests can drive the
+        # repair path with fakes.
+        if not isinstance(self.client, ClaudeCodeClient):
+            return self.client
+        executor_timeout = config.get("_executor_timeout_seconds")
+        if executor_timeout is None:
+            executor_timeout = self.client.timeout_seconds
+        repair_timeout = int(config.get("executor", {}).get("repair_timeout_seconds", 600))
+        timeout_seconds = min(int(executor_timeout), repair_timeout)
+        return ClaudeCodeClient(
+            command=self.client.command,
+            cwd=self.client.cwd,
+            timeout_seconds=timeout_seconds,
+            extra_args=list(self.client.extra_args),
+            heartbeat_seconds=self.client.heartbeat_seconds,
+            usage_tracker=self.client.usage_tracker,
+        )
+
+    def _repair_prompt(
+        self,
+        candidate: Candidate,
+        raw_output: str,
+        repo_dir: Path,
+        round_dir: Path,
+        candidate_json_path: str,
+    ) -> str:
+        candidate_facts = candidate_for_agent(candidate, [candidate_json_path])
+        return f"""
+You are the EXECUTOR agent in a bounded GEPA-style research loop. A PREVIOUS attempt
+at this exact task finished WITHOUT returning a parseable JSON object. Your ONLY job now
+is to transcribe the current state into the JSON schema below. DO NOT continue the task.
+
+Mandatory - DO NOT:
+- Run any new build, benchmark, validation, test, or long-running command.
+- Edit source files, create commits, switch branches, or change HEAD.
+- Re-attempt the optimization.
+
+You MAY (only to reconstruct what already happened):
+- Read files and run read-only git (git log / git diff / git status / git show) inside the
+  source worktree.
+- List/read files under the working/artifact directory.
+
+Inputs from the previous attempt:
+- Previous (non-JSON) raw output:
+{raw_output}
+
+- Candidate facts:
+{candidate_facts}
+
+- Source worktree: {repo_dir}
+- Working/artifact directory: {round_dir}
+
+Produce EXACTLY one JSON object matching this schema, describing the state the previous
+attempt left behind:
+{_EXECUTOR_RESULT_SCHEMA}
+
+Set validation.passed=false if any gate did not actually pass; use null for any metric
+never produced; put the reason in errors; list files/paths the previous attempt created in
+artifact_paths; summarize what was and was not completed in diagnostics. Return only the
+JSON object.
+"""
+
 
 class AgentJudger:
     def __init__(self, client: ClaudeCodeClient):
@@ -504,15 +616,13 @@ improvement or valid finding for the configured task.
 Task goal:
 {config["task"]["goal"]}
 
+{format_config_for_role(config, "judger")}
+
 Candidate decision facts:
 {candidate_for_agent(candidate, [str(Path(config.get("_run_dir", ".")) / "traces" / f"round_{candidate.round_id:03d}" / candidate.candidate_id / "candidate.json")])}
 
 Trace decision facts:
 {trace_for_agent(trace, [str(Path(config.get("_run_dir", ".")) / "traces" / f"round_{trace.round_id:03d}" / trace.candidate_id / "trace.json")])}
-
-{format_evidence_policy(config)}
-
-{format_prior_context(config)}
 
 {evidence_access_policy()}
 

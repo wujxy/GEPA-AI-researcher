@@ -7,6 +7,7 @@ name = "gepa-ai-researcher"
 version = "0.1.0"
 description = "Minimal GEPA-style AI researcher orchestrator skeleton"
 requires-python = ">=3.10"
+dependencies = ["PyYAML>=6,<7"]
 
 [tool.setuptools.packages.find]
 include = ["gepa_researcher*"]

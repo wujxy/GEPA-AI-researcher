@@ -5,7 +5,7 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 
-from gepa_researcher.agent_client import ClaudeCodeClient
+from gepa_researcher.agent_client import AgentError, ClaudeCodeClient
 from gepa_researcher.agent_components import AgentExecutor, AgentProposer
 from gepa_researcher.schemas import Candidate, LoopState
 
@@ -18,6 +18,40 @@ class CapturingClient:
     def run_json(self, prompt: str, label: str = "agent"):
         self.prompts.append((label, prompt))
         return type("Result", (), {"text": "{}", "data": self.data})()
+
+
+class QueuedClient:
+    """Fake client that serves a queued response (result or exception) per call.
+
+    Used to drive the executor's repair path: queue an AgentError first, then a
+    valid result, and assert the repair transcription call fires.
+    """
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.prompts = []
+
+    def run_json(self, prompt: str, label: str = "agent"):
+        self.prompts.append((label, prompt))
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+def _make_candidate(candidate_id: str = "cand_000") -> Candidate:
+    return Candidate(
+        candidate_id=candidate_id,
+        round_id=0,
+        hypothesis="h",
+        scope="task_system",
+        proposed_change="c",
+        rationale="r",
+        expected_improvement="e",
+        risk="rk",
+        prompt_text="",
+        created_at="now",
+    )
 
 
 class AgentComponentsTest(unittest.TestCase):
@@ -371,6 +405,82 @@ class AgentComponentsTest(unittest.TestCase):
                 AgentExecutor(client, Path(tmp)).execute(candidate, config)
 
             self.assertIn("timeout=7s", output.getvalue())
+
+    def test_executor_prompt_includes_hardened_delivery_contract(self):
+        client = CapturingClient({"summary": "", "errors": [], "artifact_paths": []})
+        config = {"task": {"goal": "g"}, "runtime": {}, "evidence": {}}
+        with tempfile.TemporaryDirectory() as tmp:
+            AgentExecutor(client, Path(tmp)).execute(_make_candidate(), config)
+        prompt = client.prompts[0][1]
+        self.assertIn("final response MUST be exactly one parseable JSON object", prompt)
+        self.assertIn("NEVER finish with natural-language status", prompt)
+        self.assertIn("waiting for results", prompt)
+        self.assertIn("validation.passed=false", prompt)
+        self.assertIn("block until they exit", prompt)
+        self.assertIn("artifact_paths", prompt)  # schema still present
+        self.assertNotIn("Return only a JSON object, no prose outside JSON.", prompt)
+
+    def test_executor_repair_transcribes_after_non_json(self):
+        err = AgentError("Agent did not return a parseable JSON object.")
+        err.raw_output = "That's just the run-1 header echoed at start. Waiting for the actual ms/evt results."
+        repaired = type(
+            "Result",
+            (),
+            {
+                "text": "{}",
+                "data": {
+                    "summary": "transcribed prior state into JSON",
+                    "validation": {"passed": False},
+                    "metrics": {"primary": None},
+                    "errors": ["prior attempt produced no JSON"],
+                    "artifact_paths": [],
+                    "diagnostics": [],
+                },
+            },
+        )()
+        client = QueuedClient([err, repaired])
+        config = {"task": {"goal": "g"}, "runtime": {}, "evidence": {}}
+        with tempfile.TemporaryDirectory() as tmp:
+            trace = AgentExecutor(client, Path(tmp)).execute(_make_candidate("cand_001"), config)
+
+        # The repair transcription call fired exactly once after the failure.
+        self.assertEqual(len(client.prompts), 2)
+        repair_prompt = client.prompts[1][1]
+        self.assertIn("PREVIOUS attempt", repair_prompt)
+        self.assertIn("transcribe the current state", repair_prompt)
+        self.assertIn("Waiting for the actual ms/evt results.", repair_prompt)
+        self.assertIn("DO NOT", repair_prompt)
+
+        # The trace reflects the repaired data and is stamped with an audit marker.
+        sample = trace.samples[0]
+        self.assertIn("transcribed prior state into JSON", sample.output)
+        self.assertEqual(sample.error, "prior attempt produced no JSON")
+        self.assertTrue(sample.artifacts.get("repair_applied"))
+        self.assertIn("Waiting for the actual ms/evt results.", sample.artifacts.get("original_raw_output", ""))
+
+    def test_executor_repair_skipped_when_disabled(self):
+        err = AgentError("Agent did not return a parseable JSON object.")
+        err.raw_output = "x"
+        client = QueuedClient([err])
+        config = {"task": {"goal": "g"}, "runtime": {}, "evidence": {}, "executor": {"repair_retries": 0}}
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(AgentError):
+                AgentExecutor(client, Path(tmp)).execute(_make_candidate("cand_002"), config)
+        # No repair call when retries are disabled.
+        self.assertEqual(len(client.prompts), 1)
+
+    def test_executor_repair_reraises_when_repair_also_fails(self):
+        err1 = AgentError("first attempt produced no JSON")
+        err1.raw_output = "raw1"
+        err2 = AgentError("repair attempt produced no JSON")
+        err2.raw_output = "raw2"
+        client = QueuedClient([err1, err2])
+        config = {"task": {"goal": "g"}, "runtime": {}, "evidence": {}}
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(AgentError):
+                AgentExecutor(client, Path(tmp)).execute(_make_candidate("cand_003"), config)
+        # Exactly one repair attempt, then the failure propagates.
+        self.assertEqual(len(client.prompts), 2)
 
 
 if __name__ == "__main__":

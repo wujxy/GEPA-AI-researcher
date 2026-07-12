@@ -9,15 +9,15 @@ from pathlib import Path
 
 from gepa_researcher.admission import CandidateAdmissionGate
 from gepa_researcher.agent_client import AgentError, ClaudeCodeClient
-from gepa_researcher.adapters import ExecutorAdapter
-from gepa_researcher.provenance import ProvenanceVerifier
+from gepa_researcher.adapters import ExecutorAdapter, JudgerAdapter
+from gepa_researcher.provenance import audit_commit
 from gepa_researcher.registry import ExecutionRegistry
 from gepa_researcher.schemas import (
     AgentCallContext,
     AgentCallRecord,
     Candidate,
     ExecutionRecord,
-    ProvenanceReport,
+    Judgment,
     TokenUsage,
     SampleTrace,
     Trace,
@@ -205,7 +205,11 @@ class WorkspaceAndProvenanceTest(unittest.TestCase):
             self.assertEqual(_git(repo, "rev-parse", "HEAD"), before_head)
             self.assertEqual(_git(repo, "status", "--porcelain"), before_status)
 
-    def test_verifies_one_admitted_commit_and_rejects_dirty_source(self):
+    def test_audit_commit_records_changed_files_and_ignores_runtime_debris(self):
+        # The commit audit looks only at the delivered commit, never the working
+        # tree. Untracked runtime debris (build output, benchmark CSV, pytest
+        # cache) and modified-but-uncommitted files are not signals, so they do
+        # not produce frozen violations or any failure.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             repo, baseline = _make_repo(root)
@@ -217,9 +221,7 @@ class WorkspaceAndProvenanceTest(unittest.TestCase):
                     "root": str(run_dir / "worktrees"),
                     "baseline_ref": baseline,
                     "branch_prefix": "gepa/test",
-                    "generated_tracked_paths": [],
                 },
-                "candidate_policy": {"max_commits": 1},
             }
             candidate = _candidate()
             lease = WorkspaceManager(run_dir, config).prepare(candidate)
@@ -229,28 +231,49 @@ class WorkspaceAndProvenanceTest(unittest.TestCase):
             (worktree / "src" / "hot.cc").write_text("int hot() { return 2; }\n", encoding="utf-8")
             _git(worktree, "add", "src/hot.cc")
             _git(worktree, "commit", "-m", "candidate")
-            record = ExecutionRecord(
-                execution_id="exec",
-                candidate_id=candidate.candidate_id,
-                round_id=0,
-                parent_candidate_id=None,
-                requested_parent_sha=baseline,
-                actual_start_sha=baseline,
-                result_sha=None,
-                branch_name=lease.branch_name,
-                worktree_path=lease.worktree_path,
-            )
 
-            report = ProvenanceVerifier().verify(candidate, lease, record, config)
-            self.assertTrue(report.verified, report.to_dict())
-            self.assertEqual(report.changed_files, ["src/hot.cc"])
-
+            # Debris: an untracked file plus a modified-but-uncommitted tracked file.
             (worktree / "unexpected.txt").write_text("dirty\n", encoding="utf-8")
-            dirty_report = ProvenanceVerifier().verify(candidate, lease, record, config)
-            self.assertFalse(dirty_report.verified)
-            self.assertIn("DIRTY_SOURCE", dirty_report.failure_codes)
+            (worktree / "src" / "hot.cc").write_text("int hot() { return 3; }\n", encoding="utf-8")
 
-    def test_registry_only_resolves_accepted_verified_parent(self):
+            audit = audit_commit(repo=worktree, parent_sha=baseline, frozen_globs=["tests/**"])
+            self.assertEqual(audit.changed_files, ["src/hot.cc"])
+            self.assertEqual(audit.frozen_violations, [])
+            self.assertEqual(audit.commit_count, 1)
+            self.assertIsNotNone(audit.result_sha)
+
+    def test_audit_commit_flags_frozen_path_edits(self):
+        # The one retained hard guard: a commit that touches a frozen path is a
+        # silent-corruption risk and must be flagged regardless of what the
+        # candidate declared in target_files.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, baseline = _make_repo(root)
+            run_dir = root / "run"
+            config = {
+                "workspace": {
+                    "mode": "git_worktree",
+                    "repo_path": str(repo),
+                    "root": str(run_dir / "worktrees"),
+                    "baseline_ref": baseline,
+                    "branch_prefix": "gepa/test",
+                },
+            }
+            candidate = _candidate()
+            lease = WorkspaceManager(run_dir, config).prepare(candidate)
+            worktree = Path(lease.worktree_path)
+            _git(worktree, "config", "user.email", "test@example.invalid")
+            _git(worktree, "config", "user.name", "GEPA Test")
+            (worktree / "src" / "hot.cc").write_text("int hot() { return 2; }\n", encoding="utf-8")
+            (worktree / "tests").mkdir(exist_ok=True)
+            (worktree / "tests" / "fixture.root").write_text("tampered\n", encoding="utf-8")
+            _git(worktree, "add", "src/hot.cc", "tests/fixture.root")
+            _git(worktree, "commit", "-m", "candidate")
+
+            audit = audit_commit(repo=worktree, parent_sha=baseline, frozen_globs=["tests/**"])
+            self.assertIn("tests/fixture.root", audit.frozen_violations)
+
+    def test_registry_only_resolves_accepted_result_sha(self):
         with tempfile.TemporaryDirectory() as tmp:
             registry = ExecutionRegistry(Path(tmp))
             record = ExecutionRecord(
@@ -265,12 +288,10 @@ class WorkspaceAndProvenanceTest(unittest.TestCase):
                 worktree_path="/tmp/worktree",
             )
             registry.record_execution(record)
-            registry.record_provenance(
-                ProvenanceReport("exec", "parent", True, {"all": "pass"}, result_sha="b")
-            )
-            self.assertIsNone(registry.verified_result_sha("parent"))
+            # Not accepted yet -> no stackable SHA.
+            self.assertIsNone(registry.accepted_result_sha("parent"))
             registry.mark_candidate_status("parent", "accepted")
-            self.assertEqual(registry.verified_result_sha("parent"), "b")
+            self.assertEqual(registry.accepted_result_sha("parent"), "b")
 
     def test_materializes_once_then_uses_evaluate_only(self):
         class CommittingExecutor:
@@ -317,18 +338,156 @@ class WorkspaceAndProvenanceTest(unittest.TestCase):
                 run_dir,
                 WorkspaceManager(run_dir, config),
                 registry,
-                ProvenanceVerifier(),
             )
 
             first = adapter.run_many([candidate], 0, config)
             self.assertFalse(first.failed_candidate_ids)
             registry.mark_candidate_status(candidate.candidate_id, "accepted")
-            first_sha = registry.verified_result_sha(candidate.candidate_id)
+            first_sha = registry.accepted_result_sha(candidate.candidate_id)
             second = adapter.run_many([candidate], 0, config)
 
             self.assertFalse(second.failed_candidate_ids)
             self.assertEqual(executor.modes, ["implement_and_validate", "evaluate_only"])
-            self.assertEqual(registry.verified_result_sha(candidate.candidate_id), first_sha)
+            self.assertEqual(registry.accepted_result_sha(candidate.candidate_id), first_sha)
+
+    def test_br101_clean_source_with_runtime_debris_is_judged_normally(self):
+        # Regression for the br101 incident: a candidate that commits clean
+        # in-scope source and passes validation, but leaves untracked runtime
+        # debris / a modified benchmark CSV and reports metric=None (e.g. a
+        # broken benchmark harness) must NOT be force-zeroed or killed. With the
+        # provenance layer removed it is simply audited (no frozen violation) and
+        # handed to the judger, which scores it on the metric-unknown signal.
+        class DebrisLeavingExecutor:
+            def execute(self, candidate, config):
+                repo = Path(config["_candidate_repo"])
+                _git(repo, "config", "user.email", "test@example.invalid")
+                _git(repo, "config", "user.name", "GEPA Test")
+                (repo / "src" / "hot.cc").write_text("int hot() { return 2; }\n", encoding="utf-8")
+                _git(repo, "add", "src/hot.cc")
+                _git(repo, "commit", "-m", "candidate")
+                # Runtime debris the executor does NOT commit (the br101 scene).
+                (repo / "benchmarks.csv").write_text("commit,ms_evt\nabc,162.0\n", encoding="utf-8")
+                return Trace(
+                    candidate.candidate_id,
+                    candidate.round_id,
+                    [
+                        SampleTrace(
+                            "task_execution",
+                            "in",
+                            str({"metrics": {"primary": None}}),
+                            "unknown",
+                            "built + test_fcn green; benchmark harness broke",
+                            artifacts={
+                                "metrics": {"primary": None, "baseline": None, "delta": None},
+                                "validation": {"passed": True, "checks": [], "regressions": []},
+                            },
+                        )
+                    ],
+                )
+
+        class _Judger:
+            def judge(self, candidate, trace, config):
+                return Judgment(
+                    candidate_id=candidate.candidate_id,
+                    round_id=candidate.round_id,
+                    score=0.4,
+                    passed=False,
+                    per_sample_scores=[],
+                    failure_categories=["metric_unknown"],
+                    actionable_feedback=["benchmark harness failed; retry measurement"],
+                    confidence="medium",
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, baseline = _make_repo(root)
+            run_dir = root / "run"
+            config = {
+                "workspace": {
+                    "mode": "git_worktree",
+                    "repo_path": str(repo),
+                    "root": str(run_dir / "worktrees"),
+                    "baseline_ref": baseline,
+                    "branch_prefix": "gepa/test",
+                },
+                "candidate_policy": {"max_commits": 1},
+                "executor": {"max_workers": 1},
+            }
+            candidate = _candidate()
+            adapter = ExecutorAdapter(
+                DebrisLeavingExecutor(),
+                run_dir,
+                WorkspaceManager(run_dir, config),
+                ExecutionRegistry(run_dir),
+            )
+            trace_batch = adapter.run_many([candidate], 0, config)
+            self.assertNotIn(candidate.candidate_id, trace_batch.failed_candidate_ids)
+
+            sample = trace_batch.traces[0].samples[0]
+            # Core regression: clean source + debris is not a frozen violation,
+            # so no failure is stamped and the judger is called normally.
+            self.assertEqual(sample.artifacts["commit_audit"]["frozen_violations"], [])
+            self.assertNotEqual(sample.artifacts.get("failure_category"), "frozen_violation")
+
+            judgment = JudgerAdapter(_Judger()).evaluate_many([candidate], trace_batch, config).judgments[0]
+            self.assertNotIn("frozen_violation", judgment.failure_categories)
+            self.assertNotEqual(judgment.score, 0.0)
+
+    def test_frozen_path_edit_is_hard_rejected(self):
+        # The one retained hard reject: an executor that edits a frozen path is
+        # force-zeroed by the JudgerAdapter and never reaches the real judger.
+        class FrozenEditingExecutor:
+            def execute(self, candidate, config):
+                repo = Path(config["_candidate_repo"])
+                _git(repo, "config", "user.email", "test@example.invalid")
+                _git(repo, "config", "user.name", "GEPA Test")
+                (repo / "src" / "hot.cc").write_text("int hot() { return 2; }\n", encoding="utf-8")
+                (repo / "tests").mkdir(exist_ok=True)
+                (repo / "tests" / "fixture.root").write_text("tampered\n", encoding="utf-8")
+                _git(repo, "add", "src/hot.cc", "tests/fixture.root")
+                _git(repo, "commit", "-m", "candidate")
+                return Trace(
+                    candidate.candidate_id,
+                    candidate.round_id,
+                    [SampleTrace("task_execution", "in", "out", "expected", "ok")],
+                )
+
+        class _ExplodingJudger:
+            def judge(self, candidate, trace, config):
+                raise AssertionError("judger must not be called for a frozen-path violation")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, baseline = _make_repo(root)
+            run_dir = root / "run"
+            config = {
+                "workspace": {
+                    "mode": "git_worktree",
+                    "repo_path": str(repo),
+                    "root": str(run_dir / "worktrees"),
+                    "baseline_ref": baseline,
+                    "branch_prefix": "gepa/test",
+                },
+                "candidate_policy": {"max_commits": 1, "frozen_globs": ["tests/**"]},
+                "executor": {"max_workers": 1},
+            }
+            candidate = _candidate()
+            adapter = ExecutorAdapter(
+                FrozenEditingExecutor(),
+                run_dir,
+                WorkspaceManager(run_dir, config),
+                ExecutionRegistry(run_dir),
+            )
+            trace_batch = adapter.run_many([candidate], 0, config)
+
+            sample = trace_batch.traces[0].samples[0]
+            self.assertEqual(sample.artifacts["failure_category"], "frozen_violation")
+            self.assertIn("tests/fixture.root", sample.artifacts["commit_audit"]["frozen_violations"])
+
+            judgment = JudgerAdapter(_ExplodingJudger()).evaluate_many([candidate], trace_batch, config).judgments[0]
+            self.assertEqual(judgment.score, 0.0)
+            self.assertFalse(judgment.passed)
+            self.assertIn("frozen_violation", judgment.failure_categories)
 
 
 class UsageTrackingTest(unittest.TestCase):
