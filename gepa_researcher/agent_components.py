@@ -65,35 +65,6 @@ def format_evidence_policy(config: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def format_prior_context(config: dict[str, Any]) -> str:
-    context = config.get("_prior_context") or {}
-    if not context:
-        return "Prior context:\n- No prior context loaded."
-    return (
-        "Prior context:\n"
-        f"- Notes: {context.get('notes', [])}\n"
-        f"- Skills: {context.get('skills', [])}\n"
-        f"- Documents: {context.get('documents', [])}\n"
-        f"- Warnings: {context.get('warnings', [])}"
-    )
-
-
-def format_gepa_context(config: dict[str, Any]) -> str:
-    context = config.get("_gepa_context")
-    if not context:
-        return "GEPA context:\n- No prior candidate pool exists yet; create seed candidate(s)."
-    return (
-        "GEPA context:\n"
-        f"- Pareto frontier: {context.get('pareto_frontier', {})}\n"
-        f"- Parent candidates: {context.get('parents', [])}\n"
-        f"- Parent trace artifacts: {context.get('parent_traces', {})}\n"
-        f"- Score matrix: {context.get('score_matrix', {})}\n"
-        f"- Recent feedback: {context.get('recent_feedback', [])}\n"
-        f"- Recent traces: {context.get('recent_traces', [])}\n"
-        f"- Dataset split: {context.get('dataset_split', {})}"
-    )
-
-
 def format_proposer_context(context: dict[str, Any]) -> str:
     if not context:
         return "Proposer role context:\n- No prior candidate pool exists yet; create seed candidate(s)."
@@ -671,7 +642,7 @@ Rubric:
 - Reward relevant artifacts that make the result or failure mode inspectable.
 - Penalize missing evidence when the task naturally requires validation and validation was feasible.
 - Penalize unsupported claims, missing metrics, regressions, overfitting to feedback, or failure to follow the candidate contract.
-- Do not assume hidden task facts that are not present in resources, prior context, or loop feedback.
+- Do not assume hidden task facts that are not present in candidate facts, trace evidence, the task goal, or the judger contract.
 - Return actionable feedback that helps the next proposer.
 - Return only a JSON object, no prose outside JSON.
 
