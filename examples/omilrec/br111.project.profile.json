@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "kind": "project_profile",
+  "name": "omilrec-br111-clean-package",
+  "source": {
+    "repo_path": "../../../omilrec-br111-executor-pack/repo",
+    "default_ref": "ff71809b81c6c887a276a14c29b4f86296f27571",
+    "workspace_mode": "git_worktree"
+  },
+  "environment": {
+    "description": "JUNO J26.1.1 (el9, gcc11) via /cvmfs/juno.ihep.ac.cn/el9_amd64_gcc11/Release/J26.1.1/setup.sh.",
+    "setup_commands": [
+      "source /cvmfs/juno.ihep.ac.cn/el9_amd64_gcc11/Release/J26.1.1/setup.sh",
+      "source InstallArea/setup.sh"
+    ],
+    "python_command": "/cvmfs/juno.ihep.ac.cn/el9_amd64_gcc11/Release/J25.7.3/ExternalLibs/Python/3.11.10/bin/python",
+    "dependency_policy": "No new packages. Use installed CVMFS packages and existing local tooling only."
+  },
+  "resources": {
+    "data_files": [
+      "../../../omilrec-br111-executor-pack/repo/benchmarks/speed.csv",
+      "../../../omilrec-br111-executor-pack/repo/benchmarks/drift.csv",
+      "/data/juno/dingxf/inputs/index_12628_rtraw_1.json",
+      "/data/juno/dingxf/OMILREC_maps"
+    ],
+    "context_paths": [
+      "../../../omilrec-br111-executor-pack/context/BR111_OPTIMIZATION_CONTEXT.md",
+      "../../../omilrec-br111-executor-pack/context/SEEDS_BR111.md",
+      "../../../omilrec-br111-executor-pack/context/SOURCE_INVENTORY_BR111.json",
+      "../../../omilrec-br111-executor-pack/manifest.json"
+    ],
+    "skills": [
+      "omilrec-br111-opt-flow",
+      "OMILREC-dev-guide",
+      "reproduce-OMILREC-reference-fit"
+    ],
+    "readonly_assets": [
+      {
+        "source": "../../../omilrec-br111-executor-pack/assets/fixtures/time_pdf.bin",
+        "target": "TEMP/fixtures/time_pdf.bin"
+      }
+    ],
+    "pre_materialized_lfs_paths": [
+      "tests/fixtures/v107_rev1/*.bin"
+    ],
+    "generated_tracked_paths": [
+      "benchmarks/speed.csv",
+      "benchmarks/drift.csv"
+    ],
+    "hash_artifacts": [
+      "build/bin/test_fcn.exe",
+      "InstallArea/lib64/libOMILRECV2.so"
+    ]
+  },
+  "agent": {
+    "command": "claude",
+    "timeout_seconds": 3600,
+    "extra_args": [
+      "--permission-mode",
+      "acceptEdits",
+      "--allowedTools",
+      "Read,Edit,Write,Glob,Grep,Bash"
+    ]
+  },
+  "execution": {
+    "lifecycle": "materialize_once",
+    "max_parallel_candidates": 1,
+    "fail_fast": false,
+    "runtime_backend": "apptainer",
+    "apptainer": {
+      "auto_image": true,
+      "executable": "apptainer",
+      "command": "claude",
+      "cleanenv": true,
+      "containall": true,
+      "writable_tmpfs": true,
+      "container_repo": "/workspace/repo",
+      "container_artifacts": "/workspace/artifacts",
+      "container_scratch": "/workspace/scratch",
+      "container_home": "/workspace/home",
+      "env_allowlist": [],
+      "readonly_binds": [],
+      "extra_binds": [],
+      "auto_init_claude_home": true
+    }
+  },
+  "safety": {
+    "editable_paths": [
+      "OMILRECV2/src/**/*.cc",
+      "OMILRECV2/src/**/*.h"
+    ],
+    "frozen_paths": [
+      "tests/**",
+      "scripts/**",
+      "CMakeLists.txt",
+      "pyproject.toml",
+      ".gitattributes",
+      "benchmarks/*.md"
+    ],
+    "max_files_per_candidate": 3,
+    "max_commits_per_candidate": 1
+  }
+}

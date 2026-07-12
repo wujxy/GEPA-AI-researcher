@@ -87,6 +87,30 @@ class ApptainerIntegrationTest(unittest.TestCase):
             status="executing",
         )
 
+    def _runtime_config(self, image: Path, apptainer: Path, *, command: str = "python", mounts=None, env_pass=None, env_set=None, **apptainer_overrides):
+        apptainer_cfg = {
+            "image": str(image),
+            "executable": str(apptainer),
+            "cleanenv": True,
+            "containall": True,
+            "writable_tmpfs": True,
+        }
+        apptainer_cfg.update(apptainer_overrides)
+        return {
+            "executor": {"runtime_backend": "apptainer"},
+            "_runtime_ir": {
+                "backend": "apptainer",
+                "workdir": "/workspace/repo",
+                "command": command,
+                "append_agent_args": True,
+                "env": {"pass": list(env_pass or []), "set": dict(env_set or {})},
+                "init": [],
+                "preflight": [],
+                "mounts": list(mounts or []),
+                "apptainer": apptainer_cfg,
+            },
+        }
+
     def test_real_apptainer_executable_detection(self):
         """Test that apptainer executable detection works correctly."""
         if not self.apptainer_available:
@@ -145,19 +169,7 @@ class ApptainerIntegrationTest(unittest.TestCase):
             fake_image.write_text("fake image", encoding="utf-8")
 
             # Create configuration
-            config = {
-                "executor": {
-                    "runtime_backend": "apptainer",
-                    "apptainer": {
-                        "image": str(fake_image),
-                        "executable": str(fake_apptainer),
-                        "command": "python",
-                        "cleanenv": True,
-                        "containall": True,
-                        "writable_tmpfs": True,
-                    }
-                }
-            }
+            config = self._runtime_config(fake_image, fake_apptainer, command="python")
 
             # Test with multiple executions of the same candidate
             lease = self._create_test_lease(root)
@@ -211,27 +223,42 @@ class ApptainerIntegrationTest(unittest.TestCase):
             self.assertTrue((Path(runtime1.artifacts["host_scratch"]) / "tmp").exists())
             self.assertTrue(Path(runtime1.artifacts["host_home"]).exists())
 
-    def test_environment_variable_escaping_with_special_characters(self):
-        """Test that environment variable values with special characters are properly escaped."""
+    def test_environment_variables_with_special_characters_are_passed_as_argv(self):
+        """Environment values are passed as --env argv entries, not shell-escaped strings."""
         if not self.apptainer_available:
             self.skipTest("Apptainer not available on this system")
 
-        backend = ApptainerRuntimeBackend(Path.cwd(), {})
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_image = root / "test.sif"
+            fake_image.write_text("fake image", encoding="utf-8")
+            fake_apptainer = root / "fake_apptainer"
+            fake_apptainer.write_text("#!/bin/sh\n exit 0\n", encoding="utf-8")
+            fake_apptainer.chmod(0o755)
+            config = self._runtime_config(
+                fake_image,
+                fake_apptainer,
+                env_set={"SPECIAL_VALUE": "complex: ;test with $ dollar and 'quote"},
+            )
 
-        # Test various special characters
-        test_cases = [
-            ("simple_value", "simple_value"),
-            ("with space", "'with space'"),
-            ("with'quote", "'with'\"'\"'quote'"),
-            ("with\"double", "'with\"double'"),
-            ("with$ dollar", "'with$ dollar'"),
-            ("with!exclaim", "'with!exclaim'"),
-            ("complex: ;test", "'complex: ;test'"),
-        ]
+            runtime = ApptainerRuntimeBackend(root / "run_dir", config).prepare(
+                Candidate(
+                    candidate_id="cand_000",
+                    round_id=0,
+                    hypothesis="test",
+                    scope="test",
+                    proposed_change="test",
+                    rationale="test",
+                    expected_improvement="test",
+                    risk="test",
+                    prompt_text="test",
+                    created_at="now",
+                ),
+                self._create_test_lease(root),
+                self._create_test_record(),
+            )
 
-        for value, expected in test_cases:
-            result = backend._escape_env_value(value)
-            self.assertEqual(result, expected, f"Failed to escape: {value}")
+            self.assertIn("SPECIAL_VALUE=complex: ;test with $ dollar and 'quote", runtime.command_prefix)
 
     def test_container_bind_mount_structure_validation(self):
         """Test that container bind mounts are correctly structured."""
@@ -250,26 +277,13 @@ class ApptainerIntegrationTest(unittest.TestCase):
             fake_apptainer.write_text("#!/bin/sh\n exit 0\n", encoding="utf-8")
             fake_apptainer.chmod(0o755)
 
-            config = {
-                "executor": {
-                    "runtime_backend": "apptainer",
-                    "apptainer": {
-                        "image": str(fake_image),
-                        "executable": str(fake_apptainer),
-                        "readonly_binds": [
-                            {"source": str(root / "readonly"), "target": "/readonly", "mode": "ro"}
-                        ],
-                        "extra_binds": [
-                            {"source": str(root / "writable"), "target": "/writable", "mode": "rw"}
-                        ],
-                    }
-                },
-                "workspace": {
-                    "readonly_assets": [
-                        {"source": str(root / "asset"), "target": "TEMP/asset.bin"}
-                    ]
-                }
-            }
+            config = self._runtime_config(
+                fake_image,
+                fake_apptainer,
+                mounts=[{"source": str(root / "asset"), "target": "/workspace/repo/TEMP/asset.bin", "mode": "ro"}],
+                readonly_binds=[{"source": str(root / "readonly"), "target": "/readonly", "mode": "ro"}],
+                extra_binds=[{"source": str(root / "writable"), "target": "/writable", "mode": "rw"}],
+            )
 
             # Create required directories
             (root / "readonly").mkdir()
@@ -425,16 +439,7 @@ class ApptainerIntegrationTest(unittest.TestCase):
             )
             fake_apptainer.chmod(0o755)
 
-            config = {
-                "executor": {
-                    "runtime_backend": "apptainer",
-                    "apptainer": {
-                        "image": str(fake_image),
-                        "executable": str(fake_apptainer),
-                        "command": "python",
-                    }
-                }
-            }
+            config = self._runtime_config(fake_image, fake_apptainer, command="python")
 
             lease = self._create_test_lease(root)
             backend = ApptainerRuntimeBackend(root / "run_dir", config)

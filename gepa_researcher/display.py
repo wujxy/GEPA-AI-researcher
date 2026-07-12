@@ -99,7 +99,6 @@ def format_proposal_summary(
     score: float | None = None,
     role: str | None = None,
 ) -> str:
-    # ✅ 删除: parents = candidate.parent_ids or ([candidate.parent_id] if candidate.parent_id else [])
     parents = candidate.parent_ids or []
     instruction = candidate.executor_contract.get("instructions") or "not specified"
     lines = [

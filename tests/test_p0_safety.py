@@ -72,22 +72,18 @@ def _candidate(candidate_id: str = "cand_000_000", parent_id: str | None = None)
 
 
 class AdmissionGateTest(unittest.TestCase):
-    def test_rejects_frozen_build_tuning_before_execution(self):
+    def test_rejects_frozen_path_before_execution(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo, baseline = _make_repo(Path(tmp))
             candidate = _candidate()
             candidate.target_files = ["CMakeLists.txt"]
             candidate.scope = "CMakeLists.txt"
             candidate.proposed_change = "modify CMakeLists.txt for PGO"
-            candidate.artifacts["candidate_class"] = "build-tuning"
             config = {
                 "workspace": {"repo_path": str(repo), "baseline_ref": baseline},
                 "candidate_policy": {
                     "allowed_target_globs": ["src/**/*.cc"],
                     "frozen_globs": ["CMakeLists.txt"],
-                    "allowed_safety_classes": ["safe"],
-                    "allowed_strategies": ["safe-pattern #1"],
-                    "allowed_candidate_classes": ["safe-source"],
                 },
             }
 
@@ -100,7 +96,6 @@ class AdmissionGateTest(unittest.TestCase):
 
             self.assertFalse(decision.admitted)
             self.assertIn("FROZEN_PATH", decision.failure_codes)
-            self.assertIn("DISALLOWED_CANDIDATE_CLASS", decision.failure_codes)
 
     def test_accepts_root_file_with_double_star_glob(self):
         with tempfile.TemporaryDirectory() as tmp:

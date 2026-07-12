@@ -66,10 +66,7 @@ class WorkspaceManager:
         if actual != start_sha:
             raise WorkspaceError(f"worktree start SHA mismatch: expected={start_sha} actual={actual}")
 
-        # Worktree is ready - let executor create task-specific directories as needed
-        # This makes GEPA framework task-agnostic and avoids OMILREC/JUNO specific hardcoded paths
-
-        self._map_readonly_assets(worktree)
+        # Worktree is ready - runtime backends handle any task-specific mounts.
         return WorkspaceLease(
             candidate_id=candidate.candidate_id,
             round_id=candidate.round_id,
@@ -146,16 +143,6 @@ class WorkspaceManager:
                 f"path={worktree_path} before={snapshot} after={current}"
             )
 
-    def _map_readonly_assets(self, worktree: Path) -> None:
-        for item in self.config.get("readonly_assets", []):
-            source = Path(str(item["source"])).expanduser().resolve()
-            target = worktree / str(item["target"])
-            if not source.exists():
-                raise WorkspaceError(f"readonly asset does not exist: {source}")
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if target.exists() or target.is_symlink():
-                continue
-            os.symlink(source, target)
 
 
 def _safe_ref(value: str) -> str:

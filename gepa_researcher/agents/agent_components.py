@@ -159,15 +159,6 @@ def format_candidate_policy(config: dict[str, Any]) -> str:
     frozen = policy.get("frozen_globs", [])
     if frozen:
         lines.append(f"- frozen_globs: {frozen}")
-    strategies = policy.get("allowed_strategies", [])
-    if strategies:
-        lines.append(f"- strategy must begin with one of: {strategies}")
-    safety = policy.get("allowed_safety_classes", [])
-    if safety:
-        lines.append(f"- safety_class must be one of: {safety}")
-    classes = policy.get("allowed_candidate_classes", [])
-    if classes:
-        lines.append(f"- candidate_class must be one of: {classes}")
     max_targets = policy.get("max_target_files")
     if max_targets is not None:
         lines.append(f"- max_target_files: {max_targets}")
@@ -274,8 +265,8 @@ Required JSON schema:
   "risk": "main risk or failure mode",
   "strategy": "short name for the approach",
   "target_files": ["file to change"],
-  "safety_class": "task-defined safety class",
-  "candidate_class": "safe-source|exploratory-source|build-tuning|algorithmic|external-compute",
+  "safety_class": "optional short safety note (free text)",
+  "candidate_class": "optional optimization-type tag (free text)",
   "expected_gain": 0.0,
   "analysis_plan": ["step 1", "step 2"],
   "executor_contract": {{"instructions": "what the executor must do", "expected_artifacts": ["artifact"], "success_criteria": ["criterion"]}},
@@ -315,6 +306,7 @@ Required JSON schema:
             target_files=list(map(str, data.get("target_files", []))),
             safety_class=str(data.get("safety_class", "")),
             strategy=str(data.get("strategy", "")),
+            candidate_class=str(data.get("candidate_class", "")),
             expected_gain=_expected_gain(data),
             artifacts={"agent_raw": result.text, "eval_phase": config.get("_eval_phase", "pareto"), "sample_ids": config.get("_selected_sample_ids", []), **_call_artifact(result), **data},
         )
@@ -360,8 +352,8 @@ Required JSON schema:
       "risk": "main risk or failure mode",
       "strategy": "short name for the approach",
       "target_files": ["file to change"],
-      "safety_class": "task-defined safety class",
-      "candidate_class": "safe-source|exploratory-source|build-tuning|algorithmic|external-compute",
+      "safety_class": "optional short safety note (free text)",
+      "candidate_class": "optional optimization-type tag (free text)",
       "expected_gain": 0.0,
       "analysis_plan": ["step 1", "step 2"],
       "executor_contract": {{"instructions": "what the executor must do", "expected_artifacts": ["artifact"], "success_criteria": ["criterion"]}},
@@ -408,6 +400,7 @@ Required JSON schema:
                     target_files=list(map(str, data.get("target_files", []))),
                     safety_class=str(data.get("safety_class", "")),
                     strategy=str(data.get("strategy", "")),
+                    candidate_class=str(data.get("candidate_class", "")),
                     expected_gain=_expected_gain(data),
                     artifacts={"agent_raw": result.text, "eval_phase": config.get("_eval_phase", "pareto"), "sample_ids": config.get("_selected_sample_ids", []), **_call_artifact(result), **data},
                 )
@@ -662,8 +655,7 @@ Required JSON schema:
   "per_sample_scores": [{{"sample_id": "task_execution", "score": 0.0, "notes": ""}}],
   "failure_categories": ["category"],
   "actionable_feedback": ["specific next action"],
-  "confidence": "low|medium|high",
-  "best_interpretation": "brief interpretation"
+  "confidence": "low|medium|high"
 }}
 """
         result = _run_agent_json(

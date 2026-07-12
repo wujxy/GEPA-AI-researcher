@@ -13,12 +13,16 @@ from unittest.mock import patch
 import gepa_researcher.execution.container_image as ci
 from gepa_researcher.agents.agent_client import CommandResolution
 from gepa_researcher.execution.container_image import (
+    ApptainerDiscovery,
     ClaudeBind,
     ImageMaterialization,
     Requirements,
     _fingerprint,
     _merge_binds,
     derive_requirements,
+    discover_apptainer,
+    doctor_runtime,
+    ensure_apptainer,
     finalize_runtime,
     resolve_claude_bind,
 )
@@ -136,6 +140,89 @@ class FingerprintTest(unittest.TestCase):
             self.assertNotEqual(fp1, fp2)
 
 
+class DiscoverApptainerTest(unittest.TestCase):
+    def _exe(self, root: Path, name: str = "apptainer") -> Path:
+        exe = root / name
+        exe.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        exe.chmod(0o755)
+        return exe
+
+    def test_configured_executable_wins(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            exe = self._exe(Path(tmp))
+            with patch.dict(os.environ, {}, clear=True), patch.object(ci.shutil, "which", return_value=None):
+                discovery = discover_apptainer({"executable": str(exe)}, allow_install=False)
+        self.assertEqual(discovery.executable, str(exe))
+        self.assertEqual(discovery.source, "configured")
+
+    def test_env_executable_is_used_when_unconfigured(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            exe = self._exe(Path(tmp))
+            with patch.dict(os.environ, {"GEPA_APPTAINER": str(exe)}, clear=True), \
+                 patch.object(ci.shutil, "which", return_value=None):
+                discovery = discover_apptainer({}, allow_install=False)
+        self.assertEqual(discovery.executable, str(exe))
+        self.assertEqual(discovery.source, "env")
+
+    def test_install_hook_can_populate_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cached = root / "apptainer" / "bin" / "apptainer"
+
+            def install(_command):
+                cached.parent.mkdir(parents=True)
+                cached.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                cached.chmod(0o755)
+                return True, None
+
+            with patch.object(ci, "RUNTIME_CACHE_DIR", root), \
+                 patch.object(ci, "_install_user_apptainer", side_effect=install), \
+                 patch.object(ci.shutil, "which", return_value=None):
+                discovery = discover_apptainer({"install_command": "install-apptainer"})
+        self.assertEqual(discovery.executable, str(cached))
+        self.assertEqual(discovery.source, "cache")
+        self.assertTrue(discovery.install_attempted)
+        self.assertTrue(discovery.install_ok)
+
+    def test_ensure_apptainer_reports_attempts_when_missing(self):
+        with patch.dict(os.environ, {}, clear=True), patch.object(ci.shutil, "which", return_value=None):
+            with self.assertRaisesRegex(ci.MaterializationError, "Apptainer runtime was not found") as ctx:
+                ensure_apptainer({}, allow_install=False)
+        self.assertIn("path:apptainer", str(ctx.exception))
+
+
+
+
+class DoctorRuntimeTest(unittest.TestCase):
+    def test_reports_missing_apptainer_without_throwing(self):
+        with patch.object(ci, "discover_apptainer", return_value=ApptainerDiscovery(None, None, ["path:apptainer"])), \
+             patch.object(ci, "resolve_claude_bind", return_value=ClaudeBind(enabled=False)), \
+             patch.object(ci, "_claude_auth_diagnostics", return_value={"ok": False, "host_paths": [], "env_keys": []}):
+            report = doctor_runtime({}, agent_command="claude", probe=False)
+        self.assertFalse(report["ok"])
+        self.assertFalse(report["apptainer"]["ok"])
+        self.assertIn("Install Apptainer", report["recommendations"][0])
+
+    def test_can_skip_apptainer_for_local_runtime_config(self):
+        with patch.object(ci, "discover_apptainer") as discover, \
+             patch.object(ci, "resolve_claude_bind", return_value=ClaudeBind(enabled=True, claude_bin="/bin/claude")), \
+             patch.object(ci, "_claude_auth_diagnostics", return_value={"ok": True, "host_paths": ["/home/u/.claude"], "env_keys": []}):
+            report = doctor_runtime({}, agent_command="claude", check_apptainer=False)
+        self.assertTrue(report["ok"])
+        self.assertFalse(discover.called)
+        self.assertTrue(report["apptainer"]["ok"])
+
+
+class ClaudeAuthDiagnosticsTest(unittest.TestCase):
+    def test_detects_env_token_without_exposing_value(self):
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "secret"}, clear=True), \
+             patch.object(ci.Path, "home", return_value=Path(tempfile.gettempdir()) / "missing-gepa-home"):
+            diag = ci._claude_auth_diagnostics()
+        self.assertTrue(diag["ok"])
+        self.assertEqual(diag["env_keys"], ["ANTHROPIC_API_KEY"])
+        self.assertNotIn("secret", str(diag))
+
+
 class ResolveClaudeBindTest(unittest.TestCase):
     def _make_nvm(self, root: Path):
         node_dir = root / "versions" / "node" / "v22.19.0"
@@ -218,7 +305,8 @@ class FinalizeRuntimeTest(unittest.TestCase):
                 "apptainer": {"image": str(sif), "auto_image": False},
             }
         }
-        with patch.object(ci, "_probe_host_runtime", return_value=self._fake_probe()), \
+        with patch.object(ci, "ensure_apptainer", return_value=ApptainerDiscovery("/usr/bin/apptainer", "test")), \
+             patch.object(ci, "_probe_host_runtime", return_value=self._fake_probe()), \
              patch.object(ci, "materialize_executor_image") as mat:
             finalize_runtime(resolved)
             self.assertFalse(mat.called, "materializer must not run when auto_image is False")
@@ -246,7 +334,8 @@ class FinalizeRuntimeTest(unittest.TestCase):
                 {"source": "/n", "target": "/n", "mode": "ro"},
             ],
         )
-        with patch.object(ci, "_probe_host_runtime", return_value=self._fake_probe()), \
+        with patch.object(ci, "ensure_apptainer", return_value=ApptainerDiscovery("/usr/bin/apptainer", "test")), \
+             patch.object(ci, "_probe_host_runtime", return_value=self._fake_probe()), \
              patch.object(ci, "materialize_executor_image", return_value=fake_mat) as mat:
             finalize_runtime(resolved)
             self.assertTrue(mat.called)
@@ -264,7 +353,8 @@ class FinalizeRuntimeTest(unittest.TestCase):
                 "apptainer": {"userns": False, "image": str(self.cache / "x.sif")},
             }
         }
-        with patch.object(ci, "_probe_host_runtime", return_value=self._fake_probe(userns=True)):
+        with patch.object(ci, "ensure_apptainer", return_value=ApptainerDiscovery("/usr/bin/apptainer", "test")), \
+             patch.object(ci, "_probe_host_runtime", return_value=self._fake_probe(userns=True)):
             finalize_runtime(resolved, allow_materialize=False)
         self.assertFalse(resolved["executor"]["apptainer"]["userns"])
 

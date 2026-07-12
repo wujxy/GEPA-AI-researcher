@@ -38,6 +38,7 @@ from ..agents.agent_client import resolve_command
 
 
 CACHE_DIR = Path(os.environ.get("GEPA_IMAGE_CACHE_DIR", "~/.cache/gepa/images")).expanduser()
+RUNTIME_CACHE_DIR = Path(os.environ.get("GEPA_RUNTIME_CACHE_DIR", "~/.cache/gepa/runtime")).expanduser()
 _DEFAULT_TINY = "docker://alpine:3.20"
 _HOST_PROBE_TTL_SECONDS = 30 * 24 * 3600  # 30 days
 
@@ -82,6 +83,20 @@ class ImageMaterialization:
     derived_readonly_binds: list[dict] = field(default_factory=list)
     derived_env_allowlist: list[str] = field(default_factory=list)
     diagnostics: dict = field(default_factory=dict)
+
+
+@dataclass
+class ApptainerDiscovery:
+    executable: str | None
+    source: str | None
+    attempted: list[str] = field(default_factory=list)
+    install_attempted: bool = False
+    install_ok: bool = False
+    install_command: str | None = None
+    install_error: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 # --------------------------------------------------------------------------- #
@@ -263,6 +278,176 @@ def _run(argv: list[str], *, timeout: int) -> subprocess.CompletedProcess:
     )
 
 
+def _is_executable(path: str | Path) -> bool:
+    candidate = Path(path).expanduser()
+    return candidate.is_file() and os.access(candidate, os.X_OK)
+
+
+def _cached_apptainer_candidates() -> list[Path]:
+    return [
+        RUNTIME_CACHE_DIR / "apptainer" / "bin" / "apptainer",
+        RUNTIME_CACHE_DIR / "bin" / "apptainer",
+    ]
+
+
+def _install_user_apptainer(command: str) -> tuple[bool, str | None]:
+    """Run an explicit user-mode install hook.
+
+    GEPA intentionally does not guess a distro package-manager command. Sites that
+    want a fully hands-off first run can provide a pinned install script/command via
+    ``execution.apptainer.install_command`` or ``GEPA_APPTAINER_INSTALL_COMMAND``.
+    """
+    try:
+        result = subprocess.run(
+            command,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=1800,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, str(exc)
+    if result.returncode == 0:
+        return True, None
+    return False, _stderr_tail(result.stderr or result.stdout)
+
+
+def discover_apptainer(
+    apptainer_cfg: dict | None = None,
+    *,
+    allow_install: bool = True,
+) -> ApptainerDiscovery:
+    """Find or explicitly install an Apptainer-compatible executable."""
+    cfg = apptainer_cfg or {}
+    attempted: list[str] = []
+
+    def check_once() -> tuple[str | None, str | None]:
+        configured = cfg.get("executable")
+        if configured:
+            candidate = str(Path(str(configured)).expanduser()) if "/" in str(configured) else str(configured)
+            attempted.append(f"configured:{candidate}")
+            resolved = shutil.which(candidate) if "/" not in candidate else candidate
+            if resolved and _is_executable(resolved):
+                return resolved, "configured"
+
+        env_exe = os.environ.get("GEPA_APPTAINER")
+        if env_exe:
+            candidate = str(Path(env_exe).expanduser()) if "/" in env_exe else env_exe
+            attempted.append(f"env:GEPA_APPTAINER={candidate}")
+            resolved = shutil.which(candidate) if "/" not in candidate else candidate
+            if resolved and _is_executable(resolved):
+                return resolved, "env"
+
+        for name in ("apptainer", "singularity"):
+            attempted.append(f"path:{name}")
+            resolved = shutil.which(name)
+            if resolved and _is_executable(resolved):
+                return resolved, "path"
+
+        for candidate in _cached_apptainer_candidates():
+            attempted.append(f"cache:{candidate}")
+            if _is_executable(candidate):
+                return str(candidate), "cache"
+        return None, None
+
+    executable, source = check_once()
+    if executable:
+        return ApptainerDiscovery(executable=executable, source=source, attempted=attempted)
+
+    install_command = str(cfg.get("install_command") or os.environ.get("GEPA_APPTAINER_INSTALL_COMMAND") or "")
+    if allow_install and install_command:
+        ok, error = _install_user_apptainer(install_command)
+        executable, source = check_once()
+        return ApptainerDiscovery(
+            executable=executable,
+            source=source,
+            attempted=attempted,
+            install_attempted=True,
+            install_ok=ok and bool(executable),
+            install_command=install_command,
+            install_error=None if ok and executable else (error or "install command completed but no executable was found"),
+        )
+
+    return ApptainerDiscovery(executable=None, source=None, attempted=attempted)
+
+
+def ensure_apptainer(apptainer_cfg: dict | None = None, *, allow_install: bool = True) -> ApptainerDiscovery:
+    discovery = discover_apptainer(apptainer_cfg, allow_install=allow_install)
+    if discovery.executable:
+        return discovery
+    lines = [
+        "Apptainer runtime was not found.",
+        "GEPA checked:",
+        *[f"  - {item}" for item in discovery.attempted],
+        "Install Apptainer, set execution.apptainer.executable, set GEPA_APPTAINER, "
+        "or provide execution.apptainer.install_command / GEPA_APPTAINER_INSTALL_COMMAND "
+        "for a pinned user-mode installer.",
+    ]
+    if discovery.install_error:
+        lines.append(f"Install hook failed: {discovery.install_error}")
+    raise MaterializationError("\n".join(lines))
+
+
+def doctor_runtime(
+    apptainer_cfg: dict | None = None,
+    *,
+    agent_command: str = "claude",
+    allow_install: bool = False,
+    probe: bool = True,
+    check_apptainer: bool = True,
+) -> dict[str, Any]:
+    """Return non-throwing host-runtime diagnostics for ``gepa doctor``."""
+    cfg = apptainer_cfg or {}
+    discovery = ApptainerDiscovery(executable=None, source=None)
+    host_probe: dict[str, Any] | None = None
+    apptainer_ok = not check_apptainer
+    if check_apptainer:
+        discovery = discover_apptainer(cfg, allow_install=allow_install)
+        if discovery.executable and probe:
+            host_probe = _probe_host_runtime(str(discovery.executable))
+            apptainer_ok = bool(host_probe.get("default_exec_ok") or host_probe.get("userns_exec_ok"))
+        elif discovery.executable:
+            apptainer_ok = True
+
+    claude_bind = resolve_claude_bind(agent_command)
+    claude_auth = _claude_auth_diagnostics()
+    install_hook = str(cfg.get("install_command") or os.environ.get("GEPA_APPTAINER_INSTALL_COMMAND") or "")
+
+    recommendations: list[str] = []
+    if check_apptainer and not discovery.executable:
+        recommendations.append(
+            "Install Apptainer, set GEPA_APPTAINER, set execution.apptainer.executable, "
+            "or provide a pinned install_command."
+        )
+        if install_hook and not allow_install:
+            recommendations.append("Run `gepa doctor --install` to execute the configured install hook.")
+    elif check_apptainer and host_probe and not apptainer_ok:
+        recommendations.append("Apptainer was found but cannot exec containers; fix setuid or unprivileged user namespaces.")
+    if not claude_bind.enabled:
+        recommendations.append("Install Claude Code or set agent.command to a resolvable Claude executable.")
+    if not claude_auth.get("ok"):
+        recommendations.append("Authenticate Claude Code on the host before running executor agents.")
+
+    ok = bool(apptainer_ok and claude_bind.enabled and claude_auth.get("ok"))
+    return {
+        "ok": ok,
+        "apptainer": {
+            "ok": apptainer_ok,
+            "discovery": discovery.to_dict(),
+            "host_probe": host_probe,
+            "install_hook_configured": bool(install_hook),
+        },
+        "claude": {
+            "ok": bool(claude_bind.enabled),
+            "bind": asdict(claude_bind),
+            "auth": claude_auth,
+        },
+        "recommendations": recommendations,
+    }
+
+
 def _stderr_tail(text: str, limit: int = 1200) -> str:
     text = (text or "").strip()
     return text[-limit:] if len(text) > limit else text
@@ -285,7 +470,8 @@ def _probe_host_runtime(apptainer: str, *, tiny: str = _DEFAULT_TINY) -> dict:
     if cache_path.exists():
         try:
             cached = json.loads(cache_path.read_text(encoding="utf-8"))
-            if time.time() - float(cached.get("probed_at", 0)) < _HOST_PROBE_TTL_SECONDS:
+            cache_fresh = time.time() - float(cached.get("probed_at", 0)) < _HOST_PROBE_TTL_SECONDS
+            if cache_fresh and cached.get("apptainer") == apptainer:
                 return cached
         except (ValueError, OSError):
             pass
@@ -314,13 +500,13 @@ def _probe_host_runtime(apptainer: str, *, tiny: str = _DEFAULT_TINY) -> dict:
     return result
 
 
-def _build_sif(base: str, out: Path, *, timeout: int = 1200) -> None:
+def _build_sif(base: str, out: Path, *, apptainer: str = "apptainer", timeout: int = 1200) -> None:
     """Build a SIF from an OCI base without Docker. Atomic rename on success."""
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp_out = out.with_suffix(out.suffix + f".tmp.{os.getpid()}")
     if tmp_out.exists():
         tmp_out.unlink()
-    result = _run(["apptainer", "build", str(tmp_out), base], timeout=timeout)
+    result = _run([apptainer, "build", str(tmp_out), base], timeout=timeout)
     if result.returncode != 0 or not tmp_out.exists():
         try:
             tmp_out.unlink()
@@ -328,13 +514,26 @@ def _build_sif(base: str, out: Path, *, timeout: int = 1200) -> None:
             pass
         raise MaterializationError(
             "Failed to build Apptainer image.\n"
-            f"  Command: apptainer build {tmp_out} {base}\n"
+            f"  Command: {apptainer} build {tmp_out} {base}\n"
             f"  stderr:\n{_stderr_tail(result.stderr)}\n"
             "Mitigation: pre-build the image yourself (`apptainer build out.sif "
             f"{base}`), point execution.apptainer.image at it, and set "
             "execution.apptainer.auto_image: false."
         )
     os.replace(tmp_out, out)
+
+
+def _claude_auth_diagnostics() -> dict[str, Any]:
+    home = Path.home()
+    auth_paths = [home / ".claude.json", home / ".claude"]
+    env_names = ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"]
+    present_paths = [str(path) for path in auth_paths if path.exists()]
+    present_env = [name for name in env_names if os.environ.get(name)]
+    return {
+        "ok": bool(present_paths or present_env),
+        "host_paths": present_paths,
+        "env_keys": present_env,
+    }
 
 
 def _probe_tools(
@@ -346,7 +545,7 @@ def _probe_tools(
     apptainer: str,
 ) -> dict:
     """Validate the built image can actually run the required tools + claude."""
-    diagnostics: dict[str, Any] = {"tools": {}, "claude": None, "warnings": []}
+    diagnostics: dict[str, Any] = {"tools": {}, "claude": None, "claude_auth": None, "warnings": []}
     base_argv = [apptainer, "exec"]
     if userns:
         base_argv.append("--userns")
@@ -390,6 +589,13 @@ def _probe_tools(
             "host claude/node could not be resolved; executor will need claude inside the image"
         )
         diagnostics["claude"] = {"ok": False, "claude_bin": None}
+
+    diagnostics["claude_auth"] = _claude_auth_diagnostics()
+    if not diagnostics["claude_auth"].get("ok"):
+        diagnostics["warnings"].append(
+            "Claude auth was not detected on the host (.claude/.claude.json or API-token env); "
+            "the executor may fail when Claude starts"
+        )
 
     # Missing a STRICT tool is fatal.
     missing_strict = [
@@ -435,7 +641,8 @@ def materialize_executor_image(
 ) -> ImageMaterialization:
     """Build (or reuse) the executor SIF and validate it. Returns the materialization."""
     apptainer_cfg = (resolved_config.get("executor") or {}).get("apptainer") or {}
-    apptainer_exe = str(apptainer_cfg.get("executable") or "apptainer")
+    discovery = ensure_apptainer(apptainer_cfg)
+    apptainer_exe = str(discovery.executable)
 
     req = derive_requirements(resolved_config)
     claude_bind = resolve_claude_bind(req.claude_command)
@@ -479,7 +686,7 @@ def materialize_executor_image(
                     pass  # appeared just now
                 else:
                     start = time.monotonic()
-                    _build_sif(base_image, sif_path)
+                    _build_sif(base_image, sif_path, apptainer=apptainer_exe)
                     build_ms = int((time.monotonic() - start) * 1000)
                     built_now = True
 
@@ -513,6 +720,7 @@ def materialize_executor_image(
             "userns_exec_ok": probe.get("userns_exec_ok"),
             "userns": userns,
         },
+        "apptainer_discovery": discovery.to_dict(),
     }
     return ImageMaterialization(
         sif_path=str(sif_path),
@@ -573,8 +781,14 @@ def finalize_runtime(
     if executor.get("runtime_backend") != "apptainer":
         return resolved_config
 
-    apptainer = executor.setdefault("apptainer", {})
-    apptainer_exe = str(apptainer.get("executable") or "apptainer")
+    runtime_ir = resolved_config.setdefault("_runtime_ir", {})
+    runtime_apptainer = runtime_ir.setdefault("apptainer", {}) if runtime_ir.get("backend") == "apptainer" else {}
+    apptainer = executor.setdefault("apptainer", runtime_apptainer)
+    if runtime_apptainer:
+        apptainer.update(runtime_apptainer)
+    discovery = ensure_apptainer(apptainer)
+    apptainer_exe = str(discovery.executable)
+    apptainer["executable"] = apptainer_exe
     host_probe = _probe_host_runtime(apptainer_exe)
 
     # Always honor a userns requirement when the user did not pin it explicitly,
@@ -600,7 +814,10 @@ def finalize_runtime(
                 "version": host_probe.get("version"),
                 "userns": host_probe.get("userns"),
             },
+            "apptainer_discovery": discovery.to_dict(),
         }
+        if runtime_apptainer is not apptainer:
+            runtime_apptainer.update(apptainer)
         return resolved_config
 
     mat = materialize_executor_image(resolved_config, force=force, host_probe=host_probe)
@@ -608,6 +825,10 @@ def finalize_runtime(
     apptainer["readonly_binds"] = _merge_binds(
         apptainer.get("readonly_binds") or [], mat.derived_readonly_binds
     )
+    if runtime_apptainer is not apptainer:
+        runtime_apptainer.update(apptainer)
+    else:
+        runtime_ir["apptainer"] = apptainer
     meta["_materialization"] = _sanitize_materialization(mat)
     return resolved_config
 

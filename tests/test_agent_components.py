@@ -215,8 +215,6 @@ class AgentComponentsTest(unittest.TestCase):
             "evidence": {},
             "candidate_policy": {
                 "known_target_files": ["OMILRECV2/src/RecHelper.cc", "OMILRECV2/src/RecHelper.h"],
-                "allowed_strategies": ["safe-pattern #1"],
-                "allowed_safety_classes": ["safe"],
             },
         }
 
@@ -226,7 +224,6 @@ class AgentComponentsTest(unittest.TestCase):
         self.assertIn("Candidate policy", prompt)
         self.assertIn("Source baseline/ref: Br1.0.1", prompt)
         self.assertIn("OMILRECV2/src/RecHelper.cc", prompt)
-        self.assertIn("safe-pattern #1", prompt)
 
     def test_agent_proposer_batch_prompt_includes_recent_traces_and_dataset_split(self):
         client = CapturingClient(

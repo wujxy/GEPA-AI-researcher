@@ -5,40 +5,41 @@ human research objective into repeated proposer, executor, and judger agent
 cycles while keeping project resources, runtime contracts, workspaces, safety
 limits, and artifacts explicit.
 
-## 🚀 Quick Setup for Production Use
+## Quick Start
 
-### Prerequisite Installation
-
-To run GEPA with Apptainer isolation you only need:
-
-1. **Apptainer installed** (containerized execution). Docker is *not* required.
-```bash
-sudo dnf install -y apptainer   # EL9 systems
-apptainer --version
-```
-   GEPA builds the executor image by pulling OCI layers directly
-   (`apptainer build out.sif docker://...`), which works without any Docker
-   daemon. On hosts where Apptainer's setuid helper is unavailable, GEPA
-   auto-detects this and runs exec under `--userns` (unprivileged user
-   namespaces) instead.
-
-2. **Claude Code available on the host** (for executor agents). GEPA binds the
-   host Claude + node installation read-only into the executor container, so no
-   Claude needs to be baked into the image. Just ensure the configured
-   `agent.command` resolves on the host.
-
-### Quick Start
-
-Set `execution.runtime_backend: apptainer` in your project profile and run — the
-executor image is built automatically and reused from a content-addressed cache:
+Install GEPA as a command-line app from a clone:
 
 ```bash
-# Validate configuration (also materializes/reuses the image once)
-python -m gepa_researcher.cli validate --config your_task.yaml
-
-# Run with Apptainer isolation
-python -m gepa_researcher.cli run --config your_task.yaml --run-dir ./gepa-run
+git clone https://github.com/wujxy/GEPA-AI-researcher
+cd GEPA-AI-researcher
+pipx install -e .
 ```
+
+Optionally run a host check after install:
+
+```bash
+gepa doctor
+```
+
+Prepare a task file and project profile, then run:
+
+```bash
+gepa doctor --config task.yaml
+gepa run --config task.yaml
+```
+
+When `execution.runtime_backend: apptainer` is set, `gepa doctor --config`,
+`gepa setup-apptainer --config`, `gepa run`, and `gepa validate` all use the same
+runtime checks. `run` and `validate` automatically bootstrap the runtime path: detect the host, find
+Apptainer from config/env/PATH/GEPA cache, optionally run a pinned user-mode
+install hook, build or reuse the Executor SIF, check Claude Code/auth bindings,
+run a real container smoke test, and then start the GEPA loop. Docker is not
+required.
+
+Claude Code still needs to be available to the executor, either from the host
+`agent.command` bind or from your own prebuilt image. Authentication is checked
+through the same real container validation path, so failures show up before the
+loop starts.
 
 The image is derived from the resolved config (not file-extension heuristics): a
 thin `almalinux:9` base when `/cvmfs` or build tools are referenced (the JUNO
@@ -59,22 +60,27 @@ when setuid is unavailable, and validates the result by really executing command
 inside the container.
 
 ```bash
+# Host/runtime diagnostics without building the image:
+gepa doctor --config your_task.yaml
+
 # Build/reuse + validate the image explicitly, and print diagnostics:
-python -m gepa_researcher.cli setup-apptainer --config your_task.yaml
-python -m gepa_researcher.cli setup-apptainer --config your_task.yaml --force   # rebuild
+gepa setup-apptainer --config your_task.yaml
+gepa setup-apptainer --config your_task.yaml --force   # rebuild
 
 # Or just run/validate — the image materializes lazily on first use and is reused
 # thereafter from a content-addressed cache (~/.cache/gepa/images by default).
-python -m gepa_researcher.cli run      --config your_task.yaml --run-dir ./gepa-run
-python -m gepa_researcher.cli validate --config your_task.yaml
+gepa run      --config your_task.yaml --run-dir ./gepa-run
+gepa validate --config your_task.yaml
 ```
+
+If a site provides a pinned user-mode Apptainer installer, `gepa doctor --install`
+or `gepa setup-apptainer --install --config your_task.yaml` can run it when no
+Apptainer executable is found.
 
 Override the cache location with `GEPA_IMAGE_CACHE_DIR`. To skip materialization
 entirely (pure schema resolve/validate), pass `--no-materialize`. To supply your
 own prebuilt SIF instead, set `execution.apptainer.image` and
 `execution.apptainer.auto_image: false`.
-
-## Configuration Model
 
 ## Configuration Model
 
@@ -98,26 +104,26 @@ broaden it.
 Validate a config without creating a run or worktree:
 
 ```bash
-python -m gepa_researcher.cli validate --config examples/function_discovery/task.yaml
+gepa validate --config examples/function_discovery/task.yaml
 ```
 
 Inspect the resolved runtime contract:
 
 ```bash
-python -m gepa_researcher.cli resolve --config examples/function_discovery/task.yaml
-python -m gepa_researcher.cli explain --config examples/function_discovery/task.yaml
+gepa resolve --config examples/function_discovery/task.yaml
+gepa explain --config examples/function_discovery/task.yaml
 ```
 
 Run with an explicit run directory:
 
 ```bash
-python -m gepa_researcher.cli run   --config examples/function_discovery/task.yaml   --run-dir /tmp/gepa-run
+gepa run   --config examples/function_discovery/task.yaml   --run-dir /tmp/gepa-run
 ```
 
 Resume requires the same explicit run directory:
 
 ```bash
-python -m gepa_researcher.cli run   --config examples/function_discovery/task.yaml   --run-dir /tmp/gepa-run   --resume
+gepa run   --config examples/function_discovery/task.yaml   --run-dir /tmp/gepa-run   --resume
 ```
 
 ## Complete Task Example
@@ -398,13 +404,6 @@ traces, judgments, score matrix, frontier, usage summaries, and `final_report.md
   for compatibility and smoke tests.
 
 ## Legacy Compatibility
-
-The old forms still work with compatibility warnings:
-
-```bash
-python -m gepa_researcher.cli --config legacy.json
-python -m gepa_researcher.orchestrator --config legacy.json
-```
 
 Legacy JSON is preserved mostly as-is. Some historical fields are now reported
 as unused warnings, for example `gepa.frontier_policy`,

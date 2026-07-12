@@ -5,7 +5,7 @@
   },
   "agent": {
     "command": "claude",
-    "cwd": "/datafs/users/wujxy/agent-sci/omilrec_opt/GEPA-AI-researcher-p0-dev",
+    "cwd": "/datafs/users/wujxy/agent-sci/omilrec_opt/GEPA-AI-researcher",
     "timeout_seconds": 900,
     "extra_args": [
       "--bare",

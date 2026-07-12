@@ -9,5 +9,8 @@ description = "Minimal GEPA-style AI researcher orchestrator skeleton"
 requires-python = ">=3.10"
 dependencies = ["PyYAML>=6,<7"]
 
+[project.scripts]
+gepa = "gepa_researcher.cli:main"
+
 [tool.setuptools.packages.find]
 include = ["gepa_researcher*"]

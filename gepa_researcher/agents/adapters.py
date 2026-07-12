@@ -45,7 +45,7 @@ class ExecutorAdapter:
 
     def run_many(self, candidates: list[Candidate], round_id: int, config: dict[str, Any]) -> TraceBatch:
         executor_config = config.get("executor", {})
-        max_workers = int(executor_config.get("max_workers", executor_config.get("max_parallel_executors", 1)))
+        max_workers = int(executor_config.get("max_workers", 1))
         fail_fast = bool(executor_config.get("fail_fast", False))
         traces_by_id: dict[str, Trace] = {}
         failed_ids: list[str] = []

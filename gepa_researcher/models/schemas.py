@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Literal
+from typing import Any
 
 
 @dataclass
 class Candidate:
     candidate_id: str
     round_id: int
-    # 删除: parent_id: str | None (冗余字段)
     hypothesis: str
     scope: str
     proposed_change: str
@@ -17,7 +16,6 @@ class Candidate:
     risk: str
     prompt_text: str
     created_at: str
-    # ✅ 只保留 parent_ids 字段
     parent_ids: list[str] = field(default_factory=list)
     generation: int = 0
     executor_contract: dict[str, Any] = field(default_factory=dict)
@@ -29,13 +27,10 @@ class Candidate:
     target_files: list[str] = field(default_factory=list)
     safety_class: str = ""
     strategy: str = ""
+    candidate_class: str = ""
     expected_gain: float | None = None
     admission_status: str = "pending"
     admission_decision_id: str | None = None
-
-    # ✅ 删除 parent_id 同步逻辑
-    def __post_init__(self) -> None:
-        pass
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -231,20 +226,6 @@ class TraceBatch:
 class DatasetSplit:
     feedback_ids: list[str]
     pareto_ids: list[str]
-    artifacts: dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-@dataclass
-class EvaluationBatch:
-    round_id: int
-    phase: Literal["feedback", "pareto"]
-    candidate_ids: list[str]
-    sample_ids: list[str]
-    trace_paths: dict[str, str] = field(default_factory=dict)
-    judgment_paths: dict[str, str] = field(default_factory=dict)
     artifacts: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:

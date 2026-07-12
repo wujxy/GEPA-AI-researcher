@@ -42,7 +42,7 @@ class CandidateAdmissionGate:
         required = list(
             policy.get(
                 "required_fields",
-                ["hypothesis", "proposed_change", "target_files", "safety_class", "strategy"],
+                ["hypothesis", "proposed_change", "target_files"],
             )
         )
         missing = [name for name in required if not getattr(candidate, name, None)]
@@ -98,36 +98,6 @@ class CandidateAdmissionGate:
                 details.append(normalized)
                 paths_ok = False
         checks["paths"] = "pass" if paths_ok else "fail"
-
-        allowed_safety = set(policy.get("allowed_safety_classes", []))
-        if allowed_safety and candidate.safety_class not in allowed_safety:
-            codes.append("DISALLOWED_SAFETY_CLASS")
-            details.append(candidate.safety_class)
-            checks["safety"] = "fail"
-        else:
-            checks["safety"] = "pass"
-
-        allowed_strategies = set(policy.get("allowed_strategies", []))
-        normalized_strategy = _normalize_strategy(candidate.strategy)
-        if allowed_strategies and not any(
-            normalized_strategy == _normalize_strategy(allowed)
-            or normalized_strategy.startswith(f"{_normalize_strategy(allowed)} ")
-            for allowed in allowed_strategies
-        ):
-            codes.append("DISALLOWED_STRATEGY")
-            details.append(candidate.strategy)
-            checks["strategy"] = "fail"
-        else:
-            checks["strategy"] = "pass"
-
-        allowed_classes = set(policy.get("allowed_candidate_classes", ["safe-source"]))
-        candidate_class = str(candidate.artifacts.get("candidate_class", "safe-source"))
-        if allowed_classes and candidate_class not in allowed_classes:
-            codes.append("DISALLOWED_CANDIDATE_CLASS")
-            details.append(candidate_class)
-            checks["candidate_class"] = "fail"
-        else:
-            checks["candidate_class"] = "pass"
 
         contract_targets = candidate.executor_contract.get("target_files")
         if contract_targets is not None and set(map(str, contract_targets)) != set(candidate.target_files):

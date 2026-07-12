@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import os
 from copy import deepcopy
 from datetime import datetime
@@ -8,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .loop.admission import CandidateAdmissionGate
-from .agents.agent_client import AgentError, ClaudeCodeClient
+from .agents.agent_client import ClaudeCodeClient
 from .agents.agent_components import AgentExecutor, AgentJudger, AgentProposer
 from .agents.adapters import ExecutorAdapter, JudgerAdapter
 from .loop.context import load_prior_context
@@ -27,13 +26,12 @@ from .display import (
     format_trace_summary,
 )
 from .loop.gate import GEPAGate
-from .config import ConfigError, load_and_resolve
 from .storage.io_utils import append_jsonl, write_json
 from .loop.pareto import ParetoSelector
 from .storage.pool import CandidatePool
 from .storage.registry import ExecutionRegistry
 from .loop.runtime import config_for_eval, parent_trace_artifacts, recent_trace_summaries, resolve_dataset_split, select_feedback_minibatch
-from .models.schemas import Candidate, CandidateBatch, EvaluationBatch, GateDecision, GenerationDecision, Judgment, JudgmentBatch, LoopState, ParetoFrontier, ScoreMatrix, Trace
+from .models.schemas import Candidate, CandidateBatch, GateDecision, GenerationDecision, Judgment, JudgmentBatch, LoopState, ParetoFrontier, ScoreMatrix, Trace
 from .loop.score_matrix import ScoreMatrixBuilder
 from .storage.store import RunStore
 from .storage.usage import UsageTracker, format_round_usage, format_run_usage
@@ -51,7 +49,7 @@ class ResearchOrchestrator:
             workspace.setdefault("root", str(self.run_dir / "worktrees"))
             workspace.setdefault("branch_prefix", "gepa/<run-id>")
         self.usage_tracker = UsageTracker(self.run_dir, self.config.get("usage_tracking", {}))
-        self.store = RunStore(self.run_dir)  # ✅ 新增：统一存储管理
+        self.store = RunStore(self.run_dir)
         self.registry = ExecutionRegistry(self.run_dir)
         self.workspace_manager = WorkspaceManager(self.run_dir, self.config)
         self.admission = CandidateAdmissionGate()
@@ -72,7 +70,6 @@ class ResearchOrchestrator:
         self._assert_run_dir_reusable()
         state = self.store.load_or_create_state(self.config["task"]["name"], self.config.get("resume", False))
         self.run_dir.mkdir(parents=True, exist_ok=True)
-        # ✅ 使用 RunStore 保存配置和运行时数据
         self.store.save_config(self.config)
         self.store.save_dataset_split(self.dataset_split.to_dict())
         self.store.save_prior_context(self.prior_context)
@@ -96,7 +93,7 @@ class ResearchOrchestrator:
             self._log(f"Round {round_id + 1}/{max_rounds} started")
             decision = self.run_generation(round_id, state)
             self._update_state_from_generation(state, decision)
-            self.store.save_state(state)  # ✅ 使用 RunStore 保存状态
+            self.store.save_state(state)
             self._log(f"Round {round_id + 1}/{max_rounds} persisted")
             self.workspace_manager.assert_controller_unchanged(round_controller_snapshot)
             if self.config.get("usage_tracking", {}).get("print_round_summary", True):
@@ -183,10 +180,7 @@ class ResearchOrchestrator:
         seed_config["_prior_context"] = self.prior_context
         seed_config["_agent_phase"] = "initialization"
         seed_state = LoopState(task_name=state.task_name, round_id=-1)
-        if hasattr(self.proposer, "propose_batch"):
-            batch = self.proposer.propose_batch(seed_state, seed_config)
-        else:
-            batch = CandidateBatch(round_id=-1, candidates=[self.proposer.propose(seed_state, seed_config)])
+        batch = self.proposer.propose_batch(seed_state, seed_config)
         seed_candidates = list(batch.candidates)
         while len(seed_candidates) < seed_count:
             missing_index = len(seed_candidates)
@@ -199,7 +193,6 @@ class ResearchOrchestrator:
         for index, candidate in enumerate(batch.candidates):
             candidate.candidate_id = f"seed_{index:03d}"
             candidate.round_id = -1
-            # ✅ 删除: candidate.parent_id = None
             candidate.parent_ids = []
             candidate.generation = 0
             candidate.status = "seed"
@@ -207,7 +200,7 @@ class ResearchOrchestrator:
             candidate.executor_contract.setdefault("instructions", "Execute this seed candidate on D_pareto.")
         batch.round_id = -1
         admissions, admitted_seeds = self._admit_candidates(batch.candidates, pool)
-        self.store.save_candidate_batch(batch)  # ✅ 使用 RunStore
+        self.store.save_candidate_batch(batch)
         self._persist_admission_decisions(-1, admissions)
         self._log_block(format_admission_summary(admissions))
         self._log_block(format_phase_header(-1, 0, "initialization proposer"))
@@ -217,7 +210,7 @@ class ResearchOrchestrator:
         if not admitted_seeds:
             raise RuntimeError("all seed candidates were rejected by the admission gate")
         trace_batch, judgment_batch = self._evaluate_candidates(admitted_seeds, -1, "pareto", self.dataset_split.pareto_ids, max_rounds=0)
-        self.store.save_judgment_batch(judgment_batch)  # ✅ 使用 RunStore
+        self.store.save_judgment_batch(judgment_batch)
         matrix = ScoreMatrixBuilder.from_batch(judgment_batch, {candidate.candidate_id for candidate in admitted_seeds})
         ScoreMatrixBuilder.persist(matrix, matrix_path)
         for candidate in admitted_seeds:
@@ -282,16 +275,13 @@ class ResearchOrchestrator:
         self._log("proposer mutation started")
         proposal_config = self._config_with_gepa_context(state, pool, active_matrix, frontier, parents)
         proposal_config["_agent_phase"] = "mutation"
-        if hasattr(self.proposer, "propose_batch"):
-            candidate_batch = self.proposer.propose_batch(state, proposal_config)
-        else:
-            candidate_batch = CandidateBatch(round_id=round_id, candidates=[self.proposer.propose(state, proposal_config)])
+        candidate_batch = self.proposer.propose_batch(state, proposal_config)
         self._attach_parent_context(candidate_batch.candidates, parents, round_id)
         admissions, admitted_candidates = self._admit_candidates(candidate_batch.candidates, pool)
         self._write_live_artifact(round_id, "candidate_batch", candidate_batch.to_dict())
         self._write_live_artifact(round_id, "admission_decisions", {"decisions": [item.to_dict() for item in admissions]})
         self._persist_candidate_batch(candidate_batch)
-        self.store.save_admission_decisions(round_id, admissions)  # ✅ 使用 RunStore
+        self.store.save_admission_decisions(round_id, admissions)
         self._log_block(format_admission_summary(admissions))
         self._log(f"proposer mutation finished: {len(candidate_batch.candidates)} candidate(s)")
         self._log_block(format_candidate_list(candidate_batch.candidates))
@@ -442,14 +432,6 @@ class ResearchOrchestrator:
         judgment_batch.artifacts.update({"phase": phase, "sample_ids": list(sample_ids)})
         for judgment in judgment_batch.judgments:
             self._log_block(format_judgment_summary(judgment, phase))
-        self._persist_evaluation_batch(EvaluationBatch(  # 保留 evaluate_batch 的包装，内部使用 RunStore
-            round_id=round_id,
-            phase=phase,  # type: ignore[arg-type]
-            candidate_ids=[candidate.candidate_id for candidate in candidates],
-            sample_ids=list(sample_ids),
-            trace_paths={trace.candidate_id: str(self.run_dir / "traces" / f"round_{trace.round_id:03d}" / trace.candidate_id / "trace.json") for trace in trace_batch.traces},
-            judgment_paths={judgment.candidate_id: str(self.run_dir / "traces" / f"round_{round_id:03d}" / judgment.candidate_id / "judgment.json") for judgment in judgment_batch.judgments},
-        ))
         return trace_batch, judgment_batch
 
     def _candidate_for_round(self, candidate: Candidate, round_id: int) -> Candidate:
@@ -491,7 +473,6 @@ class ResearchOrchestrator:
             candidate.round_id = round_id
             if not candidate.parent_ids:
                 candidate.parent_ids = list(parent_ids)
-            candidate.parent_id = candidate.parent_ids[0] if candidate.parent_ids else None
             candidate.generation = max(candidate.generation, generation)
             candidate.executor_contract.setdefault("expected_artifacts", candidate.expected_artifacts)
             candidate.executor_contract.setdefault("instructions", "Execute this candidate under the configured GEPA evaluation phase.")
@@ -614,10 +595,6 @@ class ResearchOrchestrator:
             write_json(round_dir / judgment.candidate_id / "judgment.json", judgment.to_dict())
             append_jsonl(self.run_dir / "judgments.jsonl", judgment.to_dict())
 
-    def _persist_evaluation_batch(self, batch: EvaluationBatch) -> None:
-        round_dir = self.run_dir / "traces" / f"round_{batch.round_id:03d}"
-        write_json(round_dir / f"evaluation_{batch.phase}.json", batch.to_dict())
-
     def _persist_generation_decision(self, decision: GenerationDecision) -> None:
         round_dir = self.run_dir / "traces" / f"round_{decision.round_id:03d}"
         write_json(round_dir / "generation_decision.json", decision.to_dict())
@@ -669,37 +646,3 @@ class ResearchOrchestrator:
                 "",
             ])
         (self.run_dir / "final_report.md").write_text("\n".join(lines), encoding="utf-8")
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the bounded GEPA-style research loop.")
-    parser.add_argument("--config", required=True, help="Path to a task YAML/JSON or legacy JSON config.")
-    parser.add_argument("--run-dir", help="Explicit run directory.")
-    parser.add_argument("--resume", action="store_true", help="Resume an explicit run directory.")
-    args = parser.parse_args()
-
-    config_path = Path(args.config).expanduser().resolve()
-    try:
-        config = load_and_resolve(
-            config_path,
-            run_dir=Path(args.run_dir) if args.run_dir else None,
-            resume=args.resume,
-        )
-    except ConfigError as exc:
-        parser.error(str(exc))
-    for warning in config.get("_meta", {}).get("warnings", []):
-        print(f"Config warning: {warning}")
-    print("Compatibility entrypoint: prefer python -m gepa_researcher.cli run --config ...")
-    orchestrator = ResearchOrchestrator(config=config, config_path=config_path)
-    try:
-        state = orchestrator.run()
-    except AgentError as exc:
-        print(f"Agent runtime error: {exc}")
-        print(f"Artifacts, if any: {orchestrator.run_dir}")
-        raise SystemExit(2) from exc
-    print(f"Run complete. Best={state.best_candidate_id} score={state.best_score:.4f}")
-    print(f"Artifacts: {orchestrator.run_dir}")
-
-
-if __name__ == "__main__":
-    main()

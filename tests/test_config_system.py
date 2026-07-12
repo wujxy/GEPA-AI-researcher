@@ -44,7 +44,7 @@ class ConfigSystemTest(unittest.TestCase):
 
     def _profile(self, repo: Path) -> dict:
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "kind": "project_profile",
             "name": "fixture-project",
             "source": {
@@ -52,11 +52,16 @@ class ConfigSystemTest(unittest.TestCase):
                 "default_ref": "HEAD",
                 "workspace_mode": "git_worktree",
             },
-            "environment": {
-                "description": "test environment",
-                "setup_commands": ["source setup.sh"],
-                "python_command": "python3",
-                "dependency_policy": "no installs",
+            "runtime": {
+                "backend": "apptainer",
+                "workdir": "/workspace/repo",
+                "command": "claude",
+                "append_agent_args": True,
+                "apptainer": {"auto_image": True, "executable": "apptainer", "cleanenv": False},
+                "env": {"pass": ["PATH"], "set": {"FIXTURE_ENV": "1"}},
+                "setup": ["source /opt/setup.sh", "?source InstallArea/setup.sh"],
+                "check": ["which python3"],
+                "mounts": {"repo": {"TEMP/fixtures/time_pdf.bin": "assets/fixtures/time_pdf.bin"}, "extra": []},
             },
             "resources": {
                 "data_files": ["input.csv"],
@@ -64,14 +69,8 @@ class ConfigSystemTest(unittest.TestCase):
                 "skills": ["fixture-skill"],
             },
             "agent": {
-                "command": "claude",
                 "timeout_seconds": 40,
                 "extra_args": ["--token", "supersecret", "--allowedTools", "Read"],
-            },
-            "execution": {
-                "lifecycle": "materialize_once",
-                "max_parallel_candidates": 2,
-                "fail_fast": False,
             },
             "safety": {
                 "editable_paths": ["src/**"],
@@ -83,7 +82,7 @@ class ConfigSystemTest(unittest.TestCase):
 
     def _task(self, profile_name: str = "profile.yaml") -> dict:
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "kind": "task",
             "task": {"name": "fixture-task", "goal": "Minimize fixture latency."},
             "project": {"profile": profile_name, "ref": "HEAD"},
@@ -114,6 +113,9 @@ class ConfigSystemTest(unittest.TestCase):
 
     def _write_fixture(self, root: Path) -> tuple[Path, Path]:
         repo = self._git_repo(root)
+        asset = root / "assets" / "fixtures" / "time_pdf.bin"
+        asset.parent.mkdir(parents=True)
+        asset.write_bytes(b"fixture")
         profile_path = root / "profile.yaml"
         task_path = root / "task.yaml"
         profile_path.write_text(yaml.safe_dump(self._profile(repo), sort_keys=False), encoding="utf-8")
@@ -145,7 +147,7 @@ class ConfigSystemTest(unittest.TestCase):
             self.assertEqual(config["workspace"]["baseline_ref"], expected_sha)
             self.assertEqual(config["generation"]["batch_size"], 3)
             self.assertEqual(config["initialization"]["seed_count"], 3)
-            self.assertEqual(config["executor"]["max_workers"], 2)
+            self.assertEqual(config["executor"]["max_workers"], 3)
             self.assertEqual(config["candidate_policy"]["allowed_target_globs"], ["src/example.py"])
             self.assertEqual(config["candidate_policy"]["frozen_globs"], ["tests/**", "docs/**"])
             self.assertEqual(config["candidate_policy"]["max_commits"], 1)
@@ -201,62 +203,90 @@ class ConfigSystemTest(unittest.TestCase):
             self.assertTrue(config["evidence"]["visualize_when_applicable"])
             self.assertEqual(config["evidence"]["artifact_formats"], ["png"])
 
-    def test_apptainer_execution_profile_resolves_to_executor_backend(self):
+    def test_runtime_dsl_compiles_to_exact_runtime_ir(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             task_path, _ = self._write_fixture(root)
-            profile_path = root / "profile.yaml"
-            profile = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
-            image = root / "executor.sif"
-            image.write_text("image", encoding="utf-8")
-            home_template = root / "claude-home-template"
-            home_template.mkdir()
-            profile["execution"]["runtime_backend"] = "apptainer"
-            profile["execution"]["apptainer"] = {
-                "image": "executor.sif",
-                "command": "claude",
-                "cleanenv": True,
-                "containall": True,
-                "writable_tmpfs": True,
-                "container_repo": "/workspace/repo",
-                "container_artifacts": "/workspace/artifacts",
-                "container_scratch": "/workspace/scratch",
-                "container_home": "/workspace/home",
-                "claude_home_template": "claude-home-template",
-                "env_allowlist": ["HTTP_PROXY"],
-                "readonly_binds": [{"source": "executor.sif", "target": "/readonly/executor.sif"}],
-                "extra_binds": [],
-            }
-            profile_path.write_text(yaml.safe_dump(profile, sort_keys=False), encoding="utf-8")
 
             config = load_and_resolve(task_path)
 
+            asset = (root / "assets" / "fixtures" / "time_pdf.bin").resolve()
             self.assertEqual(config["executor"]["runtime_backend"], "apptainer")
-            apptainer = config["executor"]["apptainer"]
-            self.assertEqual(apptainer["image"], str(image.resolve()))
-            self.assertEqual(apptainer["claude_home_template"], str(home_template.resolve()))
-            self.assertEqual(apptainer["readonly_binds"][0]["source"], str(image.resolve()))
+            self.assertEqual(config["agent"]["command"], "claude")
+            self.assertEqual(config["runtime"]["command"], "claude")
+            self.assertEqual(config["_runtime_ir"], {
+                "backend": "apptainer",
+                "workdir": "/workspace/repo",
+                "command": "claude",
+                "append_agent_args": True,
+                "env": {"pass": ["PATH"], "set": {"FIXTURE_ENV": "1"}},
+                "init": [
+                    {"op": "source", "path": "/opt/setup.sh", "required": True},
+                    {"op": "source", "path": "InstallArea/setup.sh", "required": False, "base": "workdir"},
+                ],
+                "preflight": [{"name": "check-1", "command": "which python3", "required": True}],
+                "mounts": [
+                    {
+                        "source": str(asset),
+                        "target": "/workspace/repo/TEMP/fixtures/time_pdf.bin",
+                        "mode": "ro",
+                    }
+                ],
+                "apptainer": {"auto_image": True, "executable": "apptainer", "cleanenv": False},
+            })
 
-    def test_apptainer_execution_profile_requires_image_only_when_auto_disabled(self):
+    def test_runtime_repo_mount_source_resolves_relative_to_profile_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_path, _ = self._write_fixture(root)
+
+            config = load_and_resolve(task_path)
+
+            mount = config["_runtime_ir"]["mounts"][0]
+            self.assertEqual(mount["source"], str((root / "assets" / "fixtures" / "time_pdf.bin").resolve()))
+            self.assertEqual(mount["target"], "/workspace/repo/TEMP/fixtures/time_pdf.bin")
+
+    def test_runtime_missing_mount_source_raises_precise_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_path, _ = self._write_fixture(root)
+            profile_path = root / "profile.yaml"
+            profile = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
+            profile["runtime"]["mounts"]["repo"] = {"TEMP/missing.bin": "assets/missing.bin"}
+            profile_path.write_text(yaml.safe_dump(profile, sort_keys=False), encoding="utf-8")
+
+            with self.assertRaisesRegex(ConfigError, r"runtime\.mounts\.repo\.TEMP/missing\.bin: source does not exist: .*resolved relative to profile_dir"):
+                load_and_resolve(task_path)
+
+    def test_runtime_v2_rejects_legacy_runtime_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_path, _ = self._write_fixture(root)
+            profile_path = root / "profile.yaml"
+            profile = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
+            profile["environment"] = {"setup_commands": ["source setup.sh"]}
+            profile_path.write_text(yaml.safe_dump(profile, sort_keys=False), encoding="utf-8")
+
+            with self.assertRaisesRegex(ConfigError, r"environment: unknown field"):
+                load_and_resolve(task_path)
+
+    def test_apptainer_runtime_image_required_only_when_auto_disabled(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             task_path, _ = self._write_fixture(root)
             profile_path = root / "profile.yaml"
 
-            # image is optional when auto_image is unset (auto) or true: the
-            # container_image materializer fills it at run time.
             profile = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
-            profile["execution"]["runtime_backend"] = "apptainer"
-            profile["execution"]["apptainer"] = {"command": "claude"}
+            profile["runtime"]["apptainer"].pop("image", None)
+            profile["runtime"]["apptainer"]["auto_image"] = True
             profile_path.write_text(yaml.safe_dump(profile, sort_keys=False), encoding="utf-8")
             resolved = load_and_resolve(task_path)
-            self.assertNotIn("image", resolved["executor"]["apptainer"])
+            self.assertNotIn("image", resolved["_runtime_ir"]["apptainer"])
 
-            # image is required only when auto_image is explicitly false.
             profile = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
-            profile["execution"]["apptainer"] = {"command": "claude", "auto_image": False}
+            profile["runtime"]["apptainer"] = {"executable": "apptainer", "auto_image": False}
             profile_path.write_text(yaml.safe_dump(profile, sort_keys=False), encoding="utf-8")
-            with self.assertRaisesRegex(ConfigError, r"execution\.apptainer\.image"):
+            with self.assertRaisesRegex(ConfigError, r"runtime\.apptainer\.image"):
                 load_and_resolve(task_path)
 
     def test_new_schema_rejects_unknown_field_with_precise_path(self):
@@ -408,8 +438,17 @@ class ConfigSystemTest(unittest.TestCase):
             task["project"] = {
                 "inline": {
                     "source": {"workspace_mode": "artifact_directory"},
+                    "runtime": {
+                        "backend": "local",
+                        "workdir": "/workspace/repo",
+                        "command": "claude",
+                        "append_agent_args": True,
+                        "env": {"pass": [], "set": {}},
+                        "setup": [],
+                        "check": [],
+                        "mounts": {"repo": {}, "extra": []},
+                    },
                     "agent": {"timeout_seconds": 30},
-                    "execution": {"lifecycle": "stateless", "max_parallel_candidates": 2},
                 }
             }
             task.pop("safety")
@@ -428,7 +467,7 @@ class ConfigSystemTest(unittest.TestCase):
 
             snapshot = read_json(run_dir / "config.snapshot.json")
             self.assertTrue(state.history)
-            self.assertEqual(snapshot["_meta"]["schema_version"], 1)
+            self.assertEqual(snapshot["_meta"]["schema_version"], 2)
             self.assertEqual(snapshot["contracts"]["metric"]["name"], "latency")
             self.assertEqual(snapshot["run_dir"], str(run_dir))
 

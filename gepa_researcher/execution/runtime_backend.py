@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -74,9 +75,12 @@ class ApptainerRuntimeBackend:
     def __init__(self, run_dir: Path, config: dict[str, Any]):
         self.run_dir = run_dir
         self.config = config
+        self.runtime_ir = dict(config.get("_runtime_ir") or {})
         self.executor_config = dict(config.get("executor") or {})
-        self.apptainer_config = dict(self.executor_config.get("apptainer") or {})
-        self.container_repo = str(self.apptainer_config.get("container_repo", "/workspace/repo"))
+        if not self.runtime_ir:
+            raise RuntimeBackendError("_runtime_ir is required for apptainer runtime")
+        self.apptainer_config = dict(self.runtime_ir.get("apptainer") or {})
+        self.container_repo = str(self.runtime_ir.get("workdir", "/workspace/repo"))
         self.container_artifacts = str(self.apptainer_config.get("container_artifacts", "/workspace/artifacts"))
         self.container_scratch = str(self.apptainer_config.get("container_scratch", "/workspace/scratch"))
         self.container_home = str(self.apptainer_config.get("container_home", "/workspace/home"))
@@ -106,6 +110,7 @@ class ApptainerRuntimeBackend:
         for path in (host_artifacts, host_scratch, host_home, host_tmp):
             path.mkdir(parents=True, exist_ok=True)
         self._copy_home_template(host_home)
+        self._init_claude_home(host_home)
 
         prefix = [apptainer, "exec"]
         if bool(self.apptainer_config.get("cleanenv", True)):
@@ -121,39 +126,37 @@ class ApptainerRuntimeBackend:
         container_scratch = f"{self.container_artifacts}/scratch_{execution_id}"
         container_home = f"{self.container_artifacts}/home_{execution_id}"
 
+        home_readonly_binds = self._home_readonly_binds(host_home, container_home)
+
         # --home both bind-mounts host_home->container_home AND sets HOME=container_home
         # inside the container. (Passing HOME via --env is silently ignored by apptainer.)
         prefix.extend(["--home", f"{host_home}:{container_home}"])
         prefix.extend(["--pwd", self.container_repo])
-        for bind in self._binds(host_repo, host_artifacts, host_scratch):
+        for bind in self._binds(host_repo, host_artifacts, host_scratch, home_readonly_binds):
             prefix.extend(["--bind", bind])
 
         # Build environment variables for --env passing
-        env = self._allowed_host_env()
-        env.update(
-            {
-                "GEPA_CANDIDATE_ID": candidate.candidate_id,
-                "GEPA_EXECUTION_ID": record.execution_id,
-                "GEPA_PARENT_SHA": record.requested_parent_sha,
-                "GEPA_WORKTREE": self.container_repo,
-                "GEPA_ARTIFACTS": self.container_artifacts,
-                "TMPDIR": f"{container_scratch}/tmp",
-            }
-        )
+        env = self._build_environment(candidate, record, container_scratch)
 
-        # Add environment variables via --env mechanism (Apptainer best practice)
+        # Add environment variables via --env mechanism (Apptainer best practice).
+        # subprocess passes argv directly, so values must not be shell-quoted here.
         for key, value in env.items():
-            # Properly escape the value for shell command line
-            escaped_value = self._escape_env_value(value)
-            prefix.extend(["--env", f"{key}={escaped_value}"])
+            prefix.extend(["--env", f"{key}={value}"])
 
         prefix.append(image)
+
+        executor_cmd = str(self.runtime_ir.get("command", self.config.get("agent", {}).get("command", "claude")))
+        runtime_init = {"init": list(self.runtime_ir.get("init") or []), "preflight": list(self.runtime_ir.get("preflight") or [])}
+        inline_shell = self._runtime_shell(runtime_init)
+        if inline_shell:
+            prefix.extend(["/usr/bin/env", "bash", "-lc", inline_shell, "gepa-runtime"])
+
         return RuntimeLease(
             backend=self.name,
             repo_path=self.container_repo,
             artifact_path=self.container_artifacts,
             host_cwd=str(host_repo),
-            command=str(self.apptainer_config.get("command", self.config.get("agent", {}).get("command", "claude"))),
+            command=executor_cmd,
             command_prefix=prefix,
             env={},  # Empty since environment variables passed via --env
             inherit_host_env=False,
@@ -162,6 +165,9 @@ class ApptainerRuntimeBackend:
                 "host_artifacts": str(host_artifacts),
                 "host_scratch": str(host_scratch),
                 "host_home": str(host_home),
+                "executor_command": executor_cmd,
+                "runtime_init": runtime_init,
+                "runtime_shell": inline_shell,
             },
         )
 
@@ -182,7 +188,13 @@ class ApptainerRuntimeBackend:
             raise RuntimeBackendError("executor.apptainer.claude_home_template must be a directory")
         shutil.copytree(source, host_home, dirs_exist_ok=True)
 
-    def _binds(self, host_repo: Path, host_artifacts: Path, host_scratch: Path) -> list[str]:
+    def _binds(
+        self,
+        host_repo: Path,
+        host_artifacts: Path,
+        host_scratch: Path,
+        home_readonly_binds: list[str],
+    ) -> list[str]:
         # NOTE: host_home->container_home is intentionally NOT bound here; it is
         # established by the ``--home`` flag in prepare() (which also sets HOME).
         binds = [
@@ -190,12 +202,89 @@ class ApptainerRuntimeBackend:
             f"{host_artifacts}:{self.container_artifacts}",
             f"{host_scratch}:{self.container_scratch}",
         ]
-        for item in self.config.get("workspace", {}).get("readonly_assets", []):
+        for item in self.runtime_ir.get("mounts", []) or []:
             source = Path(str(item["source"])).expanduser().resolve()
-            target = self.container_repo.rstrip("/") + "/" + str(item["target"]).lstrip("/")
-            binds.append(f"{source}:{target}:ro")
+            target = str(item["target"])
+            mode = str(item.get("mode") or "ro")
+            binds.append(f"{source}:{target}:{mode}")
+        binds.extend(home_readonly_binds)
         binds.extend(self._configured_binds("readonly_binds", readonly=True))
         binds.extend(self._configured_binds("extra_binds", readonly=False))
+        return binds
+
+    def _init_claude_home(self, host_home: Path) -> None:
+        if not self.apptainer_config.get("auto_init_claude_home", True):
+            return
+        source_home = Path(str(self.apptainer_config.get("claude_host_home") or Path.home())).expanduser()
+        claude_json = source_home / ".claude.json"
+        if claude_json.exists():
+            shutil.copy2(claude_json, host_home / ".claude.json")
+
+        source_claude = source_home / ".claude"
+        target_claude = host_home / ".claude"
+        target_claude.mkdir(parents=True, exist_ok=True)
+        if source_claude.exists():
+            for child in source_claude.iterdir():
+                if self._skip_claude_home_entry(child.name):
+                    continue
+                target = target_claude / child.name
+                if child.is_dir():
+                    shutil.copytree(
+                        child,
+                        target,
+                        dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns("*.lock", "*.tmp"),
+                    )
+                elif child.is_file():
+                    shutil.copy2(child, target)
+        (target_claude / "session-env").mkdir(parents=True, exist_ok=True)
+
+    def _skip_claude_home_entry(self, name: str) -> bool:
+        return name in {
+            "backups",
+            "cache",
+            "debug",
+            "file-history",
+            "history.jsonl",
+            "paste-cache",
+            "plans",
+            "projects",
+            "sessions",
+            "session-env",
+            "shell-snapshots",
+            "stats-cache.json",
+            "tasks",
+        }
+
+    def _home_readonly_binds(self, host_home: Path, container_home: str) -> list[str]:
+        configured = list(self.apptainer_config.get("home_readonly_binds", []) or [])
+        binds: list[str] = []
+        seen: set[tuple[str, str]] = set()
+        for item in configured:
+            if isinstance(item, str):
+                source = Path(item).expanduser().resolve()
+                target_rel = source.name
+            elif isinstance(item, dict):
+                source = Path(str(item["source"])).expanduser().resolve()
+                target_rel = str(item.get("target") or source.name)
+            else:
+                continue
+            if not source.exists():
+                continue
+            target_rel = target_rel.lstrip("/")
+            key = (str(source), target_rel)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            target_host = host_home / target_rel
+            if source.is_dir():
+                target_host.mkdir(parents=True, exist_ok=True)
+            else:
+                target_host.parent.mkdir(parents=True, exist_ok=True)
+                target_host.touch(exist_ok=True)
+            target_container = container_home.rstrip("/") + "/" + target_rel
+            binds.append(f"{source}:{target_container}:ro")
         return binds
 
     def _configured_binds(self, field_name: str, *, readonly: bool) -> list[str]:
@@ -215,28 +304,53 @@ class ApptainerRuntimeBackend:
         return binds
 
     def _allowed_host_env(self) -> dict[str, str]:
-        names = ["PATH"]
-        names.extend(str(item) for item in self.apptainer_config.get("env_allowlist", []))
+        names = list((self.runtime_ir.get("env") or {}).get("pass") or [])
         return {name: os.environ[name] for name in dict.fromkeys(names) if name in os.environ}
 
-    def _escape_env_value(self, value: str) -> str:
-        """Escape environment variable value for shell command line arguments.
+    def _build_environment(self, candidate: Candidate, record: ExecutionRecord, container_scratch: str) -> dict[str, str]:
+        env = {
+            "GEPA_CANDIDATE_ID": candidate.candidate_id,
+            "GEPA_EXECUTION_ID": record.execution_id,
+            "GEPA_PARENT_SHA": record.requested_parent_sha,
+            "GEPA_WORKTREE": self.container_repo,
+            "GEPA_ARTIFACTS": self.container_artifacts,
+            "TMPDIR": f"{container_scratch}/tmp",
+        }
+        env.update({str(key): str(value) for key, value in ((self.runtime_ir.get("env") or {}).get("set") or {}).items()})
+        env.update(self._allowed_host_env())
+        return env
 
-        This method properly handles quotes, spaces, and special characters
-        to ensure safe passing of environment values via Apptainer's --env.
-        """
-        if not value:
-            return ""
+    def _runtime_shell(self, runtime_init: dict[str, Any]) -> str:
+        commands = [
+            "set -euo pipefail",
+            f"cd {shlex.quote(self.container_repo)}",
+        ]
+        init_steps = list(runtime_init.get("init") or [])
+        if init_steps:
+            commands.append('echo "[gepa-runtime] initializing project environment" >&2')
+        commands.extend(self._init_step_command(step) for step in init_steps)
+        for step in runtime_init.get("preflight") or []:
+            command = str(step["command"])
+            commands.append(f"echo {shlex.quote('[gepa-runtime] validating: ' + command)} >&2")
+            commands.append(command)
+        commands.append('exec "$@"')
+        return "\n".join(commands)
 
-        # If the value contains only safe characters, no escaping needed
-        safe_chars = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-/:=@")
-        if all(c in safe_chars for c in value):
-            return value
-
-        # Otherwise, wrap in single quotes and escape embedded single quotes
-        # Single quote escaping: 'value_with_'`'"'embedded'quotes''
-        escaped = value.replace("'", "'\"'\"'")
-        return f"'{escaped}'"
+    def _init_step_command(self, step: dict[str, Any]) -> str:
+        op = str(step.get("op"))
+        required = bool(step.get("required", True))
+        if op == "source":
+            path = str(step["path"])
+            source_target = path if path.startswith("/") else path
+            target_q = shlex.quote(source_target)
+            source_command = f"source {target_q}"
+            if required:
+                return source_command
+            message = shlex.quote(f"[gepa-runtime] optional setup skipped: {source_target}")
+            return f"if [ -f {target_q} ]; then {source_command}; else echo {message} >&2; fi"
+        if op == "shell":
+            return str(step["command"])
+        raise RuntimeBackendError(f"runtime init op is not supported: {op}")
 
 
 def runtime_backend_for(config: dict[str, Any], run_dir: Path):

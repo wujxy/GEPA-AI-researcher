@@ -12,16 +12,21 @@ inside it.
 This replaces the old interactive `setup_apptainer.py` wizard, which was
 Docker-dependent and guessed the image from file extensions.
 
-## What you need
+## What GEPA bootstraps
 
-- **Apptainer** installed. Docker is **not** required — GEPA builds via
-  `apptainer build out.sif docker://<base>`, which pulls OCI layers straight from
-  the registry.
-- **Claude Code** resolvable on the host (`agent.command`, default `claude`). The
-  host Claude + node are bind-mounted read-only into the container; nothing needs
-  to be baked into the image.
-- On hosts where Apptainer's setuid helper is unavailable, GEPA auto-detects this
-  and runs exec under `--userns` (unprivileged user namespaces).
+- **Apptainer runtime discovery.** GEPA checks `execution.apptainer.executable`,
+  `GEPA_APPTAINER`, `apptainer`/`singularity` on `PATH`, and the GEPA runtime
+  cache (`~/.cache/gepa/runtime` by default). If none is found, a site can provide
+  a pinned user-mode install hook with `execution.apptainer.install_command` or
+  `GEPA_APPTAINER_INSTALL_COMMAND`; GEPA runs it once and probes the cache again.
+- **Executor SIF.** Docker is **not** required — GEPA builds via
+  `apptainer build out.sif docker://<base>`, pulling OCI layers straight from the
+  registry, then reuses the SIF from a content-addressed cache.
+- **Host capabilities.** GEPA probes whether normal `exec` works or whether
+  `--userns` is required, and records diagnostics in the resolved snapshot.
+- **Claude Code/auth.** `agent.command` (default `claude`) is resolved on the host
+  and the host Claude + node tree is bind-mounted read-only. Claude auth files are
+  projected into the per-execution HOME when present.
 
 ## How the image is chosen
 
@@ -50,18 +55,28 @@ Override with `execution.apptainer.base_image` (e.g. `docker://rockylinux:9`).
 ## Usage
 
 ```bash
-# Build/reuse + validate the image explicitly and print diagnostics:
-python -m gepa_researcher.cli setup-apptainer --config examples/omilrec/task.template.yaml
-python -m gepa_researcher.cli setup-apptainer --config examples/omilrec/task.template.yaml --force
+# Host/runtime diagnostics; does not build the executor image.
+gepa doctor
+gepa doctor --config examples/omilrec/task.template.yaml
 
-# Or simply run/validate — the image materializes lazily and is reused from cache:
-python -m gepa_researcher.cli validate --config examples/omilrec/task.template.yaml
-python -m gepa_researcher.cli run --config examples/omilrec/task.template.yaml --run-dir /tmp/gepa-run
+# Normal path: runtime discovery + SIF materialization happen lazily.
+gepa validate --config examples/omilrec/task.template.yaml
+gepa run --config examples/omilrec/task.template.yaml --run-dir /tmp/gepa-run
+
+# Explicit image diagnostics entry point; not a required setup step.
+gepa setup-apptainer --config examples/omilrec/task.template.yaml
+gepa setup-apptainer --config examples/omilrec/task.template.yaml --force
 ```
 
+If Apptainer is missing and a pinned install hook is configured, run
+`gepa doctor --install` or `gepa setup-apptainer --install --config ...` to let
+GEPA execute that hook before probing again.
+
 The image is cached at `~/.cache/gepa/images/<fingerprint>.sif` (override with
-`GEPA_IMAGE_CACHE_DIR`). The fingerprint includes the base, detected tools, and the
-host claude binary path + mtime, so upgrading Claude invalidates and rebuilds
+`GEPA_IMAGE_CACHE_DIR`). Runtime executables discovered or installed by site hooks
+live under `~/.cache/gepa/runtime` by default (override with
+`GEPA_RUNTIME_CACHE_DIR`). The fingerprint includes the base, detected tools, and
+the host claude binary path + mtime, so upgrading Claude invalidates and rebuilds
 automatically. Parallel GEPA runs share the cache safely (file lock + atomic rename).
 
 ## Using your own prebuilt image
@@ -104,6 +119,9 @@ GEPA_REAL_APPTAINER=1 python -m unittest tests.test_apptainer_real
 
 ## Troubleshooting
 
+- **`Apptainer runtime was not found`** — install Apptainer, set
+  `GEPA_APPTAINER`, set `execution.apptainer.executable`, or provide a pinned
+  `install_command` for your site.
 - **`Image materialization failed: ... starter-suid doesn't have setuid bit set`**
   for *both* default and `--userns` exec — your Apptainer install cannot start
   containers at all. Reinstall Apptainer with setuid, or enable unprivileged user

@@ -64,6 +64,99 @@ def _run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _doctor(args: argparse.Namespace) -> int:
+    from .execution.container_image import doctor_runtime
+
+    config_path: Path | None = None
+    config: dict = {}
+    apptainer_cfg: dict = {}
+    agent_command = "claude"
+    runtime_backend = "unknown"
+    if getattr(args, "config", None):
+        config_path = Path(args.config).expanduser().resolve()
+        config = load_and_resolve(config_path)
+        executor = config.get("executor") or {}
+        runtime_backend = str(executor.get("runtime_backend", "local"))
+        apptainer_cfg = dict(executor.get("apptainer") or {})
+        agent_command = str((config.get("agent") or {}).get("command") or "claude")
+
+    check_apptainer = not (config_path is not None and runtime_backend != "apptainer")
+    report = doctor_runtime(
+        apptainer_cfg,
+        agent_command=agent_command,
+        allow_install=bool(getattr(args, "install", False)),
+        probe=not bool(getattr(args, "no_probe", False)),
+        check_apptainer=check_apptainer,
+    )
+    report["config"] = {
+        "path": str(config_path) if config_path else None,
+        "runtime_backend": runtime_backend,
+        "agent_command": agent_command,
+    }
+
+    if getattr(args, "json", False):
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        _print_doctor_report(report)
+
+    if runtime_backend == "local" and config_path is not None:
+        return 0
+    return 0 if report.get("ok") else 1
+
+
+def _mark(ok: bool) -> str:
+    return "OK" if ok else "WARN"
+
+
+def _print_doctor_report(report: dict) -> None:
+    cfg = report.get("config") or {}
+    appt = report.get("apptainer") or {}
+    discovery = appt.get("discovery") or {}
+    host_probe = appt.get("host_probe") or {}
+    claude = report.get("claude") or {}
+    auth = claude.get("auth") or {}
+
+    print("GEPA doctor")
+    if cfg.get("path"):
+        print(f"Config: {cfg['path']}")
+        print(f"Runtime backend: {cfg.get('runtime_backend')}")
+    else:
+        print("Config: <none> (host checks only)")
+
+    print(f"Apptainer: {_mark(bool(appt.get('ok')))}")
+    if discovery.get("executable"):
+        print(f"  executable: {discovery.get('executable')} ({discovery.get('source')})")
+    else:
+        print("  executable: not found")
+    if discovery.get("install_attempted"):
+        print(f"  install attempted: {_mark(bool(discovery.get('install_ok')))}")
+        if discovery.get("install_error"):
+            print(f"  install error: {discovery.get('install_error')}")
+    if host_probe:
+        print(f"  version: {host_probe.get('version') or '<unknown>'}")
+        print(f"  default exec: {_mark(bool(host_probe.get('default_exec_ok')))}")
+        print(f"  userns exec: {_mark(bool(host_probe.get('userns_exec_ok')))}")
+        print(f"  will use --userns: {bool(host_probe.get('userns'))}")
+
+    print(f"Claude Code: {_mark(bool(claude.get('ok')))}")
+    bind = claude.get("bind") or {}
+    if bind.get("claude_bin"):
+        print(f"  claude: {bind.get('claude_bin')}")
+    else:
+        print("  claude: not resolved")
+    print(f"Claude auth: {_mark(bool(auth.get('ok')))}")
+    if auth.get("host_paths"):
+        print(f"  host auth paths: {', '.join(auth.get('host_paths'))}")
+    if auth.get("env_keys"):
+        print(f"  auth env keys: {', '.join(auth.get('env_keys'))}")
+
+    recommendations = report.get("recommendations") or []
+    if recommendations:
+        print("Recommendations:")
+        for item in recommendations:
+            print(f"  - {item}")
+
+
 def _setup_apptainer(args: argparse.Namespace) -> int:
     config_path, config = _resolve(args)
     exec_cfg = config.get("executor", {})
@@ -71,10 +164,20 @@ def _setup_apptainer(args: argparse.Namespace) -> int:
         print("execution.runtime_backend is not 'apptainer'; nothing to materialize.")
         return 0
     if getattr(args, "no_materialize", False):
-        print(json.dumps(last_materialization(config) or {}, ensure_ascii=False, indent=2))
-        return 0
-    from .execution.container_image import _probe_host_runtime, materialize_executor_image
-    apptainer_exe = str(exec_cfg.get("apptainer", {}).get("executable") or "apptainer")
+        from .execution.container_image import doctor_runtime
+        report = doctor_runtime(
+            exec_cfg.get("apptainer", {}),
+            agent_command=str((config.get("agent") or {}).get("command") or "claude"),
+            allow_install=bool(getattr(args, "install", False)),
+            check_apptainer=True,
+        )
+        report["materialization"] = last_materialization(config) or {}
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0 if report.get("ok") else 1
+    from .execution.container_image import _probe_host_runtime, ensure_apptainer, materialize_executor_image
+    discovery = ensure_apptainer(exec_cfg.get("apptainer", {}), allow_install=bool(getattr(args, "install", False)))
+    apptainer_exe = str(discovery.executable)
+    config["executor"].setdefault("apptainer", {})["executable"] = apptainer_exe
     host_probe = _probe_host_runtime(apptainer_exe)
     mat = materialize_executor_image(config, force=bool(args.force), host_probe=host_probe)
     # Reflect the materialized image back into the resolved config view.
@@ -123,12 +226,31 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Also auto-build/reuse the Apptainer executor image before explaining.",
     )
 
+    doctor = subparsers.add_parser("doctor", help="Check GEPA host runtime, Apptainer, Claude Code, and auth.")
+    doctor.add_argument("--config", help="Optional task YAML/JSON to check project-specific runtime settings.")
+    doctor.add_argument(
+        "--install",
+        action="store_true",
+        help="Run a configured Apptainer install hook if Apptainer is missing.",
+    )
+    doctor.add_argument(
+        "--no-probe",
+        action="store_true",
+        help="Only discover executables; do not run Apptainer exec smoke probes.",
+    )
+    doctor.add_argument("--json", action="store_true", help="Print machine-readable diagnostics.")
+
     setup = subparsers.add_parser(
         "setup-apptainer",
         help="Materialize (build/reuse + validate) the Apptainer executor image and print diagnostics.",
     )
     _add_config_argument(setup)
     setup.add_argument("--force", action="store_true", help="Rebuild even if a cached SIF exists.")
+    setup.add_argument(
+        "--install",
+        action="store_true",
+        help="Run a configured Apptainer install hook if Apptainer is missing before materializing.",
+    )
     setup.add_argument(
         "--no-materialize",
         action="store_true",
@@ -139,14 +261,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     argv = list(sys.argv[1:] if argv is None else argv)
-    if argv and argv[0].startswith("-"):
-        print("Compatibility CLI syntax detected; prefer the 'run' subcommand.", file=sys.stderr)
-        argv.insert(0, "run")
     parser = _build_parser()
     args = parser.parse_args(argv)
     try:
         if args.command == "run":
             code = _run(args)
+        elif args.command == "doctor":
+            code = _doctor(args)
         elif args.command == "setup-apptainer":
             code = _setup_apptainer(args)
         else:
@@ -168,7 +289,7 @@ def main(argv: list[str] | None = None) -> None:
         parser.error(str(exc))
         return
     except MaterializationError as exc:
-        print(f"Image materialization failed:\n{exc}", file=sys.stderr)
+        print(f"Runtime setup failed:\n{exc}", file=sys.stderr)
         raise SystemExit(2)
     raise SystemExit(code)
 

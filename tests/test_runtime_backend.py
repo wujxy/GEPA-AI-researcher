@@ -54,6 +54,46 @@ def _lease(root: Path):
     )
 
 
+def _apptainer_config(root: Path, image: Path, apptainer: Path, readonly: Path | None = None, **apptainer_overrides):
+    mounts = []
+    if readonly is not None:
+        mounts.append({
+            "source": str(readonly),
+            "target": "/workspace/repo/TEMP/fixtures/time_pdf.bin",
+            "mode": "ro",
+        })
+    apptainer_cfg = {
+        "image": str(image),
+        "executable": str(apptainer),
+        "cleanenv": True,
+        "containall": True,
+        "writable_tmpfs": True,
+    }
+    apptainer_cfg.update(apptainer_overrides)
+    return {
+        "agent": {"command": "host-claude"},
+        "executor": {
+            "runtime_backend": "apptainer",
+            # Stale legacy values should be ignored by ApptainerRuntimeBackend.
+            "apptainer": {"command": "legacy-command", "env_allowlist": ["SECRET_TEST"]},
+        },
+        "_runtime_ir": {
+            "backend": "apptainer",
+            "workdir": "/workspace/repo",
+            "command": "claude-in-container",
+            "append_agent_args": True,
+            "env": {"pass": ["GEPA_ALLOW_TEST"], "set": {"STATIC_ENV": "1"}},
+            "init": [
+                {"op": "source", "path": "/cvmfs/juno/setup.sh", "required": True},
+                {"op": "source", "path": "InstallArea/setup.sh", "base": "workdir", "required": False},
+            ],
+            "preflight": [{"name": "check-1", "command": "which gcc", "required": True}],
+            "mounts": mounts,
+            "apptainer": apptainer_cfg,
+        },
+    }
+
+
 class RuntimeBackendTest(unittest.TestCase):
     def test_local_backend_preserves_host_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -81,22 +121,12 @@ class RuntimeBackendTest(unittest.TestCase):
             readonly = root / "fixture.bin"
             readonly.write_text("fixture", encoding="utf-8")
             lease = _lease(root)
-            config = {
-                "agent": {"command": "host-claude"},
-                "workspace": {"readonly_assets": [{"source": str(readonly), "target": "TEMP/fixtures/time_pdf.bin"}]},
-                "executor": {
-                    "runtime_backend": "apptainer",
-                    "apptainer": {
-                        "image": str(image),
-                        "executable": str(apptainer),
-                        "command": "claude-in-container",
-                        "claude_home_template": str(home_template),
-                        "env_allowlist": ["GEPA_ALLOW_TEST"],
-                        "readonly_binds": [{"source": str(readonly), "target": "/readonly/fixture.bin"}],
-                        "extra_binds": [{"source": str(root), "target": "/extra", "mode": "rw"}],
-                    },
-                },
-            }
+            config = _apptainer_config(
+                root, image, apptainer, readonly,
+                claude_home_template=str(home_template),
+                readonly_binds=[{"source": str(readonly), "target": "/readonly/fixture.bin"}],
+                extra_binds=[{"source": str(root), "target": "/extra", "mode": "rw"}],
+            )
 
             with patch.dict(os.environ, {"GEPA_ALLOW_TEST": "allowed", "SECRET_TEST": "hidden"}, clear=False):
                 runtime = ApptainerRuntimeBackend(root, config).prepare(_candidate(), lease, _record())
@@ -106,19 +136,19 @@ class RuntimeBackendTest(unittest.TestCase):
             self.assertEqual(runtime.artifact_path, "/workspace/artifacts")
             self.assertFalse(runtime.inherit_host_env)
             self.assertEqual(runtime.command, "claude-in-container")
-            # Environment variables now passed via --env, not in env dict
-            self.assertEqual(runtime.env, {})  # Empty since --env used
+            self.assertEqual(runtime.artifacts["executor_command"], "claude-in-container")
+            self.assertEqual(runtime.env, {})
             self.assertTrue((Path(runtime.artifacts["host_home"]) / "auth.json").exists())
             self.assertTrue((Path(runtime.artifacts["host_scratch"]) / "tmp").is_dir())
             joined = "\n".join(runtime.command_prefix)
             self.assertIn("--cleanenv", runtime.command_prefix)
             self.assertIn("--containall", runtime.command_prefix)
-            # Verify --env arguments for GEPA variables
             self.assertIn("--env", runtime.command_prefix)
             self.assertIn("GEPA_WORKTREE=/workspace/repo", runtime.command_prefix)
             self.assertIn("GEPA_ARTIFACTS=/workspace/artifacts", runtime.command_prefix)
-            # HOME is set via --home (apptainer silently ignores HOME via --env);
-            # TMPDIR is still passed via --env.
+            self.assertIn("STATIC_ENV=1", runtime.command_prefix)
+            self.assertIn("GEPA_ALLOW_TEST=allowed", runtime.command_prefix)
+            self.assertNotIn("SECRET_TEST", joined)
             self.assertIn("--home", runtime.command_prefix)
             home_idx = runtime.command_prefix.index("--home")
             self.assertTrue(
@@ -127,12 +157,13 @@ class RuntimeBackendTest(unittest.TestCase):
             )
             self.assertNotIn("HOME=/workspace/artifacts/home_exec-1", runtime.command_prefix)
             self.assertIn("TMPDIR=/workspace/artifacts/scratch_exec-1/tmp", runtime.command_prefix)
-            self.assertIn("GEPA_ALLOW_TEST=allowed", runtime.command_prefix)
-            # Verify SECRET_TEST is not in --env arguments
-            self.assertNotIn("SECRET_TEST", joined)
             self.assertIn(f"{readonly}:/workspace/repo/TEMP/fixtures/time_pdf.bin:ro", joined)
             self.assertIn(f"{readonly}:/readonly/fixture.bin:ro", joined)
             self.assertIn(f"{root}:/extra:rw", joined)
+            self.assertIn("gepa-runtime", runtime.command_prefix)
+            self.assertIn('exec "$@"', runtime.artifacts["runtime_shell"])
+            self.assertNotIn("host_launcher", runtime.artifacts)
+            self.assertFalse(any(path.suffix == ".sh" for path in Path(runtime.artifacts["host_artifacts"]).iterdir()))
 
     def test_apptainer_backend_redacts_environment_values_in_to_dict(self):
         """Security: Verify environment variable values are redacted in to_dict()"""
@@ -266,21 +297,35 @@ class RuntimeBackendTest(unittest.TestCase):
             apptainer.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             os.chmod(apptainer, 0o755)
             lease = _lease(root)
-            config = {
-                "executor": {
-                    "runtime_backend": "apptainer",
-                    "apptainer": {
-                        "image": str(image),
-                        "executable": str(apptainer),
-                        "userns": True,
-                        "extra_exec_args": ["--no-mount", "home"],
-                    },
-                },
-            }
+            config = _apptainer_config(root, image, apptainer, userns=True, extra_exec_args=["--no-mount", "home"])
             runtime = ApptainerRuntimeBackend(root, config).prepare(_candidate(), lease, _record())
             self.assertIn("--userns", runtime.command_prefix)
             self.assertIn("--no-mount", runtime.command_prefix)
             self.assertIn("home", runtime.command_prefix)
+
+
+    def test_apptainer_backend_uses_runtime_ir_inline_wrapper(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image = root / "executor.sif"
+            image.write_text("image", encoding="utf-8")
+            apptainer = root / "apptainer"
+            apptainer.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            os.chmod(apptainer, 0o755)
+            lease = _lease(root)
+            config = _apptainer_config(root, image, apptainer)
+
+            runtime = ApptainerRuntimeBackend(root, config).prepare(_candidate(), lease, _record())
+
+            self.assertEqual(runtime.command, "claude-in-container")
+            self.assertEqual(runtime.command_prefix[-5:-1], ["/usr/bin/env", "bash", "-lc", runtime.artifacts["runtime_shell"]])
+            self.assertEqual(runtime.command_prefix[-1], "gepa-runtime")
+            shell = runtime.artifacts["runtime_shell"]
+            self.assertIn("cd /workspace/repo", shell)
+            self.assertIn("source /cvmfs/juno/setup.sh", shell)
+            self.assertIn("if [ -f InstallArea/setup.sh ]; then source InstallArea/setup.sh", shell)
+            self.assertIn("which gcc", shell)
+            self.assertIn('exec "$@"', shell)
 
     def test_apptainer_backend_fails_without_image(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -288,12 +333,7 @@ class RuntimeBackendTest(unittest.TestCase):
             apptainer = root / "apptainer"
             apptainer.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             os.chmod(apptainer, 0o755)
-            config = {
-                "executor": {
-                    "runtime_backend": "apptainer",
-                    "apptainer": {"image": str(root / "missing.sif"), "executable": str(apptainer)},
-                }
-            }
+            config = _apptainer_config(root, root / "missing.sif", apptainer)
 
             with self.assertRaisesRegex(RuntimeBackendError, "image does not exist"):
                 ApptainerRuntimeBackend(root, config).prepare(_candidate(), _lease(root), _record())
