@@ -1,0 +1,100 @@
+kind: task
+
+task:
+  name: omilrec-br111-speed-opt
+  goal: >
+    Optimize OMILREC speed from the local Br1.11.0 clean baseline only.
+    Minimize ms/evt while keeping every per-candidate gate green: FCN drift
+    <=1e-13, consistency within 4mm/7keV, multithread output bit-identical,
+    and no speed regression above +5%. Candidates must use facts verified in
+    this clean package and edit only admitted OMILRECV2 source files.
+  samples:
+    - sample_id: local_100evt_speed
+      description: Local 100-event benchmark and validation gates.
+    - sample_id: fcn_drift
+      description: Unit-level FCN drift and ratchet validation.
+
+project:
+  profile: br111-local.project.profile.yaml
+  ref: ff71809b81c6c887a276a14c29b4f86296f27571
+
+metric:
+  name: ms_per_event
+  direction: minimize
+  description: OMILREC single-event reconstruction wall time under the configured 100-event benchmark.
+  unit: ms/evt
+  command: OMILRECV2_BENCH_INPUT=/data/juno/dingxf/inputs/index_12628_rtraw_1.json OMILRECV2_BENCH_RECMAP=/data/juno/dingxf/OMILREC_maps bash scripts/quick_bench.sh --evtmax 100
+  repeats: 3
+  improvement:
+    mode: relative_percent
+    minimum: 1.0
+
+validation:
+  checks:
+    - name: fcn_drift
+      command: ./build/bin/test_fcn.exe
+      success_criteria: FCN drift is at most 1e-13.
+    - name: drift_ratchet
+      command: python scripts/diff_drift.py
+      success_criteria: HEAD drift does not exceed the ratchet contract versus HEAD~1.
+    - name: end_to_end_consistency
+      command: OMILRECV2_TEST_INPUT=/data/juno/dingxf/inputs/index_12628_rtraw_1.json OMILRECV2_TEST_RECMAP=/data/juno/dingxf/OMILREC_maps python -m pytest tests/test_consistency.py
+      success_criteria: Position error is at most 4 mm and energy error is at most 7 keV.
+    - name: multithread_consistency
+      command: OMILRECV2_TEST_INPUT=/data/juno/dingxf/inputs/index_12628_rtraw_1.json OMILRECV2_TEST_RECMAP=/data/juno/dingxf/OMILREC_maps python -m pytest tests/test_multithread.py
+      success_criteria: Multithreaded output is bit-identical after sort.
+    - name: speed_regression_gate
+      success_criteria: Measured speed does not regress by more than +5% relative to the clean Br1.11.0 baseline on the same machine.
+
+safety:
+  editable_paths:
+    - OMILRECV2/src/**/*.cc
+    - OMILRECV2/src/**/*.h
+  frozen_paths:
+    - tests/**
+    - scripts/**
+    - CMakeLists.txt
+    - pyproject.toml
+    - .gitattributes
+    - benchmarks/*.md
+  max_files_per_candidate: 5
+  max_commits_per_candidate: 1
+
+loop:
+  seed_count: 6
+  max_rounds: 4
+  min_rounds: 1
+  patience: 2
+  candidates_per_round: 3
+  max_parallel_candidates: 5
+  enable_merge: false
+
+selection:
+  frontier_policy: pareto
+  acceptance_policy: minibatch_improves_then_pareto
+  minibatch_size: 1
+  parent_sampling: pareto_win_weighted
+  feedback_sample_ids:
+    - local_100evt_speed
+  pareto_sample_ids:
+    - local_100evt_speed
+    - fcn_drift
+
+executor:
+  timeout_seconds: 3600
+  repair_retries: 1
+
+judger:
+  pass_threshold: 0.85
+
+usage_tracking:
+  enabled: true
+  persist_raw_envelope: true
+  print_round_summary: true
+  print_run_summary: true
+
+evidence:
+  visualize_when_applicable: false
+  plot_selection_policy: proposer_selects
+  artifact_formats: []
+  guidance: Prefer command logs, metric tables, drift reports, and commit audit artifacts.

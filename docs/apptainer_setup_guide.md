@@ -4,10 +4,9 @@
 
 GEPA runs each executor agent (the Claude Code call that implements/validates a
 candidate) inside an Apptainer container when `execution.runtime_backend: apptainer`
-is set in the project profile. **You no longer build or configure the image by
-hand.** GEPA derives what the container needs directly from the resolved task/profile
-config, builds (or reuses) a thin SIF, and validates it by really executing commands
-inside it.
+is set in the project profile. Apptainer is an isolation boundary, not a software
+distribution environment: GEPA builds (or reuses) a thin boot SIF and passes the
+host runtime plus the user-declared runnable envelope into it.
 
 This replaces the old interactive `setup_apptainer.py` wizard, which was
 Docker-dependent and guessed the image from file extensions.
@@ -19,9 +18,12 @@ Docker-dependent and guessed the image from file extensions.
   cache (`~/.cache/gepa/runtime` by default). If none is found, a site can provide
   a pinned user-mode install hook with `execution.apptainer.install_command` or
   `GEPA_APPTAINER_INSTALL_COMMAND`; GEPA runs it once and probes the cache again.
-- **Executor SIF.** Docker is **not** required — GEPA builds via
+- **Executor SIF.** Docker is **not** required — GEPA builds a thin boot image via
   `apptainer build out.sif docker://<base>`, pulling OCI layers straight from the
   registry, then reuses the SIF from a content-addressed cache.
+- **Host runtime passthrough.** GEPA mounts existing host runtime roots read-only
+  (`/usr`, `/lib`, `/lib64`, `/bin`, `/sbin`, selected runtime `/etc` paths, and
+  `/cvmfs` when present) instead of installing project packages into the SIF.
 - **Host capabilities.** GEPA probes whether normal `exec` works or whether
   `--userns` is required, and records diagnostics in the resolved snapshot.
 - **Claude Code/auth.** `agent.command` (default `claude`) is resolved on the host
@@ -30,15 +32,11 @@ Docker-dependent and guessed the image from file extensions.
 
 ## How the image is chosen
 
-GEPA scans the commands the executor may run (`environment.setup_commands`,
-`metric.command`, `validation.checks[].command`, `runtime.python_command`) and picks:
-
-| Signals in config | Base image | Why |
-|---|---|---|
-| `/cvmfs/...` referenced, or `gcc`/`g++`/`cmake`/`make` | `docker://almalinux:9` | glibc matches CVMFS-built (el9) binaries; toolchain comes from a read-only `/cvmfs` bind, not the image |
-| pure Python only (python/pytest/bash/git) | `docker://python:3.11-slim` | smallest base that already ships python3 |
-
-Override with `execution.apptainer.base_image` (e.g. `docker://rockylinux:9`).
+By default GEPA uses `docker://alpine:3.20` as a thin boot image. The image only
+needs to start Apptainer exec and a shell; project compilers, Python, ROOT/JUNO,
+pytest, and OS runtime libraries come from host-runtime passthrough and
+`provided_paths`. Override with `execution.apptainer.base_image` only when your
+site needs a different boot base.
 
 ## What gets bound into the container
 
@@ -46,7 +44,8 @@ Override with `execution.apptainer.base_image` (e.g. `docker://rockylinux:9`).
   plus per-execution `scratch_<exec_id>` and `home_<exec_id>`.
 - The host nvm node-version directory (containing `claude` + `node`) → the **same
   absolute path** read-only, so the host `PATH` resolves `claude` unchanged.
-- `/cvmfs` → `/cvmfs` read-only, when a command references it.
+- Host runtime roots (`/usr`, `/lib`, `/lib64`, `/bin`, `/sbin`, selected runtime
+  `/etc` paths, and `/cvmfs`) → the same absolute paths read-only, when present.
 - `claude_home_template` → the per-execution HOME (use this for a minimal
   `.claude` config / credentials; never bind the host `$HOME` directly).
 
@@ -76,8 +75,9 @@ The image is cached at `~/.cache/gepa/images/<fingerprint>.sif` (override with
 `GEPA_IMAGE_CACHE_DIR`). Runtime executables discovered or installed by site hooks
 live under `~/.cache/gepa/runtime` by default (override with
 `GEPA_RUNTIME_CACHE_DIR`). The fingerprint includes the base, detected tools, and
-the host claude binary path + mtime, so upgrading Claude invalidates and rebuilds
-automatically. Parallel GEPA runs share the cache safely (file lock + atomic rename).
+the host runtime bind set and host claude binary path + mtime, so upgrading Claude
+or changing runtime passthrough invalidates and rebuilds automatically. Parallel
+GEPA runs share the cache safely (file lock + atomic rename).
 
 ## Using your own prebuilt image
 
@@ -129,8 +129,8 @@ GEPA_REAL_APPTAINER=1 python -m unittest tests.test_apptainer_real
   --set ...`).
 - **Build fails (registry/network)** — the error includes the exact
   `apptainer build ...` command to retry and the `auto_image: false` fallback.
-- **A required tool is missing in the image** — set `base_image` to a base that
-  includes it (e.g. one with `git` if your executor needs git inside the container;
-  normally the orchestrator handles git on the host).
-- **`/cvmfs` referenced but not mounted** — GEPA warns and skips the bind; source
-  CVMFS on the host first.
+- **A required tool is missing in host-runtime passthrough** — ensure the host
+  runtime paths are visible and mounted (`/usr`, `/lib*`, `/bin`, `/sbin`). GEPA
+  does not install project packages into the SIF.
+- **`/cvmfs` is needed but not mounted** — GEPA skips missing host paths; source
+  CVMFS on the host first or declare the correct provided path.

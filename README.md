@@ -42,9 +42,9 @@ through the same real container validation path, so failures show up before the
 loop starts.
 
 The image is derived from the resolved config (not file-extension heuristics): a
-thin `almalinux:9` base when `/cvmfs` or build tools are referenced (the JUNO
-toolchain comes from a read-only `/cvmfs` bind), or `python:3.11-slim` for
-pure-Python tasks. See [Apptainer Setup Guide](docs/apptainer_setup_guide.md).
+thin boot image and passes through the host runtime (`/usr`, `/lib*`,
+`/bin`/`/sbin`, selected runtime `/etc` paths, and `/cvmfs`) read-only. See
+[Apptainer Setup Guide](docs/apptainer_setup_guide.md).
 
 ## 📋 Detailed Requirements
 
@@ -53,9 +53,10 @@ See [requirements.txt](requirements.txt) for complete dependency list and [docs/
 ## Apptainer Executor Image
 
 When `isolation.backend: apptainer` is selected, GEPA treats Apptainer as an
-executor boundary: it binds the source repo, artifacts, scratch/tmp, docs,
-overlays, and `provided_paths`. Project setup/build/test commands remain executor
-work, guided by docs and `reference.commands`.
+executor boundary, not a dependency-packaging system: it binds the host runtime,
+source repo, artifacts, scratch/tmp, docs, overlays, and `provided_paths`.
+Project setup/build/test commands remain executor work, guided by docs and
+`reference.commands`.
 
 ```bash
 # Host/runtime diagnostics without building the image:
@@ -249,8 +250,8 @@ repo_overlays:
 isolation:
   backend: apptainer                 # local or apptainer
   mode: bind_paths
-  # image is optional. If omitted, GEPA uses a minimal executor image and binds
-  # provided_paths; it does not infer project packages from reference commands.
+  # image is optional. If omitted, GEPA uses a thin boot image and binds the
+  # host runtime plus provided_paths; it does not chase project packages.
   # image: /absolute/or/profile-relative/executor.sif
   apptainer:
     executable: apptainer
@@ -310,13 +311,13 @@ preflight checks, allowed-command lists, or mandatory build steps.
 `isolation.backend` controls only the executor subprocess boundary. The default
 `local` backend preserves host execution. The `apptainer` backend keeps GEPA core,
 Git/worktree lifecycle, gates, score matrix, and context on the host, but starts
-each executor call with `apptainer exec` and binds the source repo, artifacts,
-scratch/tmp, docs, overlays, and `provided_paths`.
+each executor call with `apptainer exec` and binds the host runtime, source repo,
+artifacts, scratch/tmp, docs, overlays, and `provided_paths`.
 
 When `isolation.backend: apptainer` is selected, `isolation.image` is optional.
-If omitted, GEPA uses a minimal executor image suitable for shell/agent startup;
-it does not infer project packages from commands. Provide a prebuilt SIF when a
-site needs a pinned executor base.
+If omitted, GEPA uses a thin boot image suitable for shell/agent startup and
+mounts the host runtime read-only. It does not infer or install project packages
+from commands. Provide a prebuilt SIF only when a site needs a pinned boot base.
 
 `resources.pre_materialized_lfs_paths` documents LFS-backed files that are
 already materialized inside the project repository. GEPA preserves this metadata

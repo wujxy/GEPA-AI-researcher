@@ -1,24 +1,21 @@
-"""Config-driven Apptainer executor image materialization.
+"""Apptainer executor image materialization.
 
-Replaces the old interactive ``setup_apptainer.py`` wizard. Instead of asking the
-user to run a separate, docker-dependent, file-extension-heuristic setup step, this
-module derives what the executor container must provide *from the resolved GEPA
-config*, builds (or reuses) a thin SIF via dockerless ``apptainer build ... docker://``,
-caches it by a content fingerprint, and merges the derived image path / binds /
-``--userns`` flag back into the resolved config.
+GEPA's Apptainer backend is an isolation boundary, not a software distribution
+system. The SIF is intentionally thin and the project runtime comes from the user
+provided runnable envelope: host runtime paths, CVMFS, source, docs, data, and
+resource packs. GEPA does not chase project packages or infer dependencies from
+reference commands.
 
 Design notes
 ------------
-- The image is intentionally THIN. For CVMFS-backed projects (e.g. JUNO/OMILREC)
-  project libraries and experiment software come from read-only binds, while the
-  image provides a conservative bootstrap shell/build tool floor so the executor
-  can discover and run the project without turning config into a preflight script.
+- Host runtime passthrough is the default: existing host ``/usr``, ``/lib*``,
+  ``/bin``/``/sbin``, selected runtime ``/etc`` paths, and ``/cvmfs`` are mounted
+  read-only when present.
 - Claude Code is NOT baked in. The host nvm node-version directory is bound
-  read-only at the same absolute path inside the container, so the (already
-  allowlisted) host ``PATH`` resolves ``claude`` with zero rewriting.
-- Pure-Python (non-CVMFS) projects get ``docker://python:3.11-slim`` instead.
+  read-only at the same absolute path inside the container, so the host ``PATH``
+  entry resolves ``claude`` with zero rewriting.
 - Building never requires Docker: ``apptainer build out.sif docker://<base>`` pulls
-  OCI layers directly from the registry.
+  OCI layers directly from the registry. The generated image is only a boot shell.
 """
 
 from __future__ import annotations
@@ -125,97 +122,24 @@ _TOOL_PATTERNS: dict[str, str] = {
 _BUILD_TOOLS = {"gcc", "g++", "cmake", "make", "ninja"}
 _PURE_PYTHON_OK = {"python3", "python", "pytest", "bash", "git"}
 
-_RPM_TOOL_PACKAGES = {
-    "gcc": ["gcc"],
-    "g++": ["gcc-c++"],
-    "cmake": ["cmake"],
-    "make": ["make"],
-    "ninja": ["ninja-build"],
-    "git": ["git"],
-    "python3": ["python3"],
-    "python": ["python3", "python-unversioned-command"],
-    "pytest": ["python3-pytest"],
-    "which": ["which"],
-}
-_DEB_TOOL_PACKAGES = {
-    "gcc": ["gcc"],
-    "g++": ["g++"],
-    "cmake": ["cmake"],
-    "make": ["make"],
-    "ninja": ["ninja-build"],
-    "git": ["git"],
-    "python3": ["python3"],
-    "python": ["python3", "python-is-python3"],
-    "pytest": ["python3-pytest"],
-    "which": ["which"],
-}
-_RPM_CVMFS_RUNTIME_PACKAGES = [
-    # General executor conveniences for projects that mount external runtime
-    # environments. Project-specific libraries still belong in config-declared
-    # apptainer.extra_packages or a user-provided image.
-    "bash",
-    # Alma/RHEL-style minimal images often ship coreutils-single; installing
-    # full coreutils conflicts with it, while coreutils-single already provides
-    # the shell primitives GEPA needs.
-    "findutils",
-    "grep",
-    "sed",
-    "gawk",
-    "diffutils",
-    "patch",
-    "tar",
-    "gzip",
-    "bzip2",
-    "xz",
-    "unzip",
-    "zip",
-    "file",
-    "which",
-    "hostname",
-    "procps-ng",
-    "util-linux",
-    "time",
-    "less",
-    "rsync",
-    "openssh-clients",
-    "git",
-    "git-lfs",
-    "python3",
-    "python-unversioned-command",
-    "python3-pip",
-    "python3-pytest",
+_HOST_RUNTIME_READONLY_PATHS = [
+    "/usr",
+    "/lib",
+    "/lib64",
+    "/bin",
+    "/sbin",
+    "/cvmfs",
 ]
-_DEB_CVMFS_RUNTIME_PACKAGES = [
-    "bash",
-    "coreutils",
-    "findutils",
-    "grep",
-    "sed",
-    "gawk",
-    "diffutils",
-    "patch",
-    "tar",
-    "gzip",
-    "bzip2",
-    "xz-utils",
-    "unzip",
-    "zip",
-    "file",
-    "hostname",
-    "procps",
-    "util-linux",
-    "time",
-    "less",
-    "rsync",
-    "openssh-client",
-    "git",
-    "git-lfs",
-    "python3",
-    "python-is-python3",
-    "python3-pip",
-    "python3-pytest",
+_HOST_RUNTIME_ETC_PATHS = [
+    "/etc/alternatives",
+    "/etc/crypto-policies",
+    "/etc/ld.so.cache",
+    "/etc/ld.so.conf",
+    "/etc/ld.so.conf.d",
+    "/etc/pki",
+    "/etc/profile.d",
+    "/etc/ssl",
 ]
-_RPM_BASE_HINTS = ("almalinux", "rockylinux", "centos", "fedora", "ubi", "oraclelinux", "amazonlinux")
 
 
 def _collect_command_strings(resolved_config: dict) -> list[str]:
@@ -249,8 +173,8 @@ def _collect_command_strings(resolved_config: dict) -> list[str]:
     add_runtime_commands(runtime_ir)
     commands.extend((resolved_config.get("task") or {}).get("benchmark_commands") or [])
     commands.extend((resolved_config.get("task") or {}).get("validation_commands") or [])
-    # Reference commands are hints for the executor and image bootstrap only; GEPA
-    # never turns them into setup/preflight/build entrypoints.
+    # Reference commands are hints for the executor only; GEPA never turns them
+    # into setup/preflight/build entrypoints or image package requirements.
     commands.extend((contracts.get("reference") or {}).get("commands") or [])
     commands.extend((contracts.get("build") or {}).get("commands") or [])
     return [str(item) for item in commands if item]
@@ -280,12 +204,7 @@ def _collect_executor_image(resolved_config: dict) -> dict[str, Any]:
         image["base_image"] = runtime_ir["image"]
     if apptainer.get("base_image") and not image.get("base_image"):
         image["base_image"] = apptainer["base_image"]
-    image["bootstrap_tools"] = _dedupe(
-        list(image.get("bootstrap_tools") or []) + list(runtime_ir.get("tools") or []) + list(apptainer.get("bootstrap_tools") or [])
-    )
-    image["extra_packages"] = _dedupe(
-        list(image.get("extra_packages") or []) + list(apptainer.get("extra_packages") or [])
-    )
+    image["bootstrap_tools"] = _dedupe(list(image.get("bootstrap_tools") or []) + list(apptainer.get("bootstrap_tools") or []))
     return image
 
 
@@ -318,30 +237,11 @@ def derive_requirements(resolved_config: dict) -> Requirements:
         and set(tools).issubset(_PURE_PYTHON_OK)
     )
 
-    if cvmfs_required or has_build_tools:
-        suggested_base = "docker://almalinux:9"
-    else:
-        suggested_base = "docker://python:3.11-slim"
+    suggested_base = "docker://alpine:3.20"
 
-    # What the IMAGE itself must provide. Reference commands remain hints, but
-    # CMake/C++-shaped projects need a generic bootstrap floor in the image so the
-    # executor can actually build after binding user-guaranteed project resources.
+    # The image is only a boot shell. Project tools come from host-runtime
+    # passthrough and user-provided paths, not from inferred image packages.
     image_required_tools = _dedupe(["bash"] + explicit_bootstrap_tools)
-    if has_build_tools:
-        build_bootstrap: list[str] = []
-        if {"cmake", "make", "ninja"} & set(tools):
-            build_bootstrap.extend(["cmake", "make", "gcc", "g++", "git"])
-        if "ninja" in tools:
-            build_bootstrap.append("ninja")
-        if "gcc" in tools or "g++" in tools:
-            build_bootstrap.extend(["gcc", "g++"])
-        image_required_tools = _dedupe(image_required_tools + build_bootstrap)
-    if "python3" in tools or "pytest" in tools:
-        image_required_tools = _dedupe(image_required_tools + ["python3"])
-    if "pytest" in tools:
-        image_required_tools = _dedupe(image_required_tools + ["pytest"])
-    if is_pure_python:
-        image_required_tools = _dedupe(image_required_tools + ["python3"])
 
     agent_command = str((resolved_config.get("agent") or {}).get("command") or "claude")
     return Requirements(
@@ -418,7 +318,7 @@ def _fingerprint(
     base: str,
     tools: list[str],
     claude_bind: ClaudeBind,
-    extra_packages: list[str],
+    runtime_binds: list[str],
 ) -> str:
     """Stable content hash; invalidates when claude is upgraded or moved."""
     claude_bin = claude_bind.claude_bin
@@ -434,7 +334,7 @@ def _fingerprint(
         "nvm_node_dir": claude_bind.nvm_node_dir,
         "claude_bin": claude_bin,
         "claude_bin_mtime": claude_mtime,
-        "extra_packages": sorted(extra_packages),
+        "runtime_binds": sorted(runtime_binds),
     }
     canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
@@ -691,25 +591,26 @@ def _probe_host_runtime(apptainer: str, *, tiny: str = _DEFAULT_TINY) -> dict:
     return result
 
 
-def _packages_for_tools(tools: list[str], base: str) -> list[str]:
-    """Map executable names to installable package names for generated images."""
-    if not base.startswith("docker://"):
-        return []
-    base_l = base.lower()
-    package_map = _RPM_TOOL_PACKAGES if any(hint in base_l for hint in _RPM_BASE_HINTS) else _DEB_TOOL_PACKAGES
-    packages: list[str] = []
-    for tool in tools:
-        packages.extend(package_map.get(tool, []))
-    return _dedupe(packages)
-
-
-def _runtime_packages_for_base(base: str) -> list[str]:
-    if not base.startswith("docker://"):
-        return []
-    base_l = base.lower()
-    if any(hint in base_l for hint in _RPM_BASE_HINTS):
-        return list(_RPM_CVMFS_RUNTIME_PACKAGES)
-    return list(_DEB_CVMFS_RUNTIME_PACKAGES)
+def _host_runtime_readonly_binds(apptainer_cfg: dict | None = None) -> list[dict]:
+    cfg = apptainer_cfg or {}
+    paths = list(cfg.get("host_runtime_paths") or _HOST_RUNTIME_READONLY_PATHS)
+    if cfg.get("bind_host_etc", True):
+        paths.extend(cfg.get("host_runtime_etc_paths") or _HOST_RUNTIME_ETC_PATHS)
+    result: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for raw in paths:
+        source = str(raw)
+        if not source.startswith("/"):
+            continue
+        path = Path(source)
+        if not path.exists():
+            continue
+        key = (source, source)
+        if key in seen:
+            continue
+        result.append({"source": source, "target": source, "mode": "ro"})
+        seen.add(key)
+    return result
 
 
 def _build_sif(
@@ -718,85 +619,27 @@ def _build_sif(
     *,
     apptainer: str = "apptainer",
     timeout: int = 1200,
-    extra_packages: list[str] | None = None,
 ) -> None:
-    """Build a SIF from an OCI base without Docker. Atomic rename on success."""
+    """Build a thin SIF from an OCI base without Docker. Atomic rename on success."""
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp_out = out.with_suffix(out.suffix + f".tmp.{os.getpid()}")
     if tmp_out.exists():
         tmp_out.unlink()
-    packages = _dedupe([str(pkg) for pkg in (extra_packages or []) if str(pkg).strip()])
-    build_source = base
-    recipe_path: Path | None = None
-    if packages:
-        recipe_path = _write_package_recipe(base, packages)
-        build_source = str(recipe_path)
-    result = _run([apptainer, "build", str(tmp_out), build_source], timeout=timeout, env=_sanitized_build_env())
-    if recipe_path is not None:
-        try:
-            recipe_path.unlink()
-        except OSError:
-            pass
+    result = _run([apptainer, "build", str(tmp_out), base], timeout=timeout, env=_sanitized_build_env())
     if result.returncode != 0 or not tmp_out.exists():
         try:
             tmp_out.unlink()
         except OSError:
             pass
-        package_note = f" with packages {', '.join(packages)}" if packages else ""
         raise MaterializationError(
             "Failed to build Apptainer image.\n"
-            f"  Command: {apptainer} build {tmp_out} {build_source}\n"
-            f"  Base: {base}{package_note}\n"
+            f"  Command: {apptainer} build {tmp_out} {base}\n"
+            f"  Base: {base}\n"
             f"  stderr:\n{_stderr_tail(result.stderr)}\n"
-            "Mitigation: pre-build the image yourself, point isolation.image at it, "
-            "or set isolation.apptainer.base_image to a base with a supported package manager."
+            "Mitigation: pre-build a thin image yourself and point isolation.image at it."
         )
     os.replace(tmp_out, out)
 
-
-def _write_package_recipe(base: str, packages: list[str]) -> Path:
-    if not base.startswith("docker://"):
-        raise MaterializationError(
-            "Apptainer package installation requires a docker:// base image. "
-            "Pre-build a custom image and set isolation.image when using another base type."
-        )
-    from_image = base.removeprefix("docker://")
-    package_args = " ".join(shlex.quote(pkg) for pkg in packages)
-    recipe = f"""Bootstrap: docker
-From: {from_image}
-
-%setup
-    rootfs="${{APPTAINER_ROOTFS:-${{SINGULARITY_ROOTFS:-}}}}"
-    if [ -n "$rootfs" ]; then
-        mkdir -p "$rootfs/data" "$rootfs/cvmfs" "$rootfs/scratch" "$rootfs/work"
-    fi
-
-%post
-    set -eu
-    if command -v dnf >/dev/null 2>&1; then
-        dnf install -y {package_args}
-        dnf clean all
-    elif command -v microdnf >/dev/null 2>&1; then
-        microdnf install -y {package_args}
-        microdnf clean all
-    elif command -v yum >/dev/null 2>&1; then
-        yum install -y {package_args}
-        yum clean all
-    elif command -v apt-get >/dev/null 2>&1; then
-        apt-get update
-        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends {package_args}
-        rm -rf /var/lib/apt/lists/*
-    else
-        echo "No supported package manager found to install: {package_args}" >&2
-        exit 1
-    fi
-"""
-    handle = tempfile.NamedTemporaryFile("w", suffix=".def", prefix="gepa-apptainer-", delete=False, encoding="utf-8")
-    try:
-        handle.write(recipe)
-        return Path(handle.name)
-    finally:
-        handle.close()
 
 def _claude_auth_diagnostics() -> dict[str, Any]:
     home = Path.home()
@@ -820,13 +663,14 @@ def _probe_tools(
     apptainer: str,
     readonly_binds: list | None = None,
     extra_binds: list | None = None,
+    host_runtime_binds: list[dict] | None = None,
 ) -> dict:
     """Validate the built image can actually run the required tools + claude."""
     diagnostics: dict[str, Any] = {"tools": {}, "claude": None, "claude_auth": None, "warnings": []}
     base_argv = [apptainer, "exec"]
     if userns:
         base_argv.append("--userns")
-    for item in list(readonly_binds or []) + list(extra_binds or []):
+    for item in list(host_runtime_binds or _host_runtime_readonly_binds()) + list(readonly_binds or []) + list(extra_binds or []):
         if isinstance(item, str):
             base_argv += ["--bind", item]
             continue
@@ -839,12 +683,9 @@ def _probe_tools(
     if claude_bind.enabled and claude_bind.nvm_node_dir:
         base_argv += ["--bind", f"{claude_bind.nvm_node_dir}:{claude_bind.nvm_node_dir}:ro"]
 
-    # Strict: tools the image itself must provide.
     strict_tools = list(req.image_required_tools)
-    # git is desired but not required (the orchestrator owns git on the host).
-    desired_extra = ["git"] if "git" not in strict_tools else []
 
-    for tool in strict_tools + desired_extra:
+    for tool in strict_tools:
         tool_q = shlex.quote(tool)
         if tool == "which":
             check = "which bash >/dev/null"
@@ -862,10 +703,6 @@ def _probe_tools(
             version = version_text.splitlines()[0] if version_text else ""
         entry = {"ok": ok, "version": version}
         diagnostics["tools"][tool] = entry
-        if tool in desired_extra and not entry["ok"]:
-            diagnostics["warnings"].append(
-                f"'{tool}' not found in image (optional; bind or change base_image if needed)"
-            )
 
     # Claude: verify the bound binary + node are executable inside the container.
     if claude_bind.enabled and claude_bind.claude_bin and claude_bind.node_bin:
@@ -892,15 +729,14 @@ def _probe_tools(
             "the executor may fail when Claude starts"
         )
 
-    # Missing a STRICT tool is fatal.
+    # Missing a strict boot tool is fatal.
     missing_strict = [
         tool for tool in strict_tools if not diagnostics["tools"].get(tool, {}).get("ok")
     ]
     if missing_strict:
         raise MaterializationError(
-            "Built image is missing required tool(s): "
-            f"{', '.join(missing_strict)}. Use isolation.apptainer.base_image or "
-            "isolation.image to pick a base that includes them."
+            "Host-runtime passthrough is missing required tool(s): "
+            f"{', '.join(missing_strict)}. Ensure host /usr and /lib* are mounted and contain them."
         )
     if not diagnostics["claude"]["ok"]:
         raise MaterializationError(
@@ -943,16 +779,9 @@ def materialize_executor_image(
     req = derive_requirements(resolved_config)
     claude_bind = resolve_claude_bind(req.claude_command)
     base_image = str(runtime_spec.get("image") or apptainer_cfg.get("base_image") or req.suggested_base)
-    auto_packages = _packages_for_tools(req.image_required_tools, base_image)
-    if req.cvmfs_required:
-        auto_packages = _dedupe(auto_packages + _runtime_packages_for_base(base_image))
-    extra_packages = _dedupe(
-        auto_packages
-        + list(apptainer_cfg.get("extra_packages") or [])
-        + list(runtime_spec.get("tools") or [])
-    )
+    host_runtime_binds = _host_runtime_readonly_binds(apptainer_cfg)
 
-    fingerprint = _fingerprint(base_image, req.tools, claude_bind, extra_packages)
+    fingerprint = _fingerprint(base_image, ["host-runtime-passthrough"], claude_bind, [b["source"] for b in host_runtime_binds])
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     sif_path = CACHE_DIR / f"{fingerprint}.sif"
 
@@ -989,7 +818,7 @@ def materialize_executor_image(
                     pass  # appeared just now
                 else:
                     start = time.monotonic()
-                    _build_sif(base_image, sif_path, apptainer=apptainer_exe, extra_packages=extra_packages)
+                    _build_sif(base_image, sif_path, apptainer=apptainer_exe)
                     build_ms = int((time.monotonic() - start) * 1000)
                     built_now = True
 
@@ -1001,6 +830,7 @@ def materialize_executor_image(
         apptainer=apptainer_exe,
         readonly_binds=apptainer_cfg.get("readonly_binds") or [],
         extra_binds=apptainer_cfg.get("extra_binds") or [],
+        host_runtime_binds=host_runtime_binds,
     )
 
     derived_readonly_binds: list[dict] = []
@@ -1014,6 +844,9 @@ def materialize_executor_image(
             return
         target_list.append({"source": source, "target": source, "mode": mode})
         seen.add(key)
+
+    for bind in host_runtime_binds:
+        add_bind(derived_readonly_binds, seen_readonly, str(bind["source"]), "ro")
 
     accessible_bind_paths = set(req.accessible_paths or [])
     accessible_bind_paths.update(req.cvmfs_paths or [])
@@ -1049,6 +882,7 @@ def materialize_executor_image(
         **tool_diagnostics,
         "base_image": base_image,
         "suggested_base": req.suggested_base,
+        "runtime_model": "host_runtime_passthrough",
         "fingerprint": fingerprint,
         "cache_path": str(sif_path),
         "cache_hit": not built_now,

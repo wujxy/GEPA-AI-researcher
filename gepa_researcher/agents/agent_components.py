@@ -451,6 +451,7 @@ Constraints:
 - Do not ask the user for help.
 - Do not assume hidden task facts that are not present in resources, prior context, or loop feedback.
 - The user guarantees the provided paths in the config are sufficient to run the project; use project docs and reference commands as context.
+- In Apptainer runs, the project runtime comes from host-runtime passthrough plus provided paths; the image is only a startup shell/agent boundary.
 - Reference commands are hints/context, not GEPA-enforced steps; choose commands by reading the project docs and repository.
 - Keep this execution compact and scoped to the candidate contract.
 - Avoid broad repository exploration unless the candidate contract requires it.
@@ -651,11 +652,18 @@ Task goal:
 {evidence_access_policy()}
 
 Rubric:
-- Score 0.0 to 1.0.
-- Reward clear execution evidence, relevant metrics, validation checks, diagnostics, and honest uncertainty.
-- Reward relevant artifacts that make the result or failure mode inspectable.
-- Penalize missing evidence when the task naturally requires validation and validation was feasible.
-- Penalize unsupported claims, missing metrics, regressions, overfitting to feedback, or failure to follow the candidate contract.
+- Score 0.0 to 1.0 by comparing the executor evidence against the user's stated task goal, metric direction, improvement target if present, validation contract, and practical ambition.
+- Passing validation gates is necessary for a high score when those gates are relevant, but it is not sufficient for 0.95-1.00. Do not assign 1.0 merely because all gates are green.
+- 0.95-1.00: exceptional / exceeds goal. The result clearly exceeds the user goal, is far better than the stated requirement, or achieves the strongest plausible version of the goal with complete, robust evidence. Reserve 1.00 for near-ideal results that would be hard to improve within the current loop.
+- 0.80-0.95: strong / clearly satisfies goal. The result satisfies the main user goal well, has meaningful task-relative impact, convincing metrics, and relevant validation.
+- 0.70-0.80: good / useful satisfaction. The result satisfies the goal in a useful way, but effect size, robustness, novelty, or validation completeness is only moderate.
+- 0.60-0.70: valid but weak / needs follow-up. The result is directionally useful and plausibly satisfies the task, but impact is modest or confidence/validation is limited.
+- 0.50-0.60: barely useful / noisy or marginal. The result is aligned with the goal, but the measured effect may be within noise, too small to matter, or weakly supported.
+- 0.35-0.50: partial / inconclusive. Some implementation or analysis happened, but the task goal was not convincingly met due to missing primary metrics, incomplete validation, unclear novelty, or uncertain correctness.
+- 0.20-0.35: poor / mostly failed. The attempt failed important gates, lacked reliable evidence, produced no meaningful improvement, was wrongly scoped, or was mostly duplicate.
+- 0.00-0.20: failed / invalid / unsafe. No implementation, invalid hypothesis, duplicate with no new value, broken build, failed correctness gates, unsafe change, or unusable output.
+- Reward clear execution evidence, relevant metrics, validation checks, diagnostics, and honest uncertainty. Reward artifacts that make the result or failure mode inspectable.
+- Penalize unsupported claims, missing metrics, regressions, overfitting to feedback, duplicate work, or failure to follow the candidate contract.
 - Do not assume hidden task facts that are not present in candidate facts, trace evidence, the task goal, or the judger contract.
 - Return actionable feedback that helps the next proposer.
 

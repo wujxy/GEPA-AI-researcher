@@ -57,12 +57,11 @@ class DeriveRequirementsTest(unittest.TestCase):
         self.assertTrue(req.cvmfs_required)
         self.assertEqual(req.cvmfs_paths, ["/cvmfs"])
         self.assertFalse(req.is_pure_python)
-        self.assertEqual(req.suggested_base, "docker://almalinux:9")
+        self.assertEqual(req.suggested_base, "docker://alpine:3.20")
         for tool in ("bash", "python", "pytest", "cmake"):
             self.assertIn(tool, req.tools, f"missing detected tool {tool}")
-        # Reference/build-shaped commands do not become runtime entrypoints, but
-        # they do require a generic build bootstrap in the generated image.
-        self.assertEqual(req.image_required_tools, ["bash", "cmake", "make", "gcc", "g++", "git", "python3", "pytest"])
+        # Project tools come from host-runtime passthrough, not inferred image packages.
+        self.assertEqual(req.image_required_tools, ["bash"])
 
     def test_pure_python_project(self):
         resolved = {
@@ -74,8 +73,8 @@ class DeriveRequirementsTest(unittest.TestCase):
         req = derive_requirements(resolved)
         self.assertFalse(req.cvmfs_required)
         self.assertTrue(req.is_pure_python)
-        self.assertEqual(req.suggested_base, "docker://python:3.11-slim")
-        self.assertEqual(req.image_required_tools, ["bash", "python3", "pytest"])
+        self.assertEqual(req.suggested_base, "docker://alpine:3.20")
+        self.assertEqual(req.image_required_tools, ["bash"])
 
     def test_python3_dedups_bare_python(self):
         resolved = {
@@ -112,10 +111,10 @@ class DeriveRequirementsTest(unittest.TestCase):
         req = derive_requirements(resolved)
         self.assertTrue(req.cvmfs_required)
         self.assertIn("cmake", req.tools)
-        self.assertEqual(req.image_required_tools, ["bash", "cmake", "make", "gcc", "g++", "git"])
+        self.assertEqual(req.image_required_tools, ["bash"])
         self.assertEqual(resolved["contracts"]["runtime"], {"setup": [], "check": []})
 
-    def test_pytest_validation_becomes_image_requirement(self):
+    def test_pytest_validation_uses_host_runtime_not_image_packages(self):
         resolved = {
             "task": {"validation_commands": ["python -m pytest tests/test_consistency.py"]},
             "contracts": {"resources": {"accessible_paths": ["/cvmfs/juno.ihep.ac.cn"]}},
@@ -124,53 +123,22 @@ class DeriveRequirementsTest(unittest.TestCase):
         req = derive_requirements(resolved)
 
         self.assertIn("pytest", req.tools)
-        self.assertIn("python3", req.image_required_tools)
-        self.assertIn("pytest", req.image_required_tools)
-        self.assertEqual(
-            ci._packages_for_tools(req.image_required_tools, "docker://almalinux:9"),
-            ["python3", "python3-pytest"],
-        )
-        rpm_runtime = ci._runtime_packages_for_base("docker://almalinux:9")
-        for package in (
-            "bash",
-            "time",
-            "git-lfs",
-            "python-unversioned-command",
-            "python3-pip",
-            "python3-pytest",
-            "rsync",
-            "openssh-clients",
-        ):
-            self.assertIn(package, rpm_runtime)
-        self.assertNotIn("coreutils", rpm_runtime)
-        for project_package in ("libSM", "libX11", "mesa-libGL", "freetype"):
-            self.assertNotIn(project_package, rpm_runtime)
+        self.assertEqual(req.image_required_tools, ["bash"])
 
-        deb_runtime = ci._runtime_packages_for_base("docker://python:3.11-slim")
-        for package in (
-            "bash",
-            "coreutils",
-            "time",
-            "git-lfs",
-            "python-is-python3",
-            "python3-pip",
-            "python3-pytest",
-            "rsync",
-            "openssh-client",
-        ):
-            self.assertIn(package, deb_runtime)
-        for project_package in ("libsm6", "libx11-6", "libgl1", "libfreetype6"):
-            self.assertNotIn(project_package, deb_runtime)
-
-    def test_tool_package_mapping_matches_common_bases(self):
-        tools = ["bash", "cmake", "make", "gcc", "g++", "git", "ninja", "python"]
+    def test_host_runtime_binds_existing_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            usr = root / "usr"
+            lib64 = root / "lib64"
+            usr.mkdir()
+            lib64.mkdir()
+            binds = ci._host_runtime_readonly_binds({"host_runtime_paths": [str(usr), str(lib64), str(root / "missing")], "bind_host_etc": False})
         self.assertEqual(
-            ci._packages_for_tools(tools, "docker://almalinux:9"),
-            ["cmake", "make", "gcc", "gcc-c++", "git", "ninja-build", "python3", "python-unversioned-command"],
-        )
-        self.assertEqual(
-            ci._packages_for_tools(tools, "docker://python:3.11-slim"),
-            ["cmake", "make", "gcc", "g++", "git", "ninja-build", "python3", "python-is-python3"],
+            binds,
+            [
+                {"source": str(usr), "target": str(usr), "mode": "ro"},
+                {"source": str(lib64), "target": str(lib64), "mode": "ro"},
+            ],
         )
 
     def test_explicit_bootstrap_tools_are_image_requirements(self):
@@ -178,7 +146,6 @@ class DeriveRequirementsTest(unittest.TestCase):
             "_runtime_ir": {
                 "executor_image": {
                     "bootstrap_tools": ["bash", "which"],
-                    "extra_packages": ["which"],
                 }
             },
             "runtime": {"allowed_commands": []},
@@ -229,7 +196,7 @@ class BuildSifTest(unittest.TestCase):
                 },
                 clear=False,
             ), patch.object(ci, "_run", side_effect=fake_run):
-                ci._build_sif("docker://almalinux:9", out, extra_packages=["make"])
+                ci._build_sif("docker://alpine:3.20", out)
                 self.assertTrue(out.exists())
 
         for key in ("APPTAINER_BIND", "APPTAINER_BINDPATH", "SINGULARITY_BIND", "SINGULARITY_BINDPATH"):
@@ -458,7 +425,7 @@ class FinalizeRuntimeTest(unittest.TestCase):
             "executor": {"runtime_backend": "apptainer"},
             "_runtime_spec": {
                 "backend": "apptainer",
-                "image": "docker://almalinux:9",
+                "image": "docker://alpine:3.20",
                 "apptainer": {
                     "readonly_binds": [{"source": "/cvmfs", "target": "/cvmfs", "mode": "ro"}],
                 },
@@ -467,8 +434,8 @@ class FinalizeRuntimeTest(unittest.TestCase):
         fake_mat = ImageMaterialization(
             sif_path="/cache/abc.sif",
             fingerprint="abc",
-            base_image="docker://almalinux:9",
-            requirements=Requirements([], False, [], False, "docker://almalinux:9", ["bash"], "claude"),
+            base_image="docker://alpine:3.20",
+            requirements=Requirements([], False, [], False, "docker://alpine:3.20", ["bash"], "claude"),
             claude_bind=ClaudeBind(enabled=True, nvm_node_dir="/n", claude_bin="/n/bin/claude", node_bin="/n/bin/node", container_path_prefix="/n/bin"),
             userns=True,
             derived_readonly_binds=[

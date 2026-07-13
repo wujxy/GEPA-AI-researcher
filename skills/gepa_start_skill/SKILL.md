@@ -305,7 +305,10 @@ the manifest), not the workaround. Common dry-run failures and their fixes:
 
 - **LFS pointer stub** → `git lfs pull` (credential-store a token if needed;
   never commit the token) or regenerate the fixture per the project's bootstrap
-  procedure.
+  procedure. If the fixture is tracked by git but locally materialized in the
+  controller checkout, add it to the project profile under
+  `resources.pre_materialized_lfs_paths`; otherwise new worktrees may silently
+  contain 100-byte pointer stubs even though the controller repo has real files.
 - **Large fixture missing** → bootstrap it per the project's dump/bootstrap
   path, into `assets/`, then verify the bind-mount target.
 - **A dump/bootstrap build is not thread-safe** → use it only for fixture
@@ -471,6 +474,17 @@ source:
   workspace_mode: git_worktree      # per-candidate worktree + commit audit
                                     # or artifact_directory for no source worktree
 
+resources:
+  # Optional but important for Git-LFS fixtures that are tracked in the repo
+  # but materialized locally in the controller checkout. GEPA copies these
+  # real files into every candidate worktree after `git worktree add`.
+  pre_materialized_lfs_paths:
+    - <tests/fixtures/**/*.bin>
+  # Optional tracked outputs the executor may update and GEPA should treat as
+  # generated artifacts rather than source edits, if your task uses them.
+  generated_tracked_paths: []
+  hash_artifacts: []
+
 docs:
   - <../pack/context/<TASK>_OPTIMIZATION_CONTEXT.md>
   - <../pack/context/SEEDS_<TASK>.md>
@@ -519,8 +533,8 @@ isolation:
     containall: false
     writable_tmpfs: true
     auto_init_claude_home: true
-    # base_image: docker://almalinux:9   # optional override for auto materialization
-    # extra_packages: []                 # optional image packages
+    # base_image: docker://alpine:3.20   # optional thin boot image override
+    # host_runtime_paths: []             # optional override; defaults to host /usr,/lib*,/bin,/sbin,/cvmfs
 
 agent:
   command: claude
@@ -551,8 +565,9 @@ A few non-obvious rules the schema enforces:
   repair retries, selection policy, pass threshold, and safety policy are the
   knobs that control system evolution. Keep them in the task file.
 - `reference.commands` replaces old `environment.setup/check`, `runtime.setup/check`,
-  `build.commands`, `allowed_commands`, and image-package inference. Migration
-  maps old command lists into reference commands only.
+  `build.commands`, `allowed_commands`, and old image package inference. Migration
+  maps old command lists into reference commands only; GEPA does not chase
+  project packages.
 - Role contracts: the **proposer** sees objective/metric/resources/safety/runtime
   + prior context + feedback + reference context; the **executor** adds
   validation; the **judger** sees objective/metric/validation. `agent.*` is
@@ -571,14 +586,16 @@ starting the loop:
 - `--no-materialize` skips image preparation for `run`/`validate`, mostly for
   debugging schema-only resolution.
 - If `isolation.image` is set to a local `.sif`, GEPA uses it.
-- If `isolation.image` is omitted, GEPA derives a thin image from the project:
-  `docker://almalinux:9` for CVMFS/build-tool projects, `docker://python:3.11-slim`
-  for pure Python, unless `isolation.apptainer.base_image` overrides it.
-- GEPA binds repo, artifacts, scratch/tmp, a per-execution Claude home, docs,
-  `provided_paths`, `repo_overlays`, and the host Claude/NVM directory when
-  needed. It also rewrites the executor command to the in-container absolute
-  Claude path and injects the needed PATH prefix.
-- GEPA does not infer project package installs from reference command strings.
+- If `isolation.image` is omitted, GEPA materializes a thin boot image
+  (`docker://alpine:3.20` by default, unless `isolation.apptainer.base_image`
+  overrides it).
+- GEPA binds the host runtime read-only (`/usr`, `/lib`, `/lib64`, `/bin`,
+  `/sbin`, selected runtime `/etc` paths, and `/cvmfs` when present), plus repo,
+  artifacts, scratch/tmp, a per-execution Claude home, docs, `provided_paths`,
+  `repo_overlays`, and the host Claude/NVM directory when needed. It also
+  rewrites the executor command to the in-container absolute Claude path and
+  injects the needed PATH prefix.
+- GEPA does not infer or install project packages from reference command strings.
 
 Apptainer profile shape:
 
@@ -594,8 +611,8 @@ isolation:
     writable_tmpfs: true
     auto_init_claude_home: true
     # userns: true                 # GEPA auto-detects when needed unless pinned
-    # base_image: docker://almalinux:9
-    # extra_packages: []
+    # base_image: docker://alpine:3.20
+    # host_runtime_paths: []       # override only if the site has a custom runtime root
     # readonly_binds: []
     # extra_binds: []
 ```
@@ -681,5 +698,6 @@ insufficient — go back and re-dry-run, do not raise the budget.
   the validation config (2.2); `no_metrics` → the metric command/noise (1.4 #5).
 
 The reference pack at `omilrec_opt/omilrec-br111-executor-pack/` and the
-templates at `GEPA-AI-researcher/examples/omilrec/` are one concrete instance
-of this entire skill — read them to see the shape, then generalize.
+canonical local/Apptainer examples at `GEPA-AI-researcher/examples/omilrec/`
+are one concrete instance of this entire skill — read them to see the shape,
+then generalize.

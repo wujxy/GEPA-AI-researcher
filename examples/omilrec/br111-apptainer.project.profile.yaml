@@ -1,0 +1,96 @@
+kind: project_profile
+name: omilrec-br111-clean-package
+
+source:
+  path: ../../../omilrec-br111-executor-pack-apptainer/repo
+  default_ref: ff71809b81c6c887a276a14c29b4f86296f27571
+  workspace_mode: git_worktree
+
+resources:
+  pre_materialized_lfs_paths:
+    - tests/fixtures/v107_rev1/*.bin
+
+docs:
+  - ../../../omilrec-br111-executor-pack-apptainer/context/BR111_OPTIMIZATION_CONTEXT.md
+  - ../../../omilrec-br111-executor-pack-apptainer/context/SEEDS_BR111.md
+  - ../../../omilrec-br111-executor-pack-apptainer/context/SOURCE_INVENTORY_BR111.json
+  - ../../../omilrec-br111-executor-pack-apptainer/manifest.json
+  - ../../../omilrec-br111-executor-pack-apptainer/repo/README.md
+  - ../../../omilrec-br111-executor-pack-apptainer/repo/CLAUDE.md
+
+provided_paths:
+  - path: /cvmfs/juno.ihep.ac.cn/el9_amd64_gcc11/Release/J26.1.1
+    mode: ro
+    role: environment
+    note: JUNO J26.1.1 EL9/GCC11 runtime environment. User guarantees this path is sufficient with the project docs to run OMILREC.
+  - path: /data/juno/dingxf/inputs
+    mode: ro
+    role: input_data
+  - path: /data/juno/dingxf/OMILREC_maps
+    mode: ro
+    role: resource_pack
+  - path: ../../../omilrec-br111-executor-pack-apptainer/repo/benchmarks/speed.csv
+    mode: ro
+    role: baseline_data
+  - path: ../../../omilrec-br111-executor-pack-apptainer/repo/benchmarks/drift.csv
+    mode: ro
+    role: baseline_data
+
+reference:
+  commands:
+    - source /cvmfs/juno.ihep.ac.cn/el9_amd64_gcc11/Release/J26.1.1/setup.sh
+    - source InstallArea/setup.sh
+    - cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_UNIT_TESTS=ON
+    - cmake --build build --target install --parallel
+    - cmake --build build --target test_fcn --parallel
+    - OMILRECV2_BENCH_INPUT=/data/juno/dingxf/inputs/index_12628_rtraw_1.json OMILRECV2_BENCH_RECMAP=/data/juno/dingxf/OMILREC_maps bash scripts/quick_bench.sh --evtmax 100
+    - ./build/bin/test_fcn.exe
+    - python scripts/diff_drift.py
+  note: These commands are user-provided references for the executor. GEPA must not auto-execute them or treat them as mandatory setup/preflight.
+
+repo_overlays:
+  - source: ../../../omilrec-br111-executor-pack-apptainer/assets/fixtures/time_pdf.bin
+    target: TEMP/fixtures/time_pdf.bin
+    mode: ro
+    purpose: fixture
+
+skills:
+  - omilrec-br111-opt-flow
+  - OMILREC-dev-guide
+  - reproduce-OMILREC-reference-fit
+
+isolation:
+  backend: apptainer
+  mode: bind_paths
+  # image is optional. If omitted, GEPA uses a thin executor image and binds
+  # the host runtime plus provided_paths; it does not chase project packages.
+  # image: /abs/path/omilrec-executor.sif
+  apptainer:
+    executable: apptainer
+    cleanenv: false
+    containall: false
+    writable_tmpfs: true
+    auto_init_claude_home: true
+
+agent:
+  command: claude
+  timeout_seconds: 3600
+  extra_args:
+    - --permission-mode
+    - acceptEdits
+    - --allowedTools
+    - Read,Edit,Write,Glob,Grep,Bash
+
+safety:
+  editable_paths:
+    - OMILRECV2/src/**/*.cc
+    - OMILRECV2/src/**/*.h
+  frozen_paths:
+    - tests/**
+    - scripts/**
+    - CMakeLists.txt
+    - pyproject.toml
+    - .gitattributes
+    - benchmarks/*.md
+  max_files_per_candidate: 3
+  max_commits_per_candidate: 1

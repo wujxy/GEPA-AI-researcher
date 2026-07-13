@@ -154,6 +154,7 @@ class AgentComponentsTest(unittest.TestCase):
         self.assertIn("Visual evidence", prompt)
         self.assertIn("artifact_paths", prompt)
         self.assertIn("candidate's visual evidence plan", prompt)
+        self.assertIn("host-runtime passthrough plus provided paths", prompt)
 
     def test_agent_proposer_requests_candidate_batch(self):
         client = CapturingClient(
@@ -592,6 +593,11 @@ class AgentComponentsTest(unittest.TestCase):
         self.assertIn("final response MUST be exactly one parseable JSON object", prompt)
         self.assertIn("NEVER return a judgement report in Markdown", prompt)
         self.assertIn("Markdown table", prompt)
+        self.assertIn("comparing the executor evidence against the user's stated task goal", prompt)
+        self.assertIn("Do not assign 1.0 merely because all gates are green", prompt)
+        self.assertIn("0.95-1.00: exceptional / exceeds goal", prompt)
+        self.assertIn("0.50-0.60: barely useful / noisy or marginal", prompt)
+        self.assertIn("duplicate with no new value", prompt)
         self.assertNotIn("expected_gain", prompt)
         self.assertNotIn("EXPECTED_IMPROVEMENT_SHOULD_NOT_APPEAR", prompt)
         self.assertNotIn("PRIOR_SHOULD_NOT_APPEAR", prompt)
