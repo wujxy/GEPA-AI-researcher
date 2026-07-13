@@ -5,8 +5,8 @@ from typing import Any
 
 
 ROLE_FIELDS = {
-    "proposer": ("objective", "metric", "resources", "safety", "runtime"),
-    "executor": ("objective", "metric", "validation", "resources", "safety", "runtime"),
+    "proposer": ("objective", "metric", "resources", "reference", "safety", "runtime"),
+    "executor": ("objective", "metric", "validation", "resources", "reference", "safety", "runtime"),
     "judger": ("objective", "metric", "validation"),
 }
 

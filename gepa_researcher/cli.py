@@ -16,15 +16,9 @@ def _add_config_argument(parser: argparse.ArgumentParser) -> None:
 
 
 def _should_materialize(args: argparse.Namespace) -> bool:
-    """Whether auto image-materialization may run for this subcommand.
-
-    run/validate materialize by default (opt out with --no-materialize);
-    resolve/explain are pure inspection tools and only materialize with --materialize;
-    setup-apptainer owns its own materialization in _setup_apptainer.
-    """
     command = getattr(args, "command", None)
     if command in ("run", "validate"):
-        return not getattr(args, "no_materialize", False)
+        return not bool(getattr(args, "no_materialize", False))
     if command in ("resolve", "explain"):
         return getattr(args, "materialize", False)
     return False
@@ -38,8 +32,6 @@ def _resolve(args: argparse.Namespace) -> tuple[Path, dict]:
         run_dir=run_dir,
         resume=bool(getattr(args, "resume", False)),
     )
-    # Lazy Apptainer image materialization: derives requirements from the resolved
-    # config, builds/reuses a thin SIF, and merges image path + binds + userns.
     if (
         _should_materialize(args)
         and resolved.get("executor", {}).get("runtime_backend") == "apptainer"
@@ -160,14 +152,16 @@ def _print_doctor_report(report: dict) -> None:
 def _setup_apptainer(args: argparse.Namespace) -> int:
     config_path, config = _resolve(args)
     exec_cfg = config.get("executor", {})
+    runtime_spec = config.get("_runtime_spec") or {}
     if exec_cfg.get("runtime_backend") != "apptainer":
         print("execution.runtime_backend is not 'apptainer'; nothing to materialize.")
         return 0
+    apptainer_cfg = dict(runtime_spec.get("apptainer") or {})
     if getattr(args, "no_materialize", False):
         from .execution.container_image import doctor_runtime
         report = doctor_runtime(
-            exec_cfg.get("apptainer", {}),
-            agent_command=str((config.get("agent") or {}).get("command") or "claude"),
+            apptainer_cfg,
+            agent_command=str(runtime_spec.get("command") or (config.get("agent") or {}).get("command") or "claude"),
             allow_install=bool(getattr(args, "install", False)),
             check_apptainer=True,
         )
@@ -175,13 +169,11 @@ def _setup_apptainer(args: argparse.Namespace) -> int:
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0 if report.get("ok") else 1
     from .execution.container_image import _probe_host_runtime, ensure_apptainer, materialize_executor_image
-    discovery = ensure_apptainer(exec_cfg.get("apptainer", {}), allow_install=bool(getattr(args, "install", False)))
+    discovery = ensure_apptainer(apptainer_cfg, allow_install=bool(getattr(args, "install", False)))
     apptainer_exe = str(discovery.executable)
-    config["executor"].setdefault("apptainer", {})["executable"] = apptainer_exe
+    runtime_spec.setdefault("apptainer", {})["executable"] = apptainer_exe
     host_probe = _probe_host_runtime(apptainer_exe)
     mat = materialize_executor_image(config, force=bool(args.force), host_probe=host_probe)
-    # Reflect the materialized image back into the resolved config view.
-    config["executor"]["apptainer"]["image"] = mat.sif_path
     print(f"Apptainer executor image ready: {mat.sif_path}")
     print(json.dumps(mat.diagnostics, ensure_ascii=False, indent=2))
     return 0
@@ -198,7 +190,7 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--no-materialize",
         action="store_true",
-        help="Do not auto-build/reuse the Apptainer executor image (schema-only resolve).",
+        help="Skip Apptainer executor image materialization before starting the loop.",
     )
 
     validate = subparsers.add_parser("validate", help="Validate and resolve without creating a run.")
@@ -206,7 +198,7 @@ def _build_parser() -> argparse.ArgumentParser:
     validate.add_argument(
         "--no-materialize",
         action="store_true",
-        help="Do not auto-build/reuse the Apptainer executor image (schema-only validate).",
+        help="Skip Apptainer executor image materialization during validation.",
     )
 
     resolve = subparsers.add_parser("resolve", help="Print or save the resolved configuration.")

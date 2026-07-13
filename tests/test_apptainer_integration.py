@@ -89,7 +89,6 @@ class ApptainerIntegrationTest(unittest.TestCase):
 
     def _runtime_config(self, image: Path, apptainer: Path, *, command: str = "python", mounts=None, env_pass=None, env_set=None, **apptainer_overrides):
         apptainer_cfg = {
-            "image": str(image),
             "executable": str(apptainer),
             "cleanenv": True,
             "containall": True,
@@ -98,15 +97,16 @@ class ApptainerIntegrationTest(unittest.TestCase):
         apptainer_cfg.update(apptainer_overrides)
         return {
             "executor": {"runtime_backend": "apptainer"},
-            "_runtime_ir": {
+            "_runtime_spec": {
                 "backend": "apptainer",
+                "image": str(image),
                 "workdir": "/workspace/repo",
                 "command": command,
-                "append_agent_args": True,
                 "env": {"pass": list(env_pass or []), "set": dict(env_set or {})},
-                "init": [],
-                "preflight": [],
+                "setup": [],
+                "check": [],
                 "mounts": list(mounts or []),
+                "tools": [],
                 "apptainer": apptainer_cfg,
             },
         }

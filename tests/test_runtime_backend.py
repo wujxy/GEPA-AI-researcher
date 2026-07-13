@@ -63,11 +63,12 @@ def _apptainer_config(root: Path, image: Path, apptainer: Path, readonly: Path |
             "mode": "ro",
         })
     apptainer_cfg = {
-        "image": str(image),
         "executable": str(apptainer),
-        "cleanenv": True,
-        "containall": True,
+        "cleanenv": False,
+        "containall": False,
         "writable_tmpfs": True,
+        "userns": True,
+        "auto_init_claude_home": True,
     }
     apptainer_cfg.update(apptainer_overrides)
     return {
@@ -77,18 +78,19 @@ def _apptainer_config(root: Path, image: Path, apptainer: Path, readonly: Path |
             # Stale legacy values should be ignored by ApptainerRuntimeBackend.
             "apptainer": {"command": "legacy-command", "env_allowlist": ["SECRET_TEST"]},
         },
-        "_runtime_ir": {
+        "_runtime_spec": {
             "backend": "apptainer",
+            "image": str(image),
             "workdir": "/workspace/repo",
             "command": "claude-in-container",
-            "append_agent_args": True,
             "env": {"pass": ["GEPA_ALLOW_TEST"], "set": {"STATIC_ENV": "1"}},
-            "init": [
+            "setup": [
                 {"op": "source", "path": "/cvmfs/juno/setup.sh", "required": True},
                 {"op": "source", "path": "InstallArea/setup.sh", "base": "workdir", "required": False},
             ],
-            "preflight": [{"name": "check-1", "command": "which gcc", "required": True}],
+            "check": [{"name": "check-1", "command": "which gcc", "required": True}],
             "mounts": mounts,
+            "tools": ["bash"],
             "apptainer": apptainer_cfg,
         },
     }
@@ -141,8 +143,8 @@ class RuntimeBackendTest(unittest.TestCase):
             self.assertTrue((Path(runtime.artifacts["host_home"]) / "auth.json").exists())
             self.assertTrue((Path(runtime.artifacts["host_scratch"]) / "tmp").is_dir())
             joined = "\n".join(runtime.command_prefix)
-            self.assertIn("--cleanenv", runtime.command_prefix)
-            self.assertIn("--containall", runtime.command_prefix)
+            self.assertNotIn("--cleanenv", runtime.command_prefix)
+            self.assertNotIn("--containall", runtime.command_prefix)
             self.assertIn("--env", runtime.command_prefix)
             self.assertIn("GEPA_WORKTREE=/workspace/repo", runtime.command_prefix)
             self.assertIn("GEPA_ARTIFACTS=/workspace/artifacts", runtime.command_prefix)
@@ -160,10 +162,14 @@ class RuntimeBackendTest(unittest.TestCase):
             self.assertIn(f"{readonly}:/workspace/repo/TEMP/fixtures/time_pdf.bin:ro", joined)
             self.assertIn(f"{readonly}:/readonly/fixture.bin:ro", joined)
             self.assertIn(f"{root}:/extra:rw", joined)
-            self.assertIn("gepa-runtime", runtime.command_prefix)
+            self.assertIn("/usr/bin/env", runtime.command_prefix)
+            self.assertIn("bash", runtime.command_prefix)
+            self.assertNotIn("-lc", runtime.command_prefix)
             self.assertIn('exec "$@"', runtime.artifacts["runtime_shell"])
             self.assertNotIn("host_launcher", runtime.artifacts)
-            self.assertFalse(any(path.suffix == ".sh" for path in Path(runtime.artifacts["host_artifacts"]).iterdir()))
+            entrypoint = Path(runtime.artifacts["runtime_entrypoint_host"])
+            self.assertTrue(entrypoint.exists())
+            self.assertEqual(runtime.command_prefix[-3:], ["/usr/bin/env", "bash", runtime.artifacts["runtime_entrypoint_container"]])
 
     def test_apptainer_backend_redacts_environment_values_in_to_dict(self):
         """Security: Verify environment variable values are redacted in to_dict()"""
@@ -304,7 +310,7 @@ class RuntimeBackendTest(unittest.TestCase):
             self.assertIn("home", runtime.command_prefix)
 
 
-    def test_apptainer_backend_uses_runtime_ir_inline_wrapper(self):
+    def test_apptainer_backend_uses_runtime_spec_entrypoint_wrapper(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             image = root / "executor.sif"
@@ -318,14 +324,59 @@ class RuntimeBackendTest(unittest.TestCase):
             runtime = ApptainerRuntimeBackend(root, config).prepare(_candidate(), lease, _record())
 
             self.assertEqual(runtime.command, "claude-in-container")
-            self.assertEqual(runtime.command_prefix[-5:-1], ["/usr/bin/env", "bash", "-lc", runtime.artifacts["runtime_shell"]])
-            self.assertEqual(runtime.command_prefix[-1], "gepa-runtime")
+            self.assertEqual(runtime.command_prefix[-3:], ["/usr/bin/env", "bash", runtime.artifacts["runtime_entrypoint_container"]])
+            self.assertNotIn("-lc", runtime.command_prefix)
+            entrypoint = Path(runtime.artifacts["runtime_entrypoint_host"])
+            self.assertTrue(entrypoint.exists())
+            self.assertEqual(entrypoint.read_text(encoding="utf-8"), runtime.artifacts["runtime_shell"] + "\n")
             shell = runtime.artifacts["runtime_shell"]
             self.assertIn("cd /workspace/repo", shell)
             self.assertIn("source /cvmfs/juno/setup.sh", shell)
             self.assertIn("if [ -f InstallArea/setup.sh ]; then source InstallArea/setup.sh", shell)
             self.assertIn("which gcc", shell)
             self.assertIn('exec "$@"', shell)
+
+
+    def test_apptainer_backend_accepts_docker_uri_image(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            apptainer = root / "apptainer"
+            apptainer.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            os.chmod(apptainer, 0o755)
+            config = _apptainer_config(root, root / "unused.sif", apptainer)
+            config["_runtime_spec"]["image"] = "docker://almalinux:9"
+
+            runtime = ApptainerRuntimeBackend(root, config).prepare(_candidate(), _lease(root), _record())
+
+            self.assertIn("docker://almalinux:9", runtime.command_prefix)
+
+    def test_apptainer_backend_dedupes_binds_by_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image = root / "executor.sif"
+            image.write_text("image", encoding="utf-8")
+            apptainer = root / "apptainer"
+            apptainer.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            os.chmod(apptainer, 0o755)
+            readonly = root / "fixture.bin"
+            readonly.write_text("fixture", encoding="utf-8")
+            target = "/workspace/repo/TEMP/fixtures/time_pdf.bin"
+            config = _apptainer_config(
+                root,
+                image,
+                apptainer,
+                readonly=readonly,
+                readonly_binds=[{"source": str(readonly), "target": target, "mode": "ro"}],
+            )
+
+            runtime = ApptainerRuntimeBackend(root, config).prepare(_candidate(), _lease(root), _record())
+
+            bind_values = [
+                runtime.command_prefix[index + 1]
+                for index, item in enumerate(runtime.command_prefix[:-1])
+                if item == "--bind"
+            ]
+            self.assertEqual(sum(1 for value in bind_values if f":{target}:" in value), 1)
 
     def test_apptainer_backend_fails_without_image(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -335,7 +386,7 @@ class RuntimeBackendTest(unittest.TestCase):
             os.chmod(apptainer, 0o755)
             config = _apptainer_config(root, root / "missing.sif", apptainer)
 
-            with self.assertRaisesRegex(RuntimeBackendError, "image does not exist"):
+            with self.assertRaisesRegex(RuntimeBackendError, "isolation.image resolved path does not exist"):
                 ApptainerRuntimeBackend(root, config).prepare(_candidate(), _lease(root), _record())
 
 

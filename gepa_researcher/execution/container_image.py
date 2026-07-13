@@ -27,8 +27,10 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
+import tempfile
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -61,6 +63,8 @@ class Requirements:
     suggested_base: str
     image_required_tools: list[str]  # subset the IMAGE itself must provide
     claude_command: str
+    accessible_paths: list[str] = field(default_factory=list)
+    writable_paths: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -81,6 +85,7 @@ class ImageMaterialization:
     claude_bind: ClaudeBind
     userns: bool
     derived_readonly_binds: list[dict] = field(default_factory=list)
+    derived_extra_binds: list[dict] = field(default_factory=list)
     derived_env_allowlist: list[str] = field(default_factory=list)
     diagnostics: dict = field(default_factory=dict)
 
@@ -123,31 +128,92 @@ _PURE_PYTHON_OK = {"python3", "python", "pytest", "bash", "git"}
 def _collect_command_strings(resolved_config: dict) -> list[str]:
     """All command strings that the executor may run, from the resolved config."""
     runtime = resolved_config.get("runtime") or {}
+    runtime_ir = resolved_config.get("_runtime_spec") or resolved_config.get("_runtime_ir") or {}
     commands: list[str] = list(runtime.get("allowed_commands") or [])
     python_cmd = runtime.get("python_command")
     if python_cmd:
         commands.append(str(python_cmd))
-    # Defense in depth: also pull setup + benchmark + validation from contracts/task.
+
+    def add_runtime_commands(runtime_section: dict) -> None:
+        for item in list(runtime_section.get("init") or []) + list(runtime_section.get("setup") or []):
+            if isinstance(item, dict):
+                if item.get("command"):
+                    commands.append(str(item["command"]))
+                elif item.get("path"):
+                    commands.append(str(item["path"]))
+            else:
+                commands.append(str(item))
+        for item in list(runtime_section.get("preflight") or []) + list(runtime_section.get("check") or []):
+            if isinstance(item, dict) and item.get("command"):
+                commands.append(str(item["command"]))
+            elif item:
+                commands.append(str(item))
+        commands.extend(runtime_section.get("setup_commands") or [])
+
     contracts = resolved_config.get("contracts") or {}
-    commands.extend((contracts.get("runtime") or {}).get("setup_commands") or [])
+    add_runtime_commands(contracts.get("runtime") or {})
+    add_runtime_commands(runtime)
+    add_runtime_commands(runtime_ir)
     commands.extend((resolved_config.get("task") or {}).get("benchmark_commands") or [])
     commands.extend((resolved_config.get("task") or {}).get("validation_commands") or [])
+    commands.extend(((resolved_config.get("contracts") or {}).get("build") or {}).get("commands") or [])
     return [str(item) for item in commands if item]
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    return list(dict.fromkeys(str(item) for item in items if str(item)))
+
+
+def _collect_accessible_paths(resolved_config: dict) -> list[str]:
+    contracts = resolved_config.get("contracts") or {}
+    resources = contracts.get("resources") or {}
+    return _dedupe([str(item) for item in resources.get("accessible_paths") or [] if item])
+
+
+def _collect_writable_paths(resolved_config: dict) -> list[str]:
+    contracts = resolved_config.get("contracts") or {}
+    resources = contracts.get("resources") or {}
+    return _dedupe([str(item) for item in resources.get("writable_paths") or [] if item])
+
+
+def _collect_executor_image(resolved_config: dict) -> dict[str, Any]:
+    runtime_ir = resolved_config.get("_runtime_spec") or resolved_config.get("_runtime_ir") or {}
+    image = dict(runtime_ir.get("executor_image") or {})
+    apptainer = dict(runtime_ir.get("apptainer") or ((resolved_config.get("executor") or {}).get("apptainer") or {}))
+    if runtime_ir.get("image") and not image.get("base_image"):
+        image["base_image"] = runtime_ir["image"]
+    if apptainer.get("base_image") and not image.get("base_image"):
+        image["base_image"] = apptainer["base_image"]
+    image["bootstrap_tools"] = _dedupe(
+        list(image.get("bootstrap_tools") or []) + list(runtime_ir.get("tools") or []) + list(apptainer.get("bootstrap_tools") or [])
+    )
+    image["extra_packages"] = _dedupe(
+        list(image.get("extra_packages") or []) + list(apptainer.get("extra_packages") or [])
+    )
+    return image
 
 
 def derive_requirements(resolved_config: dict) -> Requirements:
     """Derive image requirements from the resolved config (pure)."""
-    blob = "\n".join(_collect_command_strings(resolved_config))
+    command_blob = "\n".join(_collect_command_strings(resolved_config))
+    accessible_paths = _collect_accessible_paths(resolved_config)
+    writable_paths = _collect_writable_paths(resolved_config)
+    executor_image = _collect_executor_image(resolved_config)
+    explicit_bootstrap_tools = list(executor_image.get("bootstrap_tools") or [])
+    blob = "\n".join([command_blob, *accessible_paths, *writable_paths, *explicit_bootstrap_tools])
     tools: list[str] = []
     for name, pattern in _TOOL_PATTERNS.items():
         if re.search(pattern, blob):
             tools.append(name)
+    tools = _dedupe(tools + explicit_bootstrap_tools)
     # Drop the bare 'python' token if 'python3' is present (avoid double counting).
     if "python3" in tools and "python" in tools:
         tools.remove("python")
 
-    cvmfs_required = "/cvmfs/" in blob
-    cvmfs_paths = ["/cvmfs"] if cvmfs_required else []
+    cvmfs_paths = sorted({"/cvmfs" for item in accessible_paths if item == "/cvmfs" or item.startswith("/cvmfs/")})
+    cvmfs_required = bool(cvmfs_paths) or "/cvmfs/" in command_blob
+    if cvmfs_required and not cvmfs_paths:
+        cvmfs_paths = ["/cvmfs"]
 
     has_build_tools = bool(_BUILD_TOOLS & set(tools))
     is_pure_python = (
@@ -163,9 +229,9 @@ def derive_requirements(resolved_config: dict) -> Requirements:
 
     # What the IMAGE itself must provide. CVMFS supplies the compiler/python stack;
     # pure-python images must ship python3. bash is always required.
-    image_required_tools = ["bash"]
+    image_required_tools = _dedupe(["bash"] + explicit_bootstrap_tools)
     if is_pure_python:
-        image_required_tools.append("python3")
+        image_required_tools = _dedupe(image_required_tools + ["python3"])
 
     agent_command = str((resolved_config.get("agent") or {}).get("command") or "claude")
     return Requirements(
@@ -176,6 +242,8 @@ def derive_requirements(resolved_config: dict) -> Requirements:
         suggested_base=suggested_base,
         image_required_tools=image_required_tools,
         claude_command=agent_command,
+        accessible_paths=accessible_paths,
+        writable_paths=writable_paths,
     )
 
 
@@ -295,7 +363,7 @@ def _install_user_apptainer(command: str) -> tuple[bool, str | None]:
 
     GEPA intentionally does not guess a distro package-manager command. Sites that
     want a fully hands-off first run can provide a pinned install script/command via
-    ``execution.apptainer.install_command`` or ``GEPA_APPTAINER_INSTALL_COMMAND``.
+    ``isolation.apptainer.install_command`` or ``GEPA_APPTAINER_INSTALL_COMMAND``.
     """
     try:
         result = subprocess.run(
@@ -381,8 +449,8 @@ def ensure_apptainer(apptainer_cfg: dict | None = None, *, allow_install: bool =
         "Apptainer runtime was not found.",
         "GEPA checked:",
         *[f"  - {item}" for item in discovery.attempted],
-        "Install Apptainer, set execution.apptainer.executable, set GEPA_APPTAINER, "
-        "or provide execution.apptainer.install_command / GEPA_APPTAINER_INSTALL_COMMAND "
+        "Install Apptainer, set isolation.apptainer.executable, set GEPA_APPTAINER, "
+        "or provide isolation.apptainer.install_command / GEPA_APPTAINER_INSTALL_COMMAND "
         "for a pinned user-mode installer.",
     ]
     if discovery.install_error:
@@ -418,7 +486,7 @@ def doctor_runtime(
     recommendations: list[str] = []
     if check_apptainer and not discovery.executable:
         recommendations.append(
-            "Install Apptainer, set GEPA_APPTAINER, set execution.apptainer.executable, "
+            "Install Apptainer, set GEPA_APPTAINER, set isolation.apptainer.executable, "
             "or provide a pinned install_command."
         )
         if install_hook and not allow_install:
@@ -500,28 +568,85 @@ def _probe_host_runtime(apptainer: str, *, tiny: str = _DEFAULT_TINY) -> dict:
     return result
 
 
-def _build_sif(base: str, out: Path, *, apptainer: str = "apptainer", timeout: int = 1200) -> None:
+def _build_sif(
+    base: str,
+    out: Path,
+    *,
+    apptainer: str = "apptainer",
+    timeout: int = 1200,
+    extra_packages: list[str] | None = None,
+) -> None:
     """Build a SIF from an OCI base without Docker. Atomic rename on success."""
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp_out = out.with_suffix(out.suffix + f".tmp.{os.getpid()}")
     if tmp_out.exists():
         tmp_out.unlink()
-    result = _run([apptainer, "build", str(tmp_out), base], timeout=timeout)
+    packages = _dedupe([str(pkg) for pkg in (extra_packages or []) if str(pkg).strip()])
+    build_source = base
+    recipe_path: Path | None = None
+    if packages:
+        recipe_path = _write_package_recipe(base, packages)
+        build_source = str(recipe_path)
+    result = _run([apptainer, "build", str(tmp_out), build_source], timeout=timeout)
+    if recipe_path is not None:
+        try:
+            recipe_path.unlink()
+        except OSError:
+            pass
     if result.returncode != 0 or not tmp_out.exists():
         try:
             tmp_out.unlink()
         except OSError:
             pass
+        package_note = f" with packages {', '.join(packages)}" if packages else ""
         raise MaterializationError(
             "Failed to build Apptainer image.\n"
-            f"  Command: {apptainer} build {tmp_out} {base}\n"
+            f"  Command: {apptainer} build {tmp_out} {build_source}\n"
+            f"  Base: {base}{package_note}\n"
             f"  stderr:\n{_stderr_tail(result.stderr)}\n"
-            "Mitigation: pre-build the image yourself (`apptainer build out.sif "
-            f"{base}`), point execution.apptainer.image at it, and set "
-            "execution.apptainer.auto_image: false."
+            "Mitigation: pre-build the image yourself, point isolation.image at it, "
+            "or set isolation.apptainer.base_image to a base with a supported package manager."
         )
     os.replace(tmp_out, out)
 
+
+def _write_package_recipe(base: str, packages: list[str]) -> Path:
+    if not base.startswith("docker://"):
+        raise MaterializationError(
+            "Apptainer package installation requires a docker:// base image. "
+            "Pre-build a custom image and set isolation.image when using another base type."
+        )
+    from_image = base.removeprefix("docker://")
+    package_args = " ".join(shlex.quote(pkg) for pkg in packages)
+    recipe = f"""Bootstrap: docker
+From: {from_image}
+
+%post
+    set -eu
+    if command -v dnf >/dev/null 2>&1; then
+        dnf install -y {package_args}
+        dnf clean all
+    elif command -v microdnf >/dev/null 2>&1; then
+        microdnf install -y {package_args}
+        microdnf clean all
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y {package_args}
+        yum clean all
+    elif command -v apt-get >/dev/null 2>&1; then
+        apt-get update
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends {package_args}
+        rm -rf /var/lib/apt/lists/*
+    else
+        echo "No supported package manager found to install: {package_args}" >&2
+        exit 1
+    fi
+"""
+    handle = tempfile.NamedTemporaryFile("w", suffix=".def", prefix="gepa-apptainer-", delete=False, encoding="utf-8")
+    try:
+        handle.write(recipe)
+        return Path(handle.name)
+    finally:
+        handle.close()
 
 def _claude_auth_diagnostics() -> dict[str, Any]:
     home = Path.home()
@@ -543,12 +668,24 @@ def _probe_tools(
     *,
     userns: bool,
     apptainer: str,
+    readonly_binds: list | None = None,
+    extra_binds: list | None = None,
 ) -> dict:
     """Validate the built image can actually run the required tools + claude."""
     diagnostics: dict[str, Any] = {"tools": {}, "claude": None, "claude_auth": None, "warnings": []}
     base_argv = [apptainer, "exec"]
     if userns:
         base_argv.append("--userns")
+    for item in list(readonly_binds or []) + list(extra_binds or []):
+        if isinstance(item, str):
+            base_argv += ["--bind", item]
+            continue
+        if isinstance(item, dict):
+            source = str(item.get("source"))
+            target = str(item.get("target") or source)
+            mode = str(item.get("mode") or "ro")
+            if source and target:
+                base_argv += ["--bind", f"{source}:{target}:{mode}"]
     if claude_bind.enabled and claude_bind.nvm_node_dir:
         base_argv += ["--bind", f"{claude_bind.nvm_node_dir}:{claude_bind.nvm_node_dir}:ro"]
 
@@ -558,14 +695,22 @@ def _probe_tools(
     desired_extra = ["git"] if "git" not in strict_tools else []
 
     for tool in strict_tools + desired_extra:
-        probe_argv = base_argv + [str(sif), tool, "--version"]
-        result = _run(probe_argv, timeout=60)
-        entry = {
-            "ok": result.returncode == 0,
-            "version": (result.stdout or result.stderr).strip().splitlines()[0]
-            if (result.returncode == 0 and (result.stdout or result.stderr).strip())
-            else "",
-        }
+        tool_q = shlex.quote(tool)
+        if tool == "which":
+            check = "which bash >/dev/null"
+        elif tool.startswith("/"):
+            check = f"test -x {tool_q} && printf '%s\n' {tool_q}"
+        else:
+            check = f"command -v -- {tool_q}"
+        result = _run(base_argv + [str(sif), "/usr/bin/env", "bash", "-lc", check], timeout=60)
+        ok = result.returncode == 0
+        version = ""
+        if ok:
+            version_cmd = f"({tool_q} --version || {tool_q} -V || true) 2>&1"
+            version_result = _run(base_argv + [str(sif), "/usr/bin/env", "bash", "-lc", version_cmd], timeout=60)
+            version_text = (version_result.stdout or version_result.stderr or "").strip()
+            version = version_text.splitlines()[0] if version_text else ""
+        entry = {"ok": ok, "version": version}
         diagnostics["tools"][tool] = entry
         if tool in desired_extra and not entry["ok"]:
             diagnostics["warnings"].append(
@@ -604,8 +749,8 @@ def _probe_tools(
     if missing_strict:
         raise MaterializationError(
             "Built image is missing required tool(s): "
-            f"{', '.join(missing_strict)}. Use execution.apptainer.base_image to pick a "
-            "base that includes them."
+            f"{', '.join(missing_strict)}. Use isolation.apptainer.base_image or "
+            "isolation.image to pick a base that includes them."
         )
     if not diagnostics["claude"]["ok"]:
         raise MaterializationError(
@@ -640,14 +785,15 @@ def materialize_executor_image(
     host_probe: dict | None = None,
 ) -> ImageMaterialization:
     """Build (or reuse) the executor SIF and validate it. Returns the materialization."""
-    apptainer_cfg = (resolved_config.get("executor") or {}).get("apptainer") or {}
+    runtime_spec = resolved_config.get("_runtime_spec") or resolved_config.get("_runtime_ir") or {}
+    apptainer_cfg = dict(runtime_spec.get("apptainer") or ((resolved_config.get("executor") or {}).get("apptainer") or {}))
     discovery = ensure_apptainer(apptainer_cfg)
     apptainer_exe = str(discovery.executable)
 
     req = derive_requirements(resolved_config)
     claude_bind = resolve_claude_bind(req.claude_command)
-    base_image = str(apptainer_cfg.get("base_image") or req.suggested_base)
-    extra_packages = list(apptainer_cfg.get("extra_packages") or [])
+    base_image = str(runtime_spec.get("image") or apptainer_cfg.get("base_image") or req.suggested_base)
+    extra_packages = _dedupe(list(apptainer_cfg.get("extra_packages") or []) + list(runtime_spec.get("tools") or []))
 
     fingerprint = _fingerprint(base_image, req.tools, claude_bind, extra_packages)
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -686,25 +832,61 @@ def materialize_executor_image(
                     pass  # appeared just now
                 else:
                     start = time.monotonic()
-                    _build_sif(base_image, sif_path, apptainer=apptainer_exe)
+                    _build_sif(base_image, sif_path, apptainer=apptainer_exe, extra_packages=extra_packages)
                     build_ms = int((time.monotonic() - start) * 1000)
                     built_now = True
 
     tool_diagnostics = _probe_tools(
-        sif_path, req, claude_bind, userns=userns, apptainer=apptainer_exe
+        sif_path,
+        req,
+        claude_bind,
+        userns=userns,
+        apptainer=apptainer_exe,
+        readonly_binds=apptainer_cfg.get("readonly_binds") or [],
+        extra_binds=apptainer_cfg.get("extra_binds") or [],
     )
 
-    derived_binds: list[dict] = []
-    if req.cvmfs_required and Path("/cvmfs").is_dir():
-        derived_binds.append({"source": "/cvmfs", "target": "/cvmfs", "mode": "ro"})
-    elif req.cvmfs_required:
-        tool_diagnostics["warnings"].append(
-            "/cvmfs referenced by commands but not mounted on host; CVMFS bind skipped"
-        )
+    derived_readonly_binds: list[dict] = []
+    derived_extra_binds: list[dict] = []
+    seen_readonly: set[tuple[str, str]] = set()
+    seen_extra: set[tuple[str, str]] = set()
+
+    def add_bind(target_list: list[dict], seen: set[tuple[str, str]], source: str, mode: str) -> None:
+        key = (source, source)
+        if key in seen:
+            return
+        target_list.append({"source": source, "target": source, "mode": mode})
+        seen.add(key)
+
+    accessible_bind_paths = set(req.accessible_paths or [])
+    accessible_bind_paths.update(req.cvmfs_paths or [])
+    for source in sorted(accessible_bind_paths):
+        if not source.startswith("/"):
+            tool_diagnostics["warnings"].append(
+                f"accessible path is not absolute; bind skipped: {source}"
+            )
+            continue
+        bind_source = "/cvmfs" if source == "/cvmfs" or source.startswith("/cvmfs/") else source
+        if Path(bind_source).exists():
+            add_bind(derived_readonly_binds, seen_readonly, bind_source, "ro")
+        else:
+            tool_diagnostics["warnings"].append(
+                f"accessible path is not mounted on host; bind skipped: {bind_source}"
+            )
+    for source in sorted(set(req.writable_paths or [])):
+        if not source.startswith("/"):
+            tool_diagnostics["warnings"].append(
+                f"writable path is not absolute; bind skipped: {source}"
+            )
+            continue
+        if Path(source).exists():
+            add_bind(derived_extra_binds, seen_extra, source, "rw")
+        else:
+            tool_diagnostics["warnings"].append(
+                f"writable path is not mounted on host; bind skipped: {source}"
+            )
     if claude_bind.enabled and claude_bind.nvm_node_dir:
-        derived_binds.append(
-            {"source": claude_bind.nvm_node_dir, "target": claude_bind.nvm_node_dir, "mode": "ro"}
-        )
+        add_bind(derived_readonly_binds, seen_readonly, claude_bind.nvm_node_dir, "ro")
 
     diagnostics = {
         **tool_diagnostics,
@@ -729,7 +911,8 @@ def materialize_executor_image(
         requirements=req,
         claude_bind=claude_bind,
         userns=userns,
-        derived_readonly_binds=derived_binds,
+        derived_readonly_binds=derived_readonly_binds,
+        derived_extra_binds=derived_extra_binds,
         derived_env_allowlist=[],
         diagnostics=diagnostics,
     )
@@ -781,11 +964,9 @@ def finalize_runtime(
     if executor.get("runtime_backend") != "apptainer":
         return resolved_config
 
-    runtime_ir = resolved_config.setdefault("_runtime_ir", {})
-    runtime_apptainer = runtime_ir.setdefault("apptainer", {}) if runtime_ir.get("backend") == "apptainer" else {}
-    apptainer = executor.setdefault("apptainer", runtime_apptainer)
-    if runtime_apptainer:
-        apptainer.update(runtime_apptainer)
+    runtime_spec = resolved_config.setdefault("_runtime_spec", resolved_config.get("_runtime_ir", {}))
+    runtime_apptainer = runtime_spec.setdefault("apptainer", {}) if runtime_spec.get("backend") == "apptainer" else {}
+    apptainer = runtime_apptainer
     discovery = ensure_apptainer(apptainer)
     apptainer_exe = str(discovery.executable)
     apptainer["executable"] = apptainer_exe
@@ -816,19 +997,27 @@ def finalize_runtime(
             },
             "apptainer_discovery": discovery.to_dict(),
         }
-        if runtime_apptainer is not apptainer:
-            runtime_apptainer.update(apptainer)
+        runtime_spec["apptainer"] = apptainer
         return resolved_config
 
     mat = materialize_executor_image(resolved_config, force=force, host_probe=host_probe)
-    apptainer["image"] = mat.sif_path
+    runtime_spec["image"] = mat.sif_path
+    if mat.claude_bind.enabled and mat.claude_bind.claude_bin:
+        runtime_spec["command"] = mat.claude_bind.claude_bin
+    if mat.claude_bind.enabled and mat.claude_bind.container_path_prefix:
+        env = runtime_spec.setdefault("env", {})
+        env_set = env.setdefault("set", {})
+        existing_path = str(env_set.get("PATH") or "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+        prefix = str(mat.claude_bind.container_path_prefix)
+        if prefix not in existing_path.split(":"):
+            env_set["PATH"] = f"{prefix}:{existing_path}"
     apptainer["readonly_binds"] = _merge_binds(
         apptainer.get("readonly_binds") or [], mat.derived_readonly_binds
     )
-    if runtime_apptainer is not apptainer:
-        runtime_apptainer.update(apptainer)
-    else:
-        runtime_ir["apptainer"] = apptainer
+    apptainer["extra_binds"] = _merge_binds(
+        apptainer.get("extra_binds") or [], mat.derived_extra_binds
+    )
+    runtime_spec["apptainer"] = apptainer
     meta["_materialization"] = _sanitize_materialization(mat)
     return resolved_config
 

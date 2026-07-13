@@ -9,3 +9,4 @@ examples/*/runs/
 
 # stale run transcripts (regenerable)
 docs/*.log
+*.log

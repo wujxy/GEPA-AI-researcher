@@ -1,44 +1,61 @@
-# Complete OMILREC project profile template for the current schema.
-schema_version: 1
+# OMILREC project profile template for the canonical config model.
 kind: project_profile
 name: omilrec-juno
 
 source:
-  repo_path: ../../../omilrecv2
+  path: ../../../omilrecv2
   default_ref: ff71809b81c6c887a276a14c29b4f86296f27571
   workspace_mode: git_worktree
 
-environment:
-  description: JUNO J26.1.1 on EL9 with GCC 11
-  setup_commands:
+docs:
+  - ../../../omilrec-br111-executor-pack/context/BR111_OPTIMIZATION_CONTEXT.md
+  - ../../../omilrec-br111-executor-pack/context/SEEDS_BR111.md
+  - ../../../omilrec-br111-executor-pack/context/SOURCE_INVENTORY_BR111.json
+
+provided_paths:
+  - path: /cvmfs/juno.ihep.ac.cn/el9_amd64_gcc11/Release/J26.1.1
+    mode: ro
+    role: environment
+    note: JUNO J26.1.1 runtime environment. User guarantees this path is sufficient with the project docs to run OMILREC.
+  - path: /data/juno/dingxf/inputs
+    mode: ro
+    role: input_data
+  - path: /data/juno/dingxf/OMILREC_maps
+    mode: ro
+    role: resource_pack
+
+reference:
+  commands:
     - source /cvmfs/juno.ihep.ac.cn/el9_amd64_gcc11/Release/J26.1.1/setup.sh
     - source InstallArea/setup.sh
-  python_command: python
-  dependency_policy: Use installed CVMFS packages only; do not install packages.
+    - cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_UNIT_TESTS=ON
+    - cmake --build build --target install --parallel
+    - cmake --build build --target test_fcn --parallel
+  note: These are user-provided reference commands for the executor; GEPA must not auto-execute them.
 
-resources:
-  data_files:
-    - /data/juno/dingxf/inputs/index_12628_rtraw_1.json
-    - /data/juno/dingxf/OMILREC_maps
-  context_paths:
-    - ../../../omilrec-br111-executor-pack/context/BR111_OPTIMIZATION_CONTEXT.md
-    - ../../../omilrec-br111-executor-pack/context/SEEDS_BR111.md
-    - ../../../omilrec-br111-executor-pack/context/SOURCE_INVENTORY_BR111.json
-  skills:
-    - omilrec-br111-opt-flow
-    - OMILREC-dev-guide
-    - reproduce-OMILREC-reference-fit
-  readonly_assets:
-    - source: ../../../omilrec-br111-executor-pack/assets/fixtures/time_pdf.bin
-      target: TEMP/fixtures/time_pdf.bin
-  pre_materialized_lfs_paths:
-    - tests/fixtures/v107_rev1/*.bin
-  generated_tracked_paths:
-    - benchmarks/speed.csv
-    - benchmarks/drift.csv
-  hash_artifacts:
-    - build/bin/test_fcn.exe
-    - InstallArea/lib64/libOMILRECV2.so
+repo_overlays:
+  - source: ../../../omilrec-br111-executor-pack/assets/fixtures/time_pdf.bin
+    target: TEMP/fixtures/time_pdf.bin
+    mode: ro
+    purpose: fixture
+
+skills:
+  - omilrec-br111-opt-flow
+  - OMILREC-dev-guide
+  - reproduce-OMILREC-reference-fit
+
+isolation:
+  backend: apptainer
+  mode: bind_paths
+  # Optional. If omitted, GEPA uses a minimal default executor image and binds the
+  # user-provided paths; it does not infer project packages from reference commands.
+  # image: /abs/path/omilrec-executor.sif
+  apptainer:
+    executable: apptainer
+    cleanenv: false
+    containall: false
+    writable_tmpfs: true
+    # claude_home_template: /abs/path/claude-home-template
 
 agent:
   command: claude
@@ -48,34 +65,6 @@ agent:
     - acceptEdits
     - --allowedTools
     - Read,Edit,Write,Glob,Grep,Bash
-
-execution:
-  lifecycle: materialize_once
-  max_parallel_candidates: 3
-  fail_fast: false
-  runtime_backend: apptainer
-  apptainer:
-    # `image` is OPTIONAL: with auto_image enabled (the default), GEPA derives a
-    # thin almalinux:9 base from the config, builds/reuses it from
-    # ~/.cache/gepa/images, and binds /cvmfs + the host claude/node read-only.
-    # Set `auto_image: false` and provide `image:` to use your own prebuilt SIF.
-    auto_image: true
-    # image: /abs/path/omilrec-executor.sif
-    executable: apptainer
-    command: claude
-    cleanenv: true
-    containall: true
-    writable_tmpfs: true
-    # `userns` is auto-detected; set explicitly only to override the probe.
-    # userns: true
-    container_repo: /workspace/repo
-    container_artifacts: /workspace/artifacts
-    container_scratch: /workspace/scratch
-    container_home: /workspace/home
-    claude_home_template: /abs/path/claude-home-template
-    env_allowlist: []
-    readonly_binds: []
-    extra_binds: []
 
 safety:
   editable_paths:

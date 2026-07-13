@@ -20,7 +20,7 @@ from ..models.schemas import AgentCallContext, Candidate, CandidateBatch, Judgme
 def format_runtime(config: dict[str, Any]) -> str:
     runtime = config.get("runtime", {})
     if not runtime:
-        return "Runtime environment:\n- Not specified; use only commands explicitly allowed by the run configuration."
+        return "Runtime envelope:\n- Not specified; inspect the project and available resources."
 
     lines = ["Runtime environment:"]
     environment = runtime.get("environment")
@@ -28,6 +28,7 @@ def format_runtime(config: dict[str, Any]) -> str:
     python_command = runtime.get("python_command")
     dependency_policy = runtime.get("dependency_policy")
     allowed_commands = runtime.get("allowed_commands", [])
+    guarantee = runtime.get("guarantee")
 
     if environment:
         lines.append(f"- Environment type: {environment}")
@@ -37,8 +38,11 @@ def format_runtime(config: dict[str, Any]) -> str:
         lines.append(f"- Python command: {python_command}")
     if dependency_policy:
         lines.append(f"- Dependency policy: {dependency_policy}")
+    if guarantee:
+        lines.append(f"- Guarantee: {guarantee}")
     if allowed_commands:
-        lines.append(f"- Allowed shell commands: {allowed_commands}")
+        lines.append(f"- Reference commands from legacy config (not mandatory): {allowed_commands}")
+    lines.append("- Reference commands and environment notes are hints/context, not GEPA-enforced steps.")
     lines.append("- Do not install new packages during the loop.")
     lines.append("- If a package is unavailable, record the import error and fall back to a simpler available method.")
     return "\n".join(lines)
@@ -246,7 +250,7 @@ Task goal:
 Important constraints:
 - Propose exactly one candidate research hypothesis or intervention for the next round.
 - If parent candidates are provided, mutate from them instead of starting from scratch.
-- Include an executor_contract that tells the external executor what to run and what to return.
+- Include an executor_contract that suggests what the executor should attempt and what evidence to return.
 - Do not assume hidden task facts that are not present in resources, prior context, or loop feedback.
 - Use only the configured resources and prior loop feedback.
 - Keep the candidate small enough for the executor to test in one round.
@@ -269,7 +273,7 @@ Required JSON schema:
   "candidate_class": "optional optimization-type tag (free text)",
   "expected_gain": 0.0,
   "analysis_plan": ["step 1", "step 2"],
-  "executor_contract": {{"instructions": "what the executor must do", "expected_artifacts": ["artifact"], "success_criteria": ["criterion"]}},
+  "executor_contract": {{"instructions": "what the executor should attempt or verify", "expected_artifacts": ["artifact"], "success_criteria": ["criterion"]}},
   "expected_artifacts": ["artifact"],
   "mutation_note": "what prior feedback this candidate responds to"
 }}
@@ -356,7 +360,7 @@ Required JSON schema:
       "candidate_class": "optional optimization-type tag (free text)",
       "expected_gain": 0.0,
       "analysis_plan": ["step 1", "step 2"],
-      "executor_contract": {{"instructions": "what the executor must do", "expected_artifacts": ["artifact"], "success_criteria": ["criterion"]}},
+      "executor_contract": {{"instructions": "what the executor should attempt or verify", "expected_artifacts": ["artifact"], "success_criteria": ["criterion"]}},
       "expected_artifacts": ["artifact"],
       "mutation_note": "what prior feedback this candidate responds to"
     }}
@@ -446,12 +450,12 @@ Task goal:
 Constraints:
 - Do not ask the user for help.
 - Do not assume hidden task facts that are not present in resources, prior context, or loop feedback.
-- Use the configured Python command from the runtime environment above for any Python execution.
+- The user guarantees the provided paths in the config are sufficient to run the project; use project docs and reference commands as context.
+- Reference commands are hints/context, not GEPA-enforced steps; choose commands by reading the project docs and repository.
 - Keep this execution compact and scoped to the candidate contract.
 - Avoid broad repository exploration unless the candidate contract requires it.
 - You may inspect files, make bounded changes, run validation or benchmark commands,
-  and compare against available baselines when useful for this candidate and allowed
-  by the runtime policy.
+  and compare against available baselines when useful for this candidate.
 - Save any scripts or generated artifacts under the working directory above.
 - In implement_and_validate mode, edit only admitted target_files and create no more than the configured commit budget.
 - In evaluate_only mode, do not edit source files, create commits, switch branches, or change HEAD.

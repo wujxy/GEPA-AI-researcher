@@ -14,52 +14,6 @@ class ConfigError(ValueError):
     """User-facing configuration error with a precise field path."""
 
 
-TASK_KEYS = {
-    "schema_version", "kind", "task", "project", "metric", "validation",
-    "safety", "budget", "initialization", "generation", "gepa", "judger",
-    "usage_tracking", "evidence",
-}
-PROFILE_KEYS = {
-    "schema_version", "kind", "name", "source", "runtime", "resources", "agent", "safety",
-    # Kept for the legacy v1 resolver path; schema v2 profiles reject these by using
-    # V2_PROFILE_KEYS below.
-    "environment", "execution",
-}
-V2_PROFILE_KEYS = {"schema_version", "kind", "name", "source", "runtime", "resources", "agent", "safety"}
-
-SECTION_KEYS = {
-    "task": {"name", "goal", "samples"},
-    "project": {"profile", "ref", "inline"},
-    "metric": {"name", "direction", "command", "description", "unit", "repeats", "improvement"},
-    "validation": {"checks"},
-    "improvement": {"mode", "minimum"},
-    "check": {"name", "command", "success_criteria"},
-    "safety": {"editable_paths", "frozen_paths", "max_files_per_candidate", "max_commits_per_candidate"},
-    "budget": {"max_rounds", "min_rounds", "patience", "candidates_per_round"},
-    "initialization": {"seed_count"},
-    "generation": {"batch_size", "enable_merge"},
-    "gepa": {
-        "minibatch_size", "feedback_sample_ids", "pareto_sample_ids",
-        "frontier_policy", "acceptance_policy", "parent_sampling",
-    },
-    "judger": {"pass_threshold"},
-    "usage_tracking": {"enabled", "persist_raw_envelope", "print_round_summary", "print_run_summary"},
-    "evidence": {"visualize_when_applicable", "plot_selection_policy", "artifact_formats", "guidance"},
-    "source": {"repo_path", "default_ref", "workspace_mode"},
-    "resources": {"data_files", "context_paths", "skills", "readonly_assets", "pre_materialized_lfs_paths", "generated_tracked_paths", "hash_artifacts"},
-    "agent": {"command", "timeout_seconds", "extra_args"},
-    "environment": {"description", "setup_commands", "python_command", "dependency_policy"},
-    "execution": {"runtime_backend", "lifecycle", "max_parallel_candidates", "fail_fast", "apptainer"},
-    "apptainer": {"image", "executable", "command", "container_repo", "container_artifacts", "container_scratch", "container_home", "claude_home_template", "claude_host_home", "base_image", "container_claude_dir", "install_command", "auto_image", "cleanenv", "containall", "writable_tmpfs", "userns", "auto_bind_claude_auth", "auto_init_claude_home", "env_allowlist", "extra_exec_args", "extra_packages", "source_scripts", "passthrough_environment", "validation_commands", "runtime_init", "readonly_binds", "extra_binds", "home_readonly_binds"},
-    "runtime_init": {"description", "setup_commands", "python_command", "dependency_policy", "validation_commands"},
-    "asset": {"source", "target"},
-    "bind": {"source", "target", "mode"},
-    "runtime": {"backend", "workdir", "command", "append_agent_args", "apptainer", "env", "setup", "check", "mounts"},
-    "runtime_apptainer": {"image", "executable", "auto_image", "base_image", "extra_packages", "cleanenv", "containall", "writable_tmpfs", "userns", "extra_exec_args", "claude_home_template", "claude_host_home", "auto_init_claude_home", "home_readonly_binds", "install_command", "container_claude_dir", "auto_bind_claude_auth"},
-    "runtime_env": {"pass", "set"},
-    "runtime_mounts": {"repo", "extra"},
-    "runtime_extra_mount": {"source", "target", "mode"},
-}
 LEGACY_UNUSED_FIELDS = (
     "gepa.frontier_policy",
     "gepa.acceptance_policy",
@@ -69,6 +23,19 @@ LEGACY_UNUSED_FIELDS = (
     "workspace.keep_accepted",
     "executor.per_candidate_workspace",
 )
+
+
+TASK_TOP_KEYS = {
+    "schema_version", "kind", "task", "project", "metric", "validation", "safety",
+    "budget", "initialization", "generation", "gepa", "loop", "selection", "executor",
+    "judger", "usage_tracking", "evidence",
+}
+PROFILE_TOP_KEYS = {
+    "schema_version", "kind", "name", "source", "docs", "provided_paths", "reference",
+    "isolation", "repo_overlays", "skills", "agent", "safety",
+    # Legacy input accepted only for migration into the canonical shape.
+    "runtime", "resources", "filesystem", "environment", "build", "executor_image", "execution",
+}
 
 
 def load_config_file(path: Path) -> dict[str, Any]:
@@ -99,16 +66,10 @@ def load_and_resolve(
 ) -> dict[str, Any]:
     config_path = config_path.expanduser().resolve()
     raw = load_config_file(config_path)
-    if raw.get("schema_version") == 2:
-        if raw.get("kind") != "task":
-            raise ConfigError("kind: run configuration must have kind: task")
-        resolved = _resolve_task_v2(raw, config_path)
-    elif raw.get("schema_version") == 1 or raw.get("kind") in {"task", "project_profile"}:
-        if raw.get("kind") != "task":
-            raise ConfigError("kind: run configuration must have kind: task")
-        resolved = _resolve_task(raw, config_path)
-    else:
+    if raw.get("kind") != "task" and "project" not in raw:
         resolved = _resolve_legacy(raw, config_path)
+    else:
+        resolved = _resolve_task(raw, config_path)
     if resume and run_dir is None and resolved.get("_meta", {}).get("schema_version") != 0:
         raise ConfigError("resume: --resume requires an explicit --run-dir")
     if run_dir is not None:
@@ -118,299 +79,152 @@ def load_and_resolve(
     return resolved
 
 
-def _resolve_task_v2(task_config: dict[str, Any], task_path: Path) -> dict[str, Any]:
-    _validate_task_v2(task_config)
-    project = task_config["project"]
-    source_files = {"task": str(task_path)}
-    if "profile" in project:
-        profile_path = _path(project["profile"], task_path.parent)
-        profile = load_config_file(profile_path)
-        _validate_profile_v2(profile)
-        profile_base = profile_path.parent
-        source_files["profile"] = str(profile_path)
-    else:
-        profile = {
-            "schema_version": 2,
-            "kind": "project_profile",
-            "name": "inline",
-            **deepcopy(project["inline"]),
-        }
-        _validate_profile_v2(profile)
-        profile_base = task_path.parent
-        source_files["profile"] = "inline"
-
-    source = deepcopy(profile.get("source") or {})
-    repo_path = _optional_path(source.get("repo_path"), profile_base)
-    requested_ref = str(project.get("ref") or source.get("default_ref") or "")
-    workspace_mode = str(source.get("workspace_mode") or ("git_worktree" if repo_path else "artifact_directory"))
-    if workspace_mode == "git_worktree" and not repo_path:
-        raise ConfigError("project: git_worktree requires profile.source.repo_path")
-    if repo_path and not repo_path.exists():
-        raise ConfigError(f"source.repo_path: path does not exist: {repo_path}")
-    if workspace_mode == "git_worktree" and not requested_ref:
-        raise ConfigError("project.ref: git_worktree projects require a ref or profile default_ref")
-    resolved_sha = _resolve_git_ref(repo_path, requested_ref) if repo_path and requested_ref else ""
-
-    safety = _merge_safety(profile.get("safety") or {}, task_config.get("safety") or {})
-    resources = _resolve_resources_v2(profile.get("resources") or {}, profile_base)
-    runtime_ir = _compile_runtime_ir(profile["runtime"], profile_base)
-    metric = deepcopy(task_config["metric"])
-    validation = deepcopy(task_config.get("validation") or {"checks": []})
-    budget = task_config["budget"]
-    generation_config = deepcopy(task_config.get("generation") or {})
-    initialization_config = deepcopy(task_config.get("initialization") or {})
-    gepa_config = deepcopy(task_config.get("gepa") or {})
-    judger_config = deepcopy(task_config.get("judger") or {})
-    usage_tracking_config = deepcopy(task_config.get("usage_tracking") or {})
-    evidence_config = deepcopy(task_config.get("evidence") or {})
-    candidates = int(generation_config.get("batch_size", budget.get("candidates_per_round", 3)))
-    seed_count = int(initialization_config.get("seed_count", candidates))
-    max_rounds = int(budget["max_rounds"])
-    patience = int(budget.get("patience", 2))
-    min_rounds = int(budget.get("min_rounds", min(max_rounds, 2)))
-    timeout = int((profile.get("agent") or {}).get("timeout_seconds", 600))
-    validation_commands = [check["command"] for check in validation.get("checks", []) if check.get("command")]
-    benchmark_commands = [metric["command"]] if metric.get("command") else []
-    task_section = {
-        **deepcopy(task_config["task"]),
-        "data_files": resources["data_files"],
-        "benchmark_commands": benchmark_commands,
-        "validation_commands": validation_commands,
-        "artifacts": [],
-        "samples": list(task_config["task"].get("samples") or []) or [{"sample_id": "task_execution"}],
-    }
-    if repo_path and workspace_mode == "git_worktree":
-        task_section["repo_paths"] = [str(repo_path)]
-
-    runtime_contract = {
-        "backend": runtime_ir["backend"],
-        "workdir": runtime_ir["workdir"],
-        "command": runtime_ir["command"],
-        "init": runtime_ir["init"],
-        "preflight": runtime_ir["preflight"],
-    }
-    resolved = {
-        "_meta": {
-            "schema_version": 2,
-            "source_files": source_files,
-            "warnings": [],
-            "resolution": {"task": "task config", "profile": profile.get("name", "inline"), "defaults": "gepa_researcher.config"},
-        },
-        "_runtime_ir": runtime_ir,
-        "components": {"mode": "claude_code_agents"},
-        "agent": {"command": runtime_ir["command"], "cwd": str(repo_path or task_path.parent), "timeout_seconds": timeout, "extra_args": list((profile.get("agent") or {}).get("extra_args") or [])},
-        "runtime": runtime_contract,
-        "task": task_section,
-        "context": {"paths": resources["context_paths"], "notes": [], "skills": resources["skills"]},
-        "budget": {"max_rounds": max_rounds, "min_rounds": min_rounds, "no_improvement_patience": patience},
-        "generation": {"batch_size": candidates, "enable_merge": bool(generation_config.get("enable_merge", False))},
-        "gepa": {
-            "frontier_policy": str(gepa_config.get("frontier_policy", "pareto")),
-            "acceptance_policy": str(gepa_config.get("acceptance_policy", "minibatch_improves_then_pareto")),
-            "minibatch_size": int(gepa_config.get("minibatch_size", 1)),
-            "parent_sampling": str(gepa_config.get("parent_sampling", "pareto_win_weighted")),
-            "feedback_sample_ids": list(gepa_config.get("feedback_sample_ids") or []),
-            "pareto_sample_ids": list(gepa_config.get("pareto_sample_ids") or []),
-        },
-        "executor": {"max_workers": min(candidates, 3), "executor_timeout_seconds": timeout, "fail_fast": False, "runtime_backend": runtime_ir["backend"]},
-        "judger": {"pass_threshold": float(judger_config.get("pass_threshold", 0.85))},
-        "initialization": {"seed_count": seed_count},
-        "evidence": {
-            "visualize_when_applicable": bool(evidence_config.get("visualize_when_applicable", False)),
-            "plot_selection_policy": str(evidence_config.get("plot_selection_policy", "proposer_selects")),
-            "artifact_formats": list(evidence_config.get("artifact_formats") or []),
-            "guidance": str(evidence_config.get("guidance", "")),
-        },
-        "execution": {"lifecycle": "materialize_once" if workspace_mode == "git_worktree" else "stateless"},
-        "usage_tracking": {
-            "enabled": bool(usage_tracking_config.get("enabled", True)),
-            "persist_raw_envelope": bool(usage_tracking_config.get("persist_raw_envelope", True)),
-            "print_round_summary": bool(usage_tracking_config.get("print_round_summary", True)),
-            "print_run_summary": bool(usage_tracking_config.get("print_run_summary", True)),
-        },
-        "contracts": {"objective": deepcopy(task_config["task"]), "metric": metric, "validation": validation, "resources": {"data_files": resources["data_files"], "repo_path": str(repo_path) if repo_path else None, "context_paths": resources["context_paths"], "skills": resources["skills"]}, "safety": safety, "runtime": runtime_contract},
-    }
-    # Keep this mirror until container image materialization is moved to _runtime_ir.
-    if runtime_ir["backend"] == "apptainer":
-        resolved["executor"]["apptainer"] = runtime_ir["apptainer"]
-    if repo_path:
-        resolved["workspace"] = {"mode": workspace_mode, "repo_path": str(repo_path), "baseline_ref": resolved_sha or requested_ref, "requested_ref": requested_ref, "resolved_sha": resolved_sha, "pre_materialized_lfs_paths": resources["pre_materialized_lfs_paths"], "generated_tracked_paths": resources["generated_tracked_paths"], "hash_artifacts": resources["hash_artifacts"]}
-    if safety:
-        resolved["candidate_policy"] = {"allowed_target_globs": list(safety.get("editable_paths") or []), "frozen_globs": list(safety.get("frozen_paths") or []), "max_target_files": int(safety.get("max_files_per_candidate", 1_000_000)), "max_commits": int(safety.get("max_commits_per_candidate", 1))}
-    return resolved
-
-
-def _resolve_task(task_config: dict[str, Any], task_path: Path) -> dict[str, Any]:
+def _resolve_task(raw_task: dict[str, Any], task_path: Path) -> dict[str, Any]:
+    task_config = _migrate_task(raw_task)
     _validate_task(task_config)
     project = task_config["project"]
     source_files = {"task": str(task_path)}
     if "profile" in project:
         profile_path = _path(project["profile"], task_path.parent)
-        profile = load_config_file(profile_path)
-        _validate_profile(profile)
+        profile = _migrate_profile(load_config_file(profile_path))
         profile_base = profile_path.parent
         source_files["profile"] = str(profile_path)
     else:
-        profile = {
-            "schema_version": 1,
-            "kind": "project_profile",
-            "name": "inline",
-            **deepcopy(project["inline"]),
-        }
-        _validate_profile(profile)
+        profile = _migrate_profile({"kind": "project_profile", "name": "inline", **deepcopy(project["inline"])})
         profile_base = task_path.parent
         source_files["profile"] = "inline"
+    _validate_profile(profile)
 
-    source = deepcopy(profile.get("source") or {})
-    repo_path = _optional_path(source.get("repo_path"), profile_base)
+    source = profile.get("source") or {}
+    repo_path = _optional_path(source.get("path"), profile_base)
     requested_ref = str(project.get("ref") or source.get("default_ref") or "")
     workspace_mode = str(source.get("workspace_mode") or ("git_worktree" if repo_path else "artifact_directory"))
     if workspace_mode == "git_worktree" and not repo_path:
-        raise ConfigError("project: git_worktree requires profile.source.repo_path")
+        raise ConfigError("project: git_worktree requires profile.source.path")
     if repo_path and not repo_path.exists():
-        raise ConfigError(f"source.repo_path: path does not exist: {repo_path}")
+        raise ConfigError(f"source.path: path does not exist: {repo_path}")
     if workspace_mode == "git_worktree" and not requested_ref:
         raise ConfigError("project.ref: git_worktree projects require a ref or profile default_ref")
     resolved_sha = _resolve_git_ref(repo_path, requested_ref) if repo_path and requested_ref else ""
 
+    docs = _resolve_docs(profile.get("docs") or [], profile_base)
+    provided_paths = _resolve_provided_paths(profile.get("provided_paths") or [], profile_base)
+    repo_overlays = _resolve_repo_overlays(profile.get("repo_overlays") or [], profile_base)
+    reference = deepcopy(profile.get("reference") or {})
+    reference_commands = _dedupe(list(reference.get("commands") or []))
+    reference_note = str(reference.get("note") or "User-provided references only; GEPA must not auto-execute them.")
     safety = _merge_safety(profile.get("safety") or {}, task_config.get("safety") or {})
-    resources = _resolve_resources(profile.get("resources") or {}, profile_base)
-    environment = deepcopy(profile.get("environment") or {})
+
+    loop = task_config["loop"]
+    selection = task_config.get("selection") or {}
+    executor_task = task_config.get("executor") or {}
     metric = deepcopy(task_config["metric"])
     validation = deepcopy(task_config.get("validation") or {"checks": []})
-    budget = task_config["budget"]
-    generation_config = deepcopy(task_config.get("generation") or {})
-    initialization_config = deepcopy(task_config.get("initialization") or {})
-    gepa_config = deepcopy(task_config.get("gepa") or {})
-    judger_config = deepcopy(task_config.get("judger") or {})
-    usage_tracking_config = deepcopy(task_config.get("usage_tracking") or {})
-    evidence_config = deepcopy(task_config.get("evidence") or {})
-    candidates = int(generation_config.get("batch_size", budget.get("candidates_per_round", 3)))
-    seed_count = int(initialization_config.get("seed_count", candidates))
-    max_rounds = int(budget["max_rounds"])
-    patience = int(budget.get("patience", 2))
-    min_rounds = int(budget.get("min_rounds", min(max_rounds, 2)))
-    execution_profile = deepcopy(profile.get("execution") or {})
-    worker_cap = int(execution_profile.get("max_parallel_candidates", 3))
-    runtime_backend = str(execution_profile.get("runtime_backend", "local"))
-    apptainer_config = _resolve_apptainer(execution_profile.get("apptainer") or {}, profile_base)
-    agent_profile = deepcopy(profile.get("agent") or {})
+    max_rounds = int(loop.get("max_rounds", 1))
+    candidates = int(loop.get("candidates_per_round", 3))
+    seed_count = int(loop.get("seed_count", candidates))
+    min_rounds = int(loop.get("min_rounds", min(max_rounds, 2)))
+    patience = int(loop.get("patience", 2))
+    worker_cap = int(loop.get("max_parallel_candidates", candidates))
+    timeout = int(executor_task.get("timeout_seconds", (profile.get("agent") or {}).get("timeout_seconds", 600)))
 
-    benchmark_commands = [metric["command"]] if metric.get("command") else []
-    validation_commands = [
-        check["command"] for check in validation.get("checks", []) if check.get("command")
-    ]
-    configured_samples = list(task_config["task"].get("samples") or [])
-    task_section: dict[str, Any] = {
+    isolation = profile.get("isolation") or {}
+    backend = str(isolation.get("backend") or "local")
+    workdir = str(isolation.get("workdir") or "/workspace/repo")
+    agent_profile = profile.get("agent") or {}
+    command = str(agent_profile.get("command") or isolation.get("command") or "claude")
+    image = str(isolation.get("image") or "")
+    if image:
+        image = str(_path(image, profile_base)) if _looks_like_path(image) else image
+
+    mounts = _dedupe_mounts(
+        _compile_repo_overlays(repo_overlays, workdir)
+        + _provided_path_mounts(provided_paths)
+        + _doc_mounts(docs, provided_paths)
+    )
+    apptainer = _default_apptainer_options(_resolve_apptainer(dict(isolation.get("apptainer") or {}), profile_base))
+    runtime_spec = {
+        "backend": backend,
+        "image": image,
+        "workdir": workdir,
+        "command": command,
+        "env": _canonical_env(profile),
+        "setup": [],
+        "check": [],
+        "mounts": mounts,
+        "tools": [],
+        "apptainer": apptainer,
+    }
+    runtime_contract = {
+        "backend": backend,
+        "image": image,
+        "workdir": workdir,
+        "command": command,
+        "setup": [],
+        "check": [],
+        "tools": [],
+        "guarantee": "User guarantees the provided paths are sufficient to run the project; GEPA only binds and reports them.",
+    }
+
+    task_section = {
         **deepcopy(task_config["task"]),
-        "data_files": resources["data_files"],
-        "benchmark_commands": benchmark_commands,
-        "validation_commands": validation_commands,
+        "data_files": [item["path"] for item in provided_paths if item.get("role") in {"data", "data_file", "input_data", "resource_pack"}],
+        "benchmark_commands": [metric["command"]] if metric.get("command") else [],
+        "validation_commands": [check["command"] for check in validation.get("checks", []) if check.get("command")],
         "artifacts": [],
-        "samples": configured_samples or [{"sample_id": "task_execution"}],
+        "samples": list((task_config.get("task") or {}).get("samples") or []) or [{"sample_id": "task_execution"}],
     }
     if repo_path and workspace_mode == "git_worktree":
         task_section["repo_paths"] = [str(repo_path)]
 
-    runtime_contract = {
-        "description": environment.get("description", ""),
-        "setup_commands": list(environment.get("setup_commands") or []),
-        "python_command": environment.get("python_command", ""),
-        "dependency_policy": environment.get("dependency_policy", ""),
+    resources_contract = {
+        "repo_path": str(repo_path) if repo_path else None,
+        "docs": docs,
+        "context_paths": docs,
+        "provided_paths": provided_paths,
+        "accessible_paths": [item["path"] for item in provided_paths if item.get("mode") == "ro"],
+        "writable_paths": [item["path"] for item in provided_paths if item.get("mode") == "rw"],
+        "repo_overlays": repo_overlays,
+        "skills": list(profile.get("skills") or []),
     }
-    if runtime_backend == "apptainer":
-        apptainer_config = _attach_apptainer_runtime_init(apptainer_config, runtime_contract)
-    contracts = {
-        "objective": deepcopy(task_config["task"]),
-        "metric": metric,
-        "validation": validation,
-        "resources": {
-            "data_files": resources["data_files"],
-            "repo_path": str(repo_path) if repo_path else None,
-            "context_paths": resources["context_paths"],
-            "skills": resources["skills"],
-        },
-        "safety": safety,
-        "runtime": runtime_contract,
-    }
-
-    timeout = int(agent_profile.get("timeout_seconds", 600))
     resolved: dict[str, Any] = {
         "_meta": {
-            "schema_version": 1,
+            "schema_version": "canonical",
             "source_files": source_files,
-            "warnings": [],
-            "resolution": {
-                "task": "task config",
-                "profile": profile.get("name", "inline"),
-                "defaults": "gepa_researcher.config",
-            },
+            "warnings": list(task_config.get("_warnings") or []) + list(profile.get("_warnings") or []),
+            "resolution": {"task": "canonical task config", "profile": profile.get("name", "inline"), "defaults": "gepa_researcher.config"},
         },
+        "_runtime_spec": runtime_spec,
         "components": {"mode": "claude_code_agents"},
-        "agent": {
-            "command": str(agent_profile.get("command", "claude")),
-            "cwd": str(repo_path or task_path.parent),
-            "timeout_seconds": timeout,
-            "extra_args": list(agent_profile.get("extra_args") or []),
-        },
-        "runtime": {
-            "environment": environment.get("description", ""),
-            "python_command": environment.get("python_command", ""),
-            "dependency_policy": environment.get("dependency_policy", ""),
-            "allowed_commands": list(dict.fromkeys(
-                list(environment.get("setup_commands") or []) + benchmark_commands + validation_commands
-            )),
-        },
+        "agent": {"command": command, "cwd": str(repo_path or task_path.parent), "timeout_seconds": timeout, "extra_args": list(agent_profile.get("extra_args") or [])},
+        "runtime": runtime_contract,
         "task": task_section,
-        "context": {
-            "paths": resources["context_paths"],
-            "notes": [],
-            "skills": resources["skills"],
-        },
-        "budget": {
-            "max_rounds": max_rounds,
-            "min_rounds": min_rounds,
-            "no_improvement_patience": patience,
-        },
-        "generation": {
-            "batch_size": candidates,
-            "enable_merge": bool(generation_config.get("enable_merge", False)),
-        },
+        "context": {"paths": docs, "notes": [reference_note], "skills": list(profile.get("skills") or [])},
+        "budget": {"max_rounds": max_rounds, "min_rounds": min_rounds, "no_improvement_patience": patience},
+        "generation": {"batch_size": candidates, "enable_merge": bool(loop.get("enable_merge", False))},
         "gepa": {
-            "frontier_policy": str(gepa_config.get("frontier_policy", "pareto")),
-            "acceptance_policy": str(gepa_config.get("acceptance_policy", "minibatch_improves_then_pareto")),
-            "minibatch_size": int(gepa_config.get("minibatch_size", 1)),
-            "parent_sampling": str(gepa_config.get("parent_sampling", "pareto_win_weighted")),
-            "feedback_sample_ids": list(gepa_config.get("feedback_sample_ids") or []),
-            "pareto_sample_ids": list(gepa_config.get("pareto_sample_ids") or []),
+            "frontier_policy": str(selection.get("frontier_policy", "pareto")),
+            "acceptance_policy": str(selection.get("acceptance_policy", "minibatch_improves_then_pareto")),
+            "minibatch_size": int(selection.get("minibatch_size", 1)),
+            "parent_sampling": str(selection.get("parent_sampling", "pareto_win_weighted")),
+            "feedback_sample_ids": list(selection.get("feedback_sample_ids") or []),
+            "pareto_sample_ids": list(selection.get("pareto_sample_ids") or []),
         },
-        "executor": {
-            "max_workers": min(candidates, worker_cap),
-            "executor_timeout_seconds": timeout,
-            "fail_fast": bool(execution_profile.get("fail_fast", False)),
-            "runtime_backend": runtime_backend,
-            **({"apptainer": apptainer_config} if runtime_backend == "apptainer" else {}),
-        },
-        "judger": {"pass_threshold": float(judger_config.get("pass_threshold", 0.85))},
+        "executor": {"max_workers": min(candidates, worker_cap), "executor_timeout_seconds": timeout, "repair_retries": int(executor_task.get("repair_retries", 1)), "fail_fast": False, "runtime_backend": backend},
+        "judger": {"pass_threshold": float((task_config.get("judger") or {}).get("pass_threshold", 0.85))},
         "initialization": {"seed_count": seed_count},
-        "evidence": {
-            "visualize_when_applicable": bool(evidence_config.get("visualize_when_applicable", False)),
-            "plot_selection_policy": str(evidence_config.get("plot_selection_policy", "proposer_selects")),
-            "artifact_formats": list(evidence_config.get("artifact_formats") or []),
-            "guidance": str(evidence_config.get("guidance", "")),
+        "evidence": _resolve_evidence(task_config.get("evidence") or {}),
+        "execution": {"lifecycle": "materialize_once" if workspace_mode == "git_worktree" else "stateless"},
+        "usage_tracking": _resolve_usage_tracking(task_config.get("usage_tracking") or {}),
+        "contracts": {
+            "objective": deepcopy(task_config["task"]),
+            "metric": metric,
+            "validation": validation,
+            "resources": resources_contract,
+            "reference": {"commands": reference_commands, "note": reference_note},
+            "safety": safety,
+            "runtime": runtime_contract,
         },
-        "execution": {
-            "lifecycle": str(execution_profile.get("lifecycle") or (
-                "materialize_once" if workspace_mode == "git_worktree" else "stateless"
-            ))
-        },
-        "usage_tracking": {
-            "enabled": bool(usage_tracking_config.get("enabled", True)),
-            "persist_raw_envelope": bool(usage_tracking_config.get("persist_raw_envelope", True)),
-            "print_round_summary": bool(usage_tracking_config.get("print_round_summary", True)),
-            "print_run_summary": bool(usage_tracking_config.get("print_run_summary", True)),
-        },
-        "contracts": contracts,
     }
     if repo_path:
         resolved["workspace"] = {
@@ -419,10 +233,9 @@ def _resolve_task(task_config: dict[str, Any], task_path: Path) -> dict[str, Any
             "baseline_ref": resolved_sha or requested_ref,
             "requested_ref": requested_ref,
             "resolved_sha": resolved_sha,
-            "readonly_assets": resources["readonly_assets"],
-            "pre_materialized_lfs_paths": resources["pre_materialized_lfs_paths"],
-            "generated_tracked_paths": resources["generated_tracked_paths"],
-            "hash_artifacts": resources["hash_artifacts"],
+            "pre_materialized_lfs_paths": list(profile.get("pre_materialized_lfs_paths") or []),
+            "generated_tracked_paths": list(profile.get("generated_tracked_paths") or []),
+            "hash_artifacts": list(profile.get("hash_artifacts") or []),
         }
     if safety:
         resolved["candidate_policy"] = {
@@ -434,510 +247,265 @@ def _resolve_task(task_config: dict[str, Any], task_path: Path) -> dict[str, Any
     return resolved
 
 
-def _resolve_legacy(raw: dict[str, Any], config_path: Path) -> dict[str, Any]:
-    resolved = deepcopy(raw)
-    warnings = ["legacy config detected; migrate to schema_version: 1 task/profile configuration"]
-    warnings.extend(
-        f"unused legacy field: {field}"
-        for field in LEGACY_UNUSED_FIELDS
-        if _has_dotted(raw, field)
-    )
-    resolved["_meta"] = {
-        "schema_version": 0,
-        "source_files": {"task": str(config_path)},
-        "warnings": warnings,
-        "resolution": {"legacy": "preserved"},
-    }
-    resolved.setdefault("contracts", _legacy_contracts(resolved))
-    return resolved
-
-
-def _legacy_contracts(config: dict[str, Any]) -> dict[str, Any]:
-    task = config.get("task") or {}
-    policy = config.get("candidate_policy") or {}
-    runtime = config.get("runtime") or {}
-    validation_commands = list(task.get("validation_commands") or [])
-    metric_command = next(iter(task.get("benchmark_commands") or []), None)
+def _migrate_task(raw: dict[str, Any]) -> dict[str, Any]:
+    _reject_unknown(raw, TASK_TOP_KEYS, "")
+    if isinstance(raw.get("metric"), dict):
+        _reject_unknown(raw["metric"], {"name", "direction", "command", "description", "unit", "repeats", "improvement"}, "metric")
+    data = deepcopy(raw)
+    warnings = []
+    if "schema_version" in data:
+        warnings.append(f"schema_version {data.get('schema_version')!r} migrated to canonical config")
+    task = deepcopy(data.get("task") or {})
+    metric = deepcopy(data.get("metric") or task.pop("metric", None) or {})
+    loop = deepcopy(data.get("loop") or {})
+    budget = data.get("budget") or {}
+    generation = data.get("generation") or {}
+    initialization = data.get("initialization") or {}
+    for src, dst in ((budget, "max_rounds"), (budget, "min_rounds"), (budget, "patience"), (budget, "candidates_per_round"), (generation, "enable_merge"), (initialization, "seed_count")):
+        if dst in src and dst not in loop:
+            loop[dst] = src[dst]
+    if "batch_size" in generation:
+        loop["candidates_per_round"] = generation["batch_size"]
     return {
-        "objective": {"name": task.get("name", ""), "goal": task.get("goal", "")},
-        "metric": {
-            "name": "primary",
-            "direction": "minimize" if "minimiz" in str(task.get("goal", "")).lower() else "maximize",
-            "command": metric_command,
-            "description": task.get("goal", ""),
-        },
-        "validation": {
-            "checks": [
-                {
-                    "name": f"legacy_check_{index + 1}",
-                    "command": command,
-                    "success_criteria": "command succeeds",
-                }
-                for index, command in enumerate(validation_commands)
-            ]
-        },
-        "resources": {
-            "data_files": list(task.get("data_files") or []),
-            "repo_path": next(iter(task.get("repo_paths") or []), None),
-            "context_paths": list((config.get("context") or {}).get("paths") or []),
-            "skills": list((config.get("context") or {}).get("skills") or []),
-        },
-        "safety": {
-            "editable_paths": list(policy.get("allowed_target_globs") or []),
-            "frozen_paths": list(policy.get("frozen_globs") or []),
-            "max_files_per_candidate": policy.get("max_target_files"),
-            "max_commits_per_candidate": policy.get("max_commits"),
-        },
-        "runtime": {
-            "description": runtime.get("environment", ""),
-            "setup_commands": [],
-            "python_command": runtime.get("python_command", ""),
-            "dependency_policy": runtime.get("dependency_policy", ""),
-        },
+        "kind": "task",
+        "task": task,
+        "project": deepcopy(data.get("project") or {}),
+        "metric": metric,
+        "validation": deepcopy(data.get("validation") or {"checks": []}),
+        "safety": deepcopy(data.get("safety") or {}),
+        "loop": loop,
+        "selection": deepcopy(data.get("selection") or data.get("gepa") or {}),
+        "executor": deepcopy(data.get("executor") or {}),
+        "judger": deepcopy(data.get("judger") or {}),
+        "usage_tracking": deepcopy(data.get("usage_tracking") or {}),
+        "evidence": deepcopy(data.get("evidence") or {}),
+        "_warnings": warnings,
     }
 
 
-def _validate_task_v2(data: dict[str, Any]) -> None:
-    _unknown(data, TASK_KEYS, "")
-    _equal(data.get("schema_version"), 2, "schema_version")
-    _equal(data.get("kind"), "task", "kind")
+def _migrate_profile(raw: dict[str, Any]) -> dict[str, Any]:
+    _reject_unknown(raw, PROFILE_TOP_KEYS, "")
+    data = deepcopy(raw)
+    warnings = []
+    if "schema_version" in data:
+        warnings.append(f"profile schema_version {data.get('schema_version')!r} migrated to canonical config")
+    source = deepcopy(data.get("source") or {})
+    if "path" not in source and source.get("repo_path"):
+        source["path"] = source["repo_path"]
+    resources = data.get("resources") or {}
+    docs = _dedupe(list(data.get("docs") or []) + list(resources.get("context_paths") or []))
+    provided = list(data.get("provided_paths") or [])
+    for item in resources.get("accessible_paths") or []:
+        provided.append({"path": item, "mode": "ro", "role": "resource"})
+    for item in resources.get("data_files") or []:
+        provided.append({"path": item, "mode": "ro", "role": "data_file"})
+    for item in (data.get("filesystem") or {}).get("readable") or []:
+        provided.append({"path": item, "mode": "ro", "role": "provided_path"})
+    for item in (data.get("filesystem") or {}).get("writable") or []:
+        provided.append({"path": item, "mode": "rw", "role": "provided_path"})
+    reference = deepcopy(data.get("reference") or {})
+    commands = list(reference.get("commands") or [])
+    environment = data.get("environment") or {}
+    runtime = data.get("runtime") or {}
+    build = data.get("build") or {}
+    commands.extend(environment.get("setup_commands") or [])
+    commands.extend(environment.get("setup") or [])
+    commands.extend(environment.get("check") or [])
+    commands.extend(runtime.get("setup") or [])
+    commands.extend(runtime.get("check") or [])
+    commands.extend(build.get("commands") or [])
+    reference["commands"] = _dedupe(commands)
+    reference.setdefault("note", "User-provided references only; GEPA must not auto-execute them.")
+    execution = data.get("execution") or {}
+    apptainer = dict(runtime.get("apptainer") or execution.get("apptainer") or {})
+    isolation = deepcopy(data.get("isolation") or {})
+    isolation.setdefault("backend", runtime.get("backend") or execution.get("runtime_backend") or "local")
+    isolation.setdefault("mode", "bind_paths")
+    if not isolation.get("image"):
+        image_source = runtime.get("image") or apptainer.get("image") or (data.get("executor_image") or {}).get("base_image") or (data.get("executor_image") or {}).get("base") or ""
+        if image_source:
+            isolation["image"] = image_source
+    if apptainer:
+        isolation["apptainer"] = apptainer
+    agent = deepcopy(data.get("agent") or {})
+    if not agent.get("command") and runtime.get("command"):
+        agent["command"] = runtime["command"]
+    return {
+        "kind": "project_profile",
+        "name": str(data.get("name") or "project"),
+        "source": source,
+        "docs": docs,
+        "provided_paths": provided,
+        "reference": reference,
+        "isolation": isolation,
+        "repo_overlays": list(data.get("repo_overlays") or resources.get("repo_overlays") or []),
+        "skills": list(data.get("skills") or resources.get("skills") or []),
+        "agent": agent,
+        "safety": deepcopy(data.get("safety") or {}),
+        "pre_materialized_lfs_paths": list(resources.get("pre_materialized_lfs_paths") or []),
+        "generated_tracked_paths": list(resources.get("generated_tracked_paths") or []),
+        "hash_artifacts": list(resources.get("hash_artifacts") or []),
+        "_env": _merge_env_dicts(runtime.get("env") or {}, environment.get("env") or {}),
+        "_warnings": warnings,
+    }
+
+
+def _validate_task(data: dict[str, Any]) -> None:
+    if data.get("kind") != "task":
+        raise ConfigError("kind: run configuration must have kind: task")
     task = _section(data.get("task"), "task")
     _required_text(task, "name", "task.name")
     _required_text(task, "goal", "task.goal")
-    samples = task.get("samples", [])
-    if samples is not None:
-        if not isinstance(samples, list):
-            raise ConfigError("task.samples: expected list")
-        for index, sample in enumerate(samples):
-            if not isinstance(sample, dict):
-                raise ConfigError(f"task.samples[{index}]: expected object")
-            sample_id = sample.get("sample_id")
-            if not isinstance(sample_id, str) or not sample_id.strip():
-                raise ConfigError(f"task.samples[{index}].sample_id: required non-empty string")
     project = _section(data.get("project"), "project")
     if ("profile" in project) == ("inline" in project):
         raise ConfigError("project: provide exactly one of profile or inline")
-    if "profile" in project:
-        _required_text(project, "profile", "project.profile")
-    if "ref" in project:
-        _required_text(project, "ref", "project.ref")
-    if "inline" in project and not isinstance(project["inline"], dict):
-        raise ConfigError("project.inline: expected object")
-    _validate_metric_validation_budget_common(data)
-
-
-def _validate_metric_validation_budget_common(data: dict[str, Any]) -> None:
     metric = _section(data.get("metric"), "metric")
-    _optional_text_fields(metric, ("command", "description", "unit"), "metric")
-    _required_text(metric, "name", "metric.name")
-    if metric.get("direction") not in {"minimize", "maximize"}:
+    if not metric.get("name"):
+        metric["name"] = "primary"
+    _required_text(metric, "direction", "metric.direction")
+    if metric["direction"] not in {"minimize", "maximize"}:
         raise ConfigError("metric.direction: expected 'minimize' or 'maximize'")
     if not metric.get("command") and not metric.get("description"):
         raise ConfigError("metric: provide at least one of command or description")
-    if "repeats" in metric:
-        _positive_int(metric["repeats"], "metric.repeats")
-    if "improvement" in metric:
-        improvement = _section(metric["improvement"], "improvement", "metric.improvement")
-        if improvement.get("mode") not in {"absolute", "relative_percent"}:
-            raise ConfigError("metric.improvement.mode: expected 'absolute' or 'relative_percent'")
-        minimum = improvement.get("minimum")
-        if isinstance(minimum, bool) or not isinstance(minimum, (int, float)):
-            raise ConfigError("metric.improvement.minimum: expected number")
-    validation = _section(data.get("validation") or {"checks": []}, "validation")
-    checks = validation.get("checks", [])
-    if not isinstance(checks, list):
-        raise ConfigError("validation.checks: expected list")
-    for index, check in enumerate(checks):
-        path = f"validation.checks[{index}]"
-        check = _section(check, "check", path)
-        _required_text(check, "name", f"{path}.name")
-        _required_text(check, "success_criteria", f"{path}.success_criteria")
-        if "command" in check:
-            _required_text(check, "command", f"{path}.command")
+    loop = _section(data.get("loop"), "loop")
+    if "max_rounds" not in loop:
+        raise ConfigError("loop.max_rounds: expected integer >= 0")
+    for key in ("max_rounds", "min_rounds", "patience", "candidates_per_round", "max_parallel_candidates", "seed_count"):
+        if key in loop:
+            _positive_int(loop[key], f"loop.{key}", allow_zero=(key in {"max_rounds", "min_rounds"}))
     _validate_safety(_section(data.get("safety") or {}, "safety"), "safety")
-    budget = _section(data.get("budget"), "budget")
-    _positive_int(budget.get("max_rounds"), "budget.max_rounds", allow_zero=True)
-    if "min_rounds" in budget:
-        _positive_int(budget["min_rounds"], "budget.min_rounds", allow_zero=True)
-    if "patience" in budget:
-        _positive_int(budget["patience"], "budget.patience")
-    if "candidates_per_round" in budget:
-        _positive_int(budget["candidates_per_round"], "budget.candidates_per_round")
-    initialization = _section(data.get("initialization") or {}, "initialization")
-    if "seed_count" in initialization:
-        _positive_int(initialization["seed_count"], "initialization.seed_count")
-    generation = _section(data.get("generation") or {}, "generation")
-    if "batch_size" in generation:
-        _positive_int(generation["batch_size"], "generation.batch_size")
-    if "enable_merge" in generation and not isinstance(generation["enable_merge"], bool):
-        raise ConfigError("generation.enable_merge: expected boolean")
-    gepa = _section(data.get("gepa") or {}, "gepa")
-    if "minibatch_size" in gepa:
-        _positive_int(gepa["minibatch_size"], "gepa.minibatch_size")
-    for field in ("feedback_sample_ids", "pareto_sample_ids"):
-        _string_list(gepa.get(field, []), f"gepa.{field}")
-    _optional_text_fields(gepa, ("frontier_policy", "acceptance_policy", "parent_sampling"), "gepa")
-    judger = _section(data.get("judger") or {}, "judger")
-    if "pass_threshold" in judger:
-        value = judger["pass_threshold"]
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ConfigError("judger.pass_threshold: expected number")
-    usage_tracking = _section(data.get("usage_tracking") or {}, "usage_tracking")
-    for field in ("enabled", "persist_raw_envelope", "print_round_summary", "print_run_summary"):
-        if field in usage_tracking and not isinstance(usage_tracking[field], bool):
-            raise ConfigError(f"usage_tracking.{field}: expected boolean")
-    evidence = _section(data.get("evidence") or {}, "evidence")
-    if "visualize_when_applicable" in evidence and not isinstance(evidence["visualize_when_applicable"], bool):
-        raise ConfigError("evidence.visualize_when_applicable: expected boolean")
-    if "plot_selection_policy" in evidence:
-        _required_text(evidence, "plot_selection_policy", "evidence.plot_selection_policy")
-    _string_list(evidence.get("artifact_formats", []), "evidence.artifact_formats")
-    if "guidance" in evidence:
-        _required_text(evidence, "guidance", "evidence.guidance")
 
 
-def _validate_profile_v2(data: dict[str, Any]) -> None:
-    _unknown(data, V2_PROFILE_KEYS, "")
-    _equal(data.get("schema_version"), 2, "schema_version")
-    _equal(data.get("kind"), "project_profile", "kind")
-    _required_text(data, "name", "name")
-    source = _section(data.get("source") or {}, "source")
-    mode = source.get("workspace_mode", "git_worktree" if source.get("repo_path") else "artifact_directory")
-    _optional_text_fields(source, ("repo_path", "default_ref", "workspace_mode"), "source")
+def _validate_profile(profile: dict[str, Any]) -> None:
+    if profile.get("kind") != "project_profile":
+        raise ConfigError("profile.kind: expected 'project_profile'")
+    _required_text(profile, "name", "profile.name")
+    source = _section(profile.get("source") or {}, "source")
+    mode = source.get("workspace_mode", "git_worktree" if source.get("path") else "artifact_directory")
     if mode not in {"git_worktree", "artifact_directory"}:
         raise ConfigError("source.workspace_mode: expected 'git_worktree' or 'artifact_directory'")
-    runtime = _section(data.get("runtime"), "runtime")
-    if runtime.get("backend") not in {"local", "apptainer"}:
-        raise ConfigError("runtime.backend: expected 'local' or 'apptainer'")
-    _required_text(runtime, "workdir", "runtime.workdir")
-    if not str(runtime["workdir"]).startswith("/"):
-        raise ConfigError("runtime.workdir: expected absolute container path")
-    _required_text(runtime, "command", "runtime.command")
-    if "append_agent_args" in runtime and not isinstance(runtime["append_agent_args"], bool):
-        raise ConfigError("runtime.append_agent_args: expected boolean")
-    if runtime.get("backend") == "apptainer":
-        _validate_runtime_apptainer_v2(_section(runtime.get("apptainer") or {}, "runtime_apptainer", "runtime.apptainer"))
-    env = _section(runtime.get("env") or {}, "runtime_env", "runtime.env")
-    _string_list(env.get("pass", []), "runtime.env.pass")
-    if "set" in env and not isinstance(env["set"], dict):
-        raise ConfigError("runtime.env.set: expected object")
-    for key, value in (env.get("set") or {}).items():
-        if not isinstance(key, str) or not isinstance(value, str):
-            raise ConfigError("runtime.env.set: expected string values")
-    _string_list(runtime.get("setup", []), "runtime.setup")
-    _string_list(runtime.get("check", []), "runtime.check")
-    mounts = _section(runtime.get("mounts") or {}, "runtime_mounts", "runtime.mounts")
-    repo_mounts = mounts.get("repo", {})
-    if not isinstance(repo_mounts, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in repo_mounts.items()):
-        raise ConfigError("runtime.mounts.repo: expected mapping of repo target to host source")
-    extra = mounts.get("extra", [])
-    if not isinstance(extra, list):
-        raise ConfigError("runtime.mounts.extra: expected list")
-    for index, item in enumerate(extra):
-        mount = _section(item, "runtime_extra_mount", f"runtime.mounts.extra[{index}]")
-        _required_text(mount, "source", f"runtime.mounts.extra[{index}].source")
-        _required_text(mount, "target", f"runtime.mounts.extra[{index}].target")
-        if not str(mount["target"]).startswith("/"):
-            raise ConfigError(f"runtime.mounts.extra[{index}].target: expected absolute container path")
-        if "mode" in mount and mount["mode"] not in {"ro", "rw"}:
-            raise ConfigError(f"runtime.mounts.extra[{index}].mode: expected 'ro' or 'rw'")
-    resources = _section(data.get("resources") or {}, "resources")
-    for field in ("data_files", "context_paths", "skills", "pre_materialized_lfs_paths", "generated_tracked_paths", "hash_artifacts"):
-        _string_list(resources.get(field, []), f"resources.{field}")
-    agent = _section(data.get("agent") or {}, "agent")
-    _string_list(agent.get("extra_args", []), "agent.extra_args")
-    if "timeout_seconds" in agent:
-        _positive_int(agent["timeout_seconds"], "agent.timeout_seconds")
-    _validate_safety(_section(data.get("safety") or {}, "safety"), "safety")
+    _string_list(profile.get("docs") or [], "docs")
+    for index, item in enumerate(profile.get("provided_paths") or []):
+        if not isinstance(item, dict):
+            raise ConfigError(f"provided_paths[{index}]: expected object")
+        _required_text(item, "path", f"provided_paths[{index}].path")
+        if item.get("mode", "ro") not in {"ro", "rw"}:
+            raise ConfigError(f"provided_paths[{index}].mode: expected 'ro' or 'rw'")
+    reference = _section(profile.get("reference") or {}, "reference")
+    _string_list(reference.get("commands") or [], "reference.commands")
+    isolation = _section(profile.get("isolation") or {}, "isolation")
+    if isolation.get("backend", "local") not in {"local", "apptainer"}:
+        raise ConfigError("isolation.backend: expected 'local' or 'apptainer'")
+    _validate_safety(_section(profile.get("safety") or {}, "safety"), "safety")
 
 
-def _validate_runtime_apptainer_v2(apptainer: dict[str, Any]) -> None:
-    _optional_text_fields(apptainer, ("image", "executable", "base_image", "claude_home_template", "claude_host_home", "install_command", "container_claude_dir"), "runtime.apptainer")
-    auto_image = apptainer.get("auto_image", None)
-    if auto_image is not None and not isinstance(auto_image, bool):
-        raise ConfigError("runtime.apptainer.auto_image: expected boolean or null")
-    if auto_image is False:
-        _required_text(apptainer, "image", "runtime.apptainer.image")
-    for field in ("cleanenv", "containall", "writable_tmpfs", "userns", "auto_init_claude_home", "auto_bind_claude_auth"):
-        if field in apptainer and not isinstance(apptainer[field], bool):
-            raise ConfigError(f"runtime.apptainer.{field}: expected boolean")
-    _string_list(apptainer.get("extra_exec_args", []), "runtime.apptainer.extra_exec_args")
-    _string_list(apptainer.get("extra_packages", []), "runtime.apptainer.extra_packages")
-    for field in ("home_readonly_binds",):
-        values = apptainer.get(field, [])
-        if not isinstance(values, list):
-            raise ConfigError(f"runtime.apptainer.{field}: expected list")
-
-
-def _compile_runtime_ir(runtime: dict[str, Any], profile_base: Path) -> dict[str, Any]:
-    backend = str(runtime["backend"])
-    workdir = str(runtime["workdir"]).rstrip("/") or "/"
-    command = str(runtime["command"])
-    apptainer = deepcopy(runtime.get("apptainer") or {})
-    apptainer = _resolve_runtime_apptainer_v2(apptainer, profile_base)
-    mounts = _compile_runtime_mounts(runtime.get("mounts") or {}, workdir, profile_base)
-    env = runtime.get("env") or {}
+def _resolve_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
     return {
-        "backend": backend,
-        "workdir": workdir,
-        "command": command,
-        "append_agent_args": bool(runtime.get("append_agent_args", True)),
-        "env": {"pass": list(env.get("pass") or []), "set": dict(env.get("set") or {})},
-        "init": [_compile_setup_command(command, index) for index, command in enumerate(runtime.get("setup") or [])],
-        "preflight": [{"name": f"check-{index + 1}", "command": command, "required": True} for index, command in enumerate(runtime.get("check") or [])],
-        "mounts": mounts,
-        "apptainer": apptainer,
+        "visualize_when_applicable": bool(evidence.get("visualize_when_applicable", False)),
+        "plot_selection_policy": str(evidence.get("plot_selection_policy", "proposer_selects")),
+        "artifact_formats": list(evidence.get("artifact_formats") or []),
+        "guidance": str(evidence.get("guidance", "")),
     }
 
 
-def _resolve_runtime_apptainer_v2(apptainer: dict[str, Any], profile_base: Path) -> dict[str, Any]:
+def _resolve_usage_tracking(usage: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "enabled": bool(usage.get("enabled", True)),
+        "persist_raw_envelope": bool(usage.get("persist_raw_envelope", True)),
+        "print_round_summary": bool(usage.get("print_round_summary", True)),
+        "print_run_summary": bool(usage.get("print_run_summary", True)),
+    }
+
+
+def _resolve_docs(docs: list[str], base: Path) -> list[str]:
+    return [str(_path(item, base)) for item in docs]
+
+
+def _resolve_provided_paths(items: list[Any], base: Path) -> list[dict[str, str]]:
+    result: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for index, item in enumerate(items):
+        if isinstance(item, str):
+            item = {"path": item, "mode": "ro", "role": "provided_path"}
+        if not isinstance(item, dict):
+            raise ConfigError(f"provided_paths[{index}]: expected object")
+        path = str(_path(item["path"], base))
+        mode = str(item.get("mode") or "ro")
+        role = str(item.get("role") or "provided_path")
+        note = str(item.get("note") or item.get("description") or "")
+        key = (path, mode)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append({"path": path, "mode": mode, "role": role, "note": note})
+    return result
+
+
+def _resolve_repo_overlays(overlays: list[dict[str, Any]], base: Path) -> list[dict[str, str]]:
+    result: list[dict[str, str]] = []
+    for index, item in enumerate(overlays):
+        source = _path(item["source"], base)
+        if not source.exists():
+            raise ConfigError(f"resources.repo_overlays[{index}].source: source does not exist: {source} (resolved relative to profile_dir)")
+        result.append({"source": str(source), "target": str(item["target"]), "mode": str(item.get("mode") or "ro"), "purpose": str(item.get("purpose") or "")})
+    return result
+
+
+def _compile_repo_overlays(overlays: list[dict[str, str]], workdir: str) -> list[dict[str, str]]:
+    return [{"source": item["source"], "target": f"{workdir}/{str(item['target']).lstrip('/')}", "mode": str(item.get("mode") or "ro")} for item in overlays]
+
+
+def _provided_path_mounts(paths: list[dict[str, str]]) -> list[dict[str, str]]:
+    return [{"source": item["path"], "target": item["path"], "mode": item.get("mode", "ro")} for item in paths]
+
+
+def _doc_mounts(docs: list[str], provided_paths: list[dict[str, str]]) -> list[dict[str, str]]:
+    provided = [Path(item["path"]) for item in provided_paths]
+    mounts: list[dict[str, str]] = []
+    for doc in docs:
+        path = Path(doc)
+        if not any(path == root or root in path.parents for root in provided):
+            mounts.append({"source": str(path), "target": str(path), "mode": "ro"})
+    return mounts
+
+
+def _resolve_apptainer(apptainer: dict[str, Any], base: Path) -> dict[str, Any]:
     result = deepcopy(apptainer)
     for field in ("image", "claude_home_template", "claude_host_home"):
         if result.get(field):
-            result[field] = str(_path(result[field], profile_base))
+            result[field] = str(_path(result[field], base))
+    for field in ("readonly_binds", "extra_binds", "home_readonly_binds"):
+        values = []
+        for item in result.get(field, []) or []:
+            values.append({**item, "source": str(_path(item["source"], base))} if isinstance(item, dict) else item)
+        if values:
+            result[field] = values
     result.setdefault("executable", "apptainer")
     return result
 
 
-def _compile_runtime_mounts(mounts: dict[str, Any], workdir: str, profile_base: Path) -> list[dict[str, str]]:
-    result: list[dict[str, str]] = []
-    for target, source in (mounts.get("repo") or {}).items():
-        source_path = _path(source, profile_base)
-        if not source_path.exists():
-            raise ConfigError(f"runtime.mounts.repo.{target}: source does not exist: {source_path} (resolved relative to profile_dir)")
-        result.append({"source": str(source_path), "target": f"{workdir}/{target.lstrip('/')}", "mode": "ro"})
-    for index, item in enumerate(mounts.get("extra") or []):
-        source_path = _path(item["source"], profile_base)
-        if not source_path.exists():
-            raise ConfigError(f"runtime.mounts.extra[{index}].source: source does not exist: {source_path} (resolved relative to profile_dir)")
-        result.append({"source": str(source_path), "target": str(item["target"]), "mode": str(item.get("mode") or "ro")})
+def _default_apptainer_options(apptainer: dict[str, Any]) -> dict[str, Any]:
+    result = {
+        "executable": "apptainer",
+        "cleanenv": False,
+        "containall": False,
+        "writable_tmpfs": True,
+        "userns": True,
+        "auto_init_claude_home": True,
+        "extra_exec_args": [],
+        "home_readonly_binds": [],
+    }
+    result.update(apptainer)
     return result
 
 
-def _compile_setup_command(command: str, index: int) -> dict[str, Any]:
-    raw = str(command).strip()
-    required = True
-    if raw.startswith("?"):
-        required = False
-        raw = raw[1:].strip()
-    if not raw:
-        raise ConfigError(f"runtime.setup[{index}]: required non-empty command")
-    parts = raw.split(None, 1)
-    if parts[0] in {"source", "."} and len(parts) == 2:
-        path = parts[1].strip()
-        op = {"op": "source", "path": path, "required": required}
-        if not path.startswith("/"):
-            op["base"] = "workdir"
-        return op
-    return {"op": "shell", "command": raw, "required": required}
+def _canonical_env(profile: dict[str, Any]) -> dict[str, Any]:
+    env = dict(profile.get("_env") or {})
+    return {"pass": _dedupe(list(env.get("pass") or [])), "set": dict(env.get("set") or {})}
 
 
-def _validate_task(data: dict[str, Any]) -> None:
-    _unknown(data, TASK_KEYS, "")
-    _equal(data.get("schema_version"), 1, "schema_version")
-    _equal(data.get("kind"), "task", "kind")
-    task = _section(data.get("task"), "task")
-    _required_text(task, "name", "task.name")
-    _required_text(task, "goal", "task.goal")
-    samples = task.get("samples", [])
-    if samples is not None:
-        if not isinstance(samples, list):
-            raise ConfigError("task.samples: expected list")
-        for index, sample in enumerate(samples):
-            if not isinstance(sample, dict):
-                raise ConfigError(f"task.samples[{index}]: expected object")
-            sample_id = sample.get("sample_id")
-            if not isinstance(sample_id, str) or not sample_id.strip():
-                raise ConfigError(f"task.samples[{index}].sample_id: required non-empty string")
-
-    project = _section(data.get("project"), "project")
-    if ("profile" in project) == ("inline" in project):
-        raise ConfigError("project: provide exactly one of profile or inline")
-    if "profile" in project:
-        _required_text(project, "profile", "project.profile")
-    if "ref" in project:
-        _required_text(project, "ref", "project.ref")
-    if "inline" in project and not isinstance(project["inline"], dict):
-        raise ConfigError("project.inline: expected object")
-
-    metric = _section(data.get("metric"), "metric")
-    _optional_text_fields(metric, ("command", "description", "unit"), "metric")
-    _required_text(metric, "name", "metric.name")
-    if metric.get("direction") not in {"minimize", "maximize"}:
-        raise ConfigError("metric.direction: expected 'minimize' or 'maximize'")
-    if not metric.get("command") and not metric.get("description"):
-        raise ConfigError("metric: provide at least one of command or description")
-    if "repeats" in metric:
-        _positive_int(metric["repeats"], "metric.repeats")
-    if "improvement" in metric:
-        improvement = _section(metric["improvement"], "improvement", "metric.improvement")
-        if improvement.get("mode") not in {"absolute", "relative_percent"}:
-            raise ConfigError("metric.improvement.mode: expected 'absolute' or 'relative_percent'")
-        minimum = improvement.get("minimum")
-        if isinstance(minimum, bool) or not isinstance(minimum, (int, float)):
-            raise ConfigError("metric.improvement.minimum: expected number")
-
-    validation = _section(data.get("validation") or {"checks": []}, "validation")
-    checks = validation.get("checks", [])
-    if not isinstance(checks, list):
-        raise ConfigError("validation.checks: expected list")
-    for index, check in enumerate(checks):
-        path = f"validation.checks[{index}]"
-        check = _section(check, "check", path)
-        _required_text(check, "name", f"{path}.name")
-        _required_text(check, "success_criteria", f"{path}.success_criteria")
-        if "command" in check:
-            _required_text(check, "command", f"{path}.command")
-
-    _validate_safety(_section(data.get("safety") or {}, "safety"), "safety")
-    budget = _section(data.get("budget"), "budget")
-    _positive_int(budget.get("max_rounds"), "budget.max_rounds", allow_zero=True)
-    if "min_rounds" in budget:
-        _positive_int(budget["min_rounds"], "budget.min_rounds", allow_zero=True)
-    if "patience" in budget:
-        _positive_int(budget["patience"], "budget.patience")
-    if "candidates_per_round" in budget:
-        _positive_int(budget["candidates_per_round"], "budget.candidates_per_round")
-
-    initialization = _section(data.get("initialization") or {}, "initialization")
-    if "seed_count" in initialization:
-        _positive_int(initialization["seed_count"], "initialization.seed_count")
-
-    generation = _section(data.get("generation") or {}, "generation")
-    if "batch_size" in generation:
-        _positive_int(generation["batch_size"], "generation.batch_size")
-    if "enable_merge" in generation and not isinstance(generation["enable_merge"], bool):
-        raise ConfigError("generation.enable_merge: expected boolean")
-
-    gepa = _section(data.get("gepa") or {}, "gepa")
-    if "minibatch_size" in gepa:
-        _positive_int(gepa["minibatch_size"], "gepa.minibatch_size")
-    for field in ("feedback_sample_ids", "pareto_sample_ids"):
-        _string_list(gepa.get(field, []), f"gepa.{field}")
-    _optional_text_fields(gepa, ("frontier_policy", "acceptance_policy", "parent_sampling"), "gepa")
-
-    judger = _section(data.get("judger") or {}, "judger")
-    if "pass_threshold" in judger:
-        value = judger["pass_threshold"]
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ConfigError("judger.pass_threshold: expected number")
-
-    usage_tracking = _section(data.get("usage_tracking") or {}, "usage_tracking")
-    for field in ("enabled", "persist_raw_envelope", "print_round_summary", "print_run_summary"):
-        if field in usage_tracking and not isinstance(usage_tracking[field], bool):
-            raise ConfigError(f"usage_tracking.{field}: expected boolean")
-
-    evidence = _section(data.get("evidence") or {}, "evidence")
-    if "visualize_when_applicable" in evidence and not isinstance(evidence["visualize_when_applicable"], bool):
-        raise ConfigError("evidence.visualize_when_applicable: expected boolean")
-    if "plot_selection_policy" in evidence:
-        _required_text(evidence, "plot_selection_policy", "evidence.plot_selection_policy")
-    _string_list(evidence.get("artifact_formats", []), "evidence.artifact_formats")
-    if "guidance" in evidence:
-        _required_text(evidence, "guidance", "evidence.guidance")
-
-
-def _validate_profile(data: dict[str, Any]) -> None:
-    _unknown(data, PROFILE_KEYS, "")
-    _equal(data.get("schema_version"), 1, "schema_version")
-    _equal(data.get("kind"), "project_profile", "kind")
-    _required_text(data, "name", "name")
-
-    source = _section(data.get("source") or {}, "source")
-    mode = source.get("workspace_mode", "git_worktree" if source.get("repo_path") else "artifact_directory")
-    _optional_text_fields(source, ("repo_path", "default_ref", "workspace_mode"), "source")
-    if mode not in {"git_worktree", "artifact_directory"}:
-        raise ConfigError("source.workspace_mode: expected 'git_worktree' or 'artifact_directory'")
-    environment = _section(data.get("environment") or {}, "environment")
-    _string_list(environment.get("setup_commands", []), "environment.setup_commands")
-    resources = _section(data.get("resources") or {}, "resources")
-    _optional_text_fields(environment, ("description", "python_command", "dependency_policy"), "environment")
-    for field in (
-        "data_files", "context_paths", "skills", "pre_materialized_lfs_paths",
-        "generated_tracked_paths", "hash_artifacts",
-    ):
-        _string_list(resources.get(field, []), f"resources.{field}")
-    assets = resources.get("readonly_assets", [])
-    if not isinstance(assets, list):
-        raise ConfigError("resources.readonly_assets: expected list")
-    for index, asset in enumerate(assets):
-        path = f"resources.readonly_assets[{index}]"
-        asset = _section(asset, "asset", path)
-        _required_text(asset, "source", f"{path}.source")
-        _required_text(asset, "target", f"{path}.target")
-    agent = _section(data.get("agent") or {}, "agent")
-    _string_list(agent.get("extra_args", []), "agent.extra_args")
-    _optional_text_fields(agent, ("command",), "agent")
-    if "timeout_seconds" in agent:
-        _positive_int(agent["timeout_seconds"], "agent.timeout_seconds")
-    execution = _section(data.get("execution") or {}, "execution")
-    if "max_parallel_candidates" in execution:
-        _positive_int(execution["max_parallel_candidates"], "execution.max_parallel_candidates")
-    if execution.get("lifecycle", "stateless") not in {"stateless", "materialize_once"}:
-        raise ConfigError("execution.lifecycle: expected 'stateless' or 'materialize_once'")
-    runtime_backend = execution.get("runtime_backend", "local")
-    if runtime_backend not in {"local", "apptainer"}:
-        raise ConfigError("execution.runtime_backend: expected 'local' or 'apptainer'")
-    if runtime_backend == "apptainer":
-        _validate_apptainer(_section(execution.get("apptainer"), "apptainer", "execution.apptainer"))
-    elif "apptainer" in execution:
-        _validate_apptainer(_section(execution.get("apptainer"), "apptainer", "execution.apptainer"), require_image=False)
-    _validate_safety(_section(data.get("safety") or {}, "safety"), "safety")
-
-
-def _validate_safety(safety: dict[str, Any], path: str) -> None:
-    _string_list(safety.get("editable_paths", []), f"{path}.editable_paths")
-    _string_list(safety.get("frozen_paths", []), f"{path}.frozen_paths")
-    for name in ("max_files_per_candidate", "max_commits_per_candidate"):
-        if name in safety:
-            _positive_int(safety[name], f"{path}.{name}")
-
-
-def _validate_apptainer(apptainer: dict[str, Any], require_image: bool = True) -> None:
-    auto_image = apptainer.get("auto_image", None)
-    if auto_image is not None and not isinstance(auto_image, bool):
-        raise ConfigError("execution.apptainer.auto_image: expected boolean or null")
-    # `image` is required only when auto-materialization is definitively disabled.
-    # When `auto_image` is null (auto) or true, the container_image materializer
-    # builds/fills the image at run time, so a missing image is not a schema error.
-    effective_require_image = require_image and (auto_image is False)
-    if effective_require_image:
-        _required_text(apptainer, "image", "execution.apptainer.image")
-    _optional_text_fields(
-        apptainer,
-        (
-            "image", "executable", "command", "container_repo", "container_artifacts",
-            "container_scratch", "container_home", "claude_home_template",
-            "base_image", "container_claude_dir", "install_command",
-        ),
-        "execution.apptainer",
-    )
-    for field in ("cleanenv", "containall", "writable_tmpfs", "userns", "auto_bind_claude_auth", "auto_init_claude_home"):
-        if field in apptainer and not isinstance(apptainer[field], bool):
-            raise ConfigError(f"execution.apptainer.{field}: expected boolean")
-    _string_list(apptainer.get("env_allowlist", []), "execution.apptainer.env_allowlist")
-    _string_list(apptainer.get("extra_exec_args", []), "execution.apptainer.extra_exec_args")
-    _string_list(apptainer.get("extra_packages", []), "execution.apptainer.extra_packages")
-    _string_list(apptainer.get("source_scripts", []), "execution.apptainer.source_scripts")
-    _string_list(apptainer.get("passthrough_environment", []), "execution.apptainer.passthrough_environment")
-    _string_list(apptainer.get("validation_commands", []), "execution.apptainer.validation_commands")
-    if "runtime_init" in apptainer:
-        runtime_init = _section(apptainer.get("runtime_init"), "runtime_init", "execution.apptainer.runtime_init")
-        _string_list(runtime_init.get("setup_commands", []), "execution.apptainer.runtime_init.setup_commands")
-        _string_list(runtime_init.get("validation_commands", []), "execution.apptainer.runtime_init.validation_commands")
-        _optional_text_fields(runtime_init, ("description", "python_command", "dependency_policy"), "execution.apptainer.runtime_init")
-    for field in ("readonly_binds", "extra_binds", "home_readonly_binds"):
-        values = apptainer.get(field, [])
-        if not isinstance(values, list):
-            raise ConfigError(f"execution.apptainer.{field}: expected list")
-        for index, value in enumerate(values):
-            if isinstance(value, str):
-                continue
-            bind = _section(value, "bind", f"execution.apptainer.{field}[{index}]")
-            _required_text(bind, "source", f"execution.apptainer.{field}[{index}].source")
-            _required_text(bind, "target", f"execution.apptainer.{field}[{index}].target")
-            if "mode" in bind:
-                _required_text(bind, "mode", f"execution.apptainer.{field}[{index}].mode")
+def _merge_env_dicts(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+    return {"pass": _dedupe(list(left.get("pass") or []) + list(right.get("pass") or [])), "set": {**dict(left.get("set") or {}), **dict(right.get("set") or {})}}
 
 
 def _merge_safety(profile: dict[str, Any], task: dict[str, Any]) -> dict[str, Any]:
@@ -950,9 +518,7 @@ def _merge_safety(profile: dict[str, Any], task: dict[str, Any]) -> dict[str, An
         editable = task_editable
     else:
         editable = task_editable or profile_editable
-    frozen = list(dict.fromkeys(
-        list(profile.get("frozen_paths") or []) + list(task.get("frozen_paths") or [])
-    ))
+    frozen = list(dict.fromkeys(list(profile.get("frozen_paths") or []) + list(task.get("frozen_paths") or [])))
     result: dict[str, Any] = {"editable_paths": editable, "frozen_paths": frozen}
     for key in ("max_files_per_candidate", "max_commits_per_candidate"):
         values = [int(section[key]) for section in (profile, task) if section.get(key) is not None]
@@ -969,76 +535,43 @@ def _within(pattern: str, ceilings: list[str]) -> bool:
     return False
 
 
-def _resolve_resources_v2(resources: dict[str, Any], base: Path) -> dict[str, Any]:
+def _validate_safety(safety: dict[str, Any], path: str) -> None:
+    _string_list(safety.get("editable_paths", []), f"{path}.editable_paths")
+    _string_list(safety.get("frozen_paths", []), f"{path}.frozen_paths")
+    for name in ("max_files_per_candidate", "max_commits_per_candidate"):
+        if name in safety:
+            _positive_int(safety[name], f"{path}.{name}")
+
+
+def _resolve_legacy(raw: dict[str, Any], config_path: Path) -> dict[str, Any]:
+    resolved = deepcopy(raw)
+    warnings = ["legacy config detected; migrate to canonical task/profile configuration"]
+    warnings.extend(f"unused legacy field: {field}" for field in LEGACY_UNUSED_FIELDS if _has_dotted(raw, field))
+    resolved["_meta"] = {"schema_version": 0, "source_files": {"task": str(config_path)}, "warnings": warnings, "resolution": {"legacy": "preserved"}}
+    resolved.setdefault("contracts", _legacy_contracts(resolved))
+    return resolved
+
+
+def _legacy_contracts(config: dict[str, Any]) -> dict[str, Any]:
+    task = config.get("task") or {}
+    policy = config.get("candidate_policy") or {}
+    runtime = config.get("runtime") or {}
+    validation_commands = list(task.get("validation_commands") or [])
+    metric_command = next(iter(task.get("benchmark_commands") or []), None)
     return {
-        "data_files": [str(_path(item, base)) for item in resources.get("data_files", [])],
-        "context_paths": [str(_path(item, base)) for item in resources.get("context_paths", [])],
-        "skills": list(resources.get("skills") or []),
-        "pre_materialized_lfs_paths": list(resources.get("pre_materialized_lfs_paths") or []),
-        "generated_tracked_paths": list(resources.get("generated_tracked_paths") or []),
-        "hash_artifacts": list(resources.get("hash_artifacts") or []),
+        "objective": {"name": task.get("name", ""), "goal": task.get("goal", "")},
+        "metric": {"name": "primary", "direction": "minimize" if "minimiz" in str(task.get("goal", "")).lower() else "maximize", "command": metric_command, "description": task.get("goal", "")},
+        "validation": {"checks": [{"name": f"legacy_check_{index + 1}", "command": command, "success_criteria": "command succeeds"} for index, command in enumerate(validation_commands)]},
+        "resources": {"data_files": list(task.get("data_files") or []), "repo_path": next(iter(task.get("repo_paths") or []), None), "context_paths": list((config.get("context") or {}).get("paths") or []), "skills": list((config.get("context") or {}).get("skills") or [])},
+        "safety": {"editable_paths": list(policy.get("allowed_target_globs") or []), "frozen_paths": list(policy.get("frozen_globs") or []), "max_files_per_candidate": policy.get("max_target_files"), "max_commits_per_candidate": policy.get("max_commits")},
+        "runtime": {"description": runtime.get("environment", ""), "setup_commands": [], "python_command": runtime.get("python_command", ""), "dependency_policy": runtime.get("dependency_policy", "")},
     }
-
-
-def _resolve_resources(resources: dict[str, Any], base: Path) -> dict[str, Any]:
-    return {
-        "data_files": [str(_path(item, base)) for item in resources.get("data_files", [])],
-        "context_paths": [str(_path(item, base)) for item in resources.get("context_paths", [])],
-        "skills": list(resources.get("skills") or []),
-        "readonly_assets": [
-            {"source": str(_path(item["source"], base)), "target": str(item["target"])}
-            for item in resources.get("readonly_assets", [])
-        ],
-        "pre_materialized_lfs_paths": list(resources.get("pre_materialized_lfs_paths") or []),
-        "generated_tracked_paths": list(resources.get("generated_tracked_paths") or []),
-        "hash_artifacts": list(resources.get("hash_artifacts") or []),
-    }
-
-
-def _resolve_apptainer(apptainer: dict[str, Any], base: Path) -> dict[str, Any]:
-    result = deepcopy(apptainer)
-    for field in ("image", "claude_home_template", "claude_host_home"):
-        if result.get(field):
-            result[field] = str(_path(result[field], base))
-    for field in ("readonly_binds", "extra_binds", "home_readonly_binds"):
-        values = []
-        for item in result.get(field, []) or []:
-            if isinstance(item, dict):
-                values.append({**item, "source": str(_path(item["source"], base))})
-            else:
-                values.append(item)
-        result[field] = values
-    return result
-
-
-def _attach_apptainer_runtime_init(apptainer: dict[str, Any], runtime_contract: dict[str, Any]) -> dict[str, Any]:
-    result = deepcopy(apptainer)
-    configured_init = dict(result.get("runtime_init") or {})
-    profile_setup = list(runtime_contract.get("setup_commands") or [])
-    explicit_setup = list(configured_init.get("setup_commands") or [])
-    configured_init.update(
-        {
-            "description": runtime_contract.get("description", ""),
-            "python_command": runtime_contract.get("python_command", ""),
-            "dependency_policy": runtime_contract.get("dependency_policy", ""),
-            "setup_commands": list(dict.fromkeys(profile_setup + explicit_setup)),
-            "validation_commands": list(configured_init.get("validation_commands") or result.get("validation_commands") or []),
-        }
-    )
-    result["runtime_init"] = configured_init
-    return result
 
 
 def _resolve_git_ref(repo: Path, ref: str) -> str:
     if not repo.exists():
-        raise ConfigError(f"source.repo_path: path does not exist: {repo}")
-    completed = subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "--verify", f"{ref}^{{commit}}"],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
+        raise ConfigError(f"source.path: path does not exist: {repo}")
+    completed = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", f"{ref}^{{commit}}"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
     if completed.returncode != 0:
         raise ConfigError(f"project.ref: cannot resolve {ref!r} in {repo}: {completed.stderr.strip()}")
     return completed.stdout.strip()
@@ -1047,10 +580,7 @@ def _resolve_git_ref(repo: Path, ref: str) -> str:
 def explain_config(config: dict[str, Any]) -> str:
     meta = config.get("_meta") or {}
     lines = ["Resolved GEPA configuration", ""]
-    lines.extend(
-        f"- source.{label}: {source}"
-        for label, source in (meta.get("source_files") or {}).items()
-    )
+    lines.extend(f"- source.{label}: {source}" for label, source in (meta.get("source_files") or {}).items())
     lines.extend([
         f"- task.name: {config.get('task', {}).get('name')} (task config)",
         f"- budget.max_rounds: {config.get('budget', {}).get('max_rounds')} (task/default)",
@@ -1069,12 +599,7 @@ def explain_config(config: dict[str, Any]) -> str:
 def sanitize_snapshot(value: Any) -> Any:
     sensitive = ("token", "secret", "password", "credential", "api-key", "api_key")
     if isinstance(value, dict):
-        return {
-            str(key): "<redacted>"
-            if any(part in str(key).lower() for part in sensitive)
-            else sanitize_snapshot(item)
-            for key, item in value.items()
-        }
+        return {str(key): "<redacted>" if any(part in str(key).lower() for part in sensitive) else sanitize_snapshot(item) for key, item in value.items()}
     if isinstance(value, list):
         result = []
         redact_next = False
@@ -1097,35 +622,22 @@ def sanitize_snapshot(value: Any) -> Any:
     return value
 
 
-def _section(value: Any, name: str, path: str | None = None) -> dict[str, Any]:
-    path = path or name
-    if not isinstance(value, dict):
-        raise ConfigError(f"{path}: expected object")
-    _unknown(value, SECTION_KEYS[name], path)
-    return value
-
-
-def _unknown(data: dict[str, Any], allowed: set[str], path: str) -> None:
+def _reject_unknown(data: dict[str, Any], allowed: set[str], path: str) -> None:
     unknown = sorted(set(data) - allowed)
     if unknown:
         prefix = f"{path}." if path else ""
         raise ConfigError(f"{prefix}{unknown[0]}: unknown field")
 
 
+def _section(value: Any, name: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ConfigError(f"{name}: expected object")
+    return value
+
+
 def _required_text(data: dict[str, Any], key: str, path: str) -> None:
     if not isinstance(data.get(key), str) or not data[key].strip():
         raise ConfigError(f"{path}: required non-empty string")
-
-
-def _equal(actual: Any, expected: Any, path: str) -> None:
-    if actual != expected:
-        raise ConfigError(f"{path}: expected {expected!r}")
-
-
-def _optional_text_fields(data: dict[str, Any], fields: tuple[str, ...], prefix: str) -> None:
-    for field in fields:
-        if field in data and (not isinstance(data[field], str) or not data[field].strip()):
-            raise ConfigError(f"{prefix}.{field}: expected non-empty string")
 
 
 def _positive_int(value: Any, path: str, allow_zero: bool = False) -> None:
@@ -1137,6 +649,26 @@ def _positive_int(value: Any, path: str, allow_zero: bool = False) -> None:
 def _string_list(value: Any, path: str) -> None:
     if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
         raise ConfigError(f"{path}: expected list of strings")
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    return list(dict.fromkeys(str(item) for item in items if str(item)))
+
+
+def _dedupe_mounts(mounts: list[dict[str, str]]) -> list[dict[str, str]]:
+    result: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in mounts:
+        key = (str(item["source"]), str(item["target"]), str(item.get("mode") or "ro"))
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append({"source": key[0], "target": key[1], "mode": key[2]})
+    return result
+
+
+def _looks_like_path(value: str) -> bool:
+    return value.startswith("/") or value.startswith("./") or value.startswith("../") or value.endswith(".sif")
 
 
 def _path(value: Any, base: Path) -> Path:

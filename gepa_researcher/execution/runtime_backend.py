@@ -75,12 +75,12 @@ class ApptainerRuntimeBackend:
     def __init__(self, run_dir: Path, config: dict[str, Any]):
         self.run_dir = run_dir
         self.config = config
-        self.runtime_ir = dict(config.get("_runtime_ir") or {})
+        self.runtime_spec = dict(config.get("_runtime_spec") or config.get("_runtime_ir") or {})
         self.executor_config = dict(config.get("executor") or {})
-        if not self.runtime_ir:
-            raise RuntimeBackendError("_runtime_ir is required for apptainer runtime")
-        self.apptainer_config = dict(self.runtime_ir.get("apptainer") or {})
-        self.container_repo = str(self.runtime_ir.get("workdir", "/workspace/repo"))
+        if not self.runtime_spec:
+            raise RuntimeBackendError("_runtime_spec is required for apptainer runtime")
+        self.apptainer_config = dict(self.runtime_spec.get("apptainer") or {})
+        self.container_repo = str(self.runtime_spec.get("workdir", "/workspace/repo"))
         self.container_artifacts = str(self.apptainer_config.get("container_artifacts", "/workspace/artifacts"))
         self.container_scratch = str(self.apptainer_config.get("container_scratch", "/workspace/scratch"))
         self.container_home = str(self.apptainer_config.get("container_home", "/workspace/home"))
@@ -91,9 +91,9 @@ class ApptainerRuntimeBackend:
         lease: WorkspaceLease,
         record: ExecutionRecord,
     ) -> RuntimeLease:
-        image = self._required_text("image")
-        if not Path(image).expanduser().exists():
-            raise RuntimeBackendError(f"executor.apptainer.image does not exist: {image}")
+        image = self._required_image()
+        if self._is_local_image(image) and not Path(image).expanduser().exists():
+            raise RuntimeBackendError(f"isolation.image resolved path does not exist: {image}")
         apptainer = str(self.apptainer_config.get("executable", "apptainer"))
         if shutil.which(apptainer) is None and not Path(apptainer).expanduser().exists():
             raise RuntimeBackendError(f"apptainer executable was not found: {apptainer}")
@@ -113,13 +113,13 @@ class ApptainerRuntimeBackend:
         self._init_claude_home(host_home)
 
         prefix = [apptainer, "exec"]
-        if bool(self.apptainer_config.get("cleanenv", True)):
+        if bool(self.apptainer_config.get("cleanenv", False)):
             prefix.append("--cleanenv")
-        if bool(self.apptainer_config.get("containall", True)):
+        if bool(self.apptainer_config.get("containall", False)):
             prefix.append("--containall")
         if bool(self.apptainer_config.get("writable_tmpfs", True)):
             prefix.append("--writable-tmpfs")
-        if bool(self.apptainer_config.get("userns", False)):
+        if bool(self.apptainer_config.get("userns", True)):
             prefix.append("--userns")
         prefix.extend(str(a) for a in self.apptainer_config.get("extra_exec_args", []) or [])
         # Update container paths for per-execution structure
@@ -145,11 +145,17 @@ class ApptainerRuntimeBackend:
 
         prefix.append(image)
 
-        executor_cmd = str(self.runtime_ir.get("command", self.config.get("agent", {}).get("command", "claude")))
-        runtime_init = {"init": list(self.runtime_ir.get("init") or []), "preflight": list(self.runtime_ir.get("preflight") or [])}
-        inline_shell = self._runtime_shell(runtime_init)
+        executor_cmd = str(self.runtime_spec.get("command", self.config.get("agent", {}).get("command", "claude")))
+        runtime_init = {"init": list(self.runtime_spec.get("setup") or self.runtime_spec.get("init") or []), "preflight": list(self.runtime_spec.get("check") or self.runtime_spec.get("preflight") or [])}
+        inline_shell = self._runtime_shell(runtime_init) if (runtime_init["init"] or runtime_init["preflight"]) else ""
+        entrypoint_host: Path | None = None
+        entrypoint_container: str | None = None
         if inline_shell:
-            prefix.extend(["/usr/bin/env", "bash", "-lc", inline_shell, "gepa-runtime"])
+            entrypoint_host = host_artifacts / f"gepa-runtime-entrypoint-{execution_id}.sh"
+            entrypoint_host.write_text(inline_shell + "\n", encoding="utf-8")
+            entrypoint_host.chmod(0o755)
+            entrypoint_container = f"{self.container_artifacts}/gepa-runtime-entrypoint-{execution_id}.sh"
+            prefix.extend(["/usr/bin/env", "bash", entrypoint_container])
 
         return RuntimeLease(
             backend=self.name,
@@ -168,14 +174,19 @@ class ApptainerRuntimeBackend:
                 "executor_command": executor_cmd,
                 "runtime_init": runtime_init,
                 "runtime_shell": inline_shell,
+                "runtime_entrypoint_host": str(entrypoint_host) if entrypoint_host else None,
+                "runtime_entrypoint_container": entrypoint_container,
             },
         )
 
-    def _required_text(self, field_name: str) -> str:
-        value = self.apptainer_config.get(field_name)
+    def _required_image(self) -> str:
+        value = self.runtime_spec.get("image") or self.apptainer_config.get("image")
         if not isinstance(value, str) or not value.strip():
-            raise RuntimeBackendError(f"executor.apptainer.{field_name}: required non-empty string")
-        return str(Path(value).expanduser())
+            raise RuntimeBackendError("isolation.image: required non-empty string after Apptainer materialization")
+        return str(Path(value).expanduser()) if self._is_local_image(value) else str(value)
+
+    def _is_local_image(self, value: str) -> bool:
+        return not (value.startswith("docker://") or value.startswith("library://") or value.startswith("oras://"))
 
     def _copy_home_template(self, host_home: Path) -> None:
         template = self.apptainer_config.get("claude_home_template")
@@ -183,9 +194,9 @@ class ApptainerRuntimeBackend:
             return
         source = Path(str(template)).expanduser().resolve()
         if not source.exists():
-            raise RuntimeBackendError(f"executor.apptainer.claude_home_template does not exist: {source}")
+            raise RuntimeBackendError(f"_runtime_spec.apptainer.claude_home_template does not exist: {source}")
         if source.is_file():
-            raise RuntimeBackendError("executor.apptainer.claude_home_template must be a directory")
+            raise RuntimeBackendError("_runtime_spec.apptainer.claude_home_template must be a directory")
         shutil.copytree(source, host_home, dirs_exist_ok=True)
 
     def _binds(
@@ -202,7 +213,7 @@ class ApptainerRuntimeBackend:
             f"{host_artifacts}:{self.container_artifacts}",
             f"{host_scratch}:{self.container_scratch}",
         ]
-        for item in self.runtime_ir.get("mounts", []) or []:
+        for item in self.runtime_spec.get("mounts", []) or []:
             source = Path(str(item["source"])).expanduser().resolve()
             target = str(item["target"])
             mode = str(item.get("mode") or "ro")
@@ -210,7 +221,7 @@ class ApptainerRuntimeBackend:
         binds.extend(home_readonly_binds)
         binds.extend(self._configured_binds("readonly_binds", readonly=True))
         binds.extend(self._configured_binds("extra_binds", readonly=False))
-        return binds
+        return self._dedupe_binds_by_target(binds)
 
     def _init_claude_home(self, host_home: Path) -> None:
         if not self.apptainer_config.get("auto_init_claude_home", True):
@@ -287,6 +298,18 @@ class ApptainerRuntimeBackend:
             binds.append(f"{source}:{target_container}:ro")
         return binds
 
+    def _dedupe_binds_by_target(self, binds: list[str]) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+        for bind in binds:
+            parts = bind.split(":", 2)
+            target = parts[1] if len(parts) >= 2 else parts[0]
+            if target in seen:
+                continue
+            seen.add(target)
+            result.append(bind)
+        return result
+
     def _configured_binds(self, field_name: str, *, readonly: bool) -> list[str]:
         values = self.apptainer_config.get(field_name, [])
         if values is None:
@@ -304,7 +327,7 @@ class ApptainerRuntimeBackend:
         return binds
 
     def _allowed_host_env(self) -> dict[str, str]:
-        names = list((self.runtime_ir.get("env") or {}).get("pass") or [])
+        names = list((self.runtime_spec.get("env") or {}).get("pass") or [])
         return {name: os.environ[name] for name in dict.fromkeys(names) if name in os.environ}
 
     def _build_environment(self, candidate: Candidate, record: ExecutionRecord, container_scratch: str) -> dict[str, str]:
@@ -316,7 +339,7 @@ class ApptainerRuntimeBackend:
             "GEPA_ARTIFACTS": self.container_artifacts,
             "TMPDIR": f"{container_scratch}/tmp",
         }
-        env.update({str(key): str(value) for key, value in ((self.runtime_ir.get("env") or {}).get("set") or {}).items()})
+        env.update({str(key): str(value) for key, value in ((self.runtime_spec.get("env") or {}).get("set") or {}).items()})
         env.update(self._allowed_host_env())
         return env
 

@@ -185,7 +185,13 @@ class ClaudeCodeClientTest(unittest.TestCase):
                     label="fake",
                     cwd=host_cwd,
                     env={"ALLOWED_ENV": "kept", "PATH": os.environ.get("PATH", "")},
-                    command_prefix=[str(launcher), "exec", "--pwd", "/workspace/repo"],
+                    command_prefix=[
+                        str(launcher),
+                        "exec",
+                        "--pwd",
+                        "/workspace/repo",
+                        "/workspace/artifacts/gepa-runtime-entrypoint-exec-1.sh",
+                    ],
                     inherit_host_env=False,
                     resolve_command_on_host=False,
                 )
@@ -195,6 +201,12 @@ class ClaudeCodeClientTest(unittest.TestCase):
             self.assertIsNone(result.data["secret"])
             self.assertIn("claude-inside-container", result.data["argv"])
             self.assertIn("--pwd", result.data["argv"])
+            entrypoint_idx = result.data["argv"].index("/workspace/artifacts/gepa-runtime-entrypoint-exec-1.sh")
+            command_idx = result.data["argv"].index("claude-inside-container")
+            prompt_flag_idx = result.data["argv"].index("-p")
+            self.assertLess(entrypoint_idx, command_idx)
+            self.assertEqual(result.data["argv"][command_idx + 1:command_idx + 3], ["-p", "hello"])
+            self.assertLess(command_idx, prompt_flag_idx)
 
 
 if __name__ == "__main__":
