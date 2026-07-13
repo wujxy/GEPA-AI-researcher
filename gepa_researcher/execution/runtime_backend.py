@@ -213,6 +213,9 @@ class ApptainerRuntimeBackend:
             f"{host_artifacts}:{self.container_artifacts}",
             f"{host_scratch}:{self.container_scratch}",
         ]
+        git_common_dir = self._git_common_dir_for_worktree(host_repo)
+        if git_common_dir is not None:
+            binds.append(f"{git_common_dir}:{git_common_dir}:rw")
         for item in self.runtime_spec.get("mounts", []) or []:
             source = Path(str(item["source"])).expanduser().resolve()
             target = str(item["target"])
@@ -222,6 +225,32 @@ class ApptainerRuntimeBackend:
         binds.extend(self._configured_binds("readonly_binds", readonly=True))
         binds.extend(self._configured_binds("extra_binds", readonly=False))
         return self._dedupe_binds_by_target(binds)
+
+    def _git_common_dir_for_worktree(self, host_repo: Path) -> Path | None:
+        git_file = host_repo / ".git"
+        if not git_file.is_file():
+            return None
+        try:
+            first_line = git_file.read_text(encoding="utf-8").splitlines()[0].strip()
+        except (OSError, IndexError, UnicodeDecodeError):
+            return None
+        prefix = "gitdir:"
+        if not first_line.lower().startswith(prefix):
+            return None
+        gitdir_text = first_line[len(prefix):].strip()
+        gitdir = Path(gitdir_text)
+        if not gitdir.is_absolute():
+            gitdir = (host_repo / gitdir).resolve()
+        else:
+            gitdir = gitdir.expanduser().resolve()
+        try:
+            common_text = (gitdir / "commondir").read_text(encoding="utf-8").splitlines()[0].strip()
+        except (OSError, IndexError, UnicodeDecodeError):
+            common_dir = gitdir.parent.parent if gitdir.parent.name == "worktrees" else gitdir
+        else:
+            common_path = Path(common_text)
+            common_dir = (gitdir / common_path).resolve() if not common_path.is_absolute() else common_path.expanduser().resolve()
+        return common_dir if common_dir.exists() else None
 
     def _init_claude_home(self, host_home: Path) -> None:
         if not self.apptainer_config.get("auto_init_claude_home", True):

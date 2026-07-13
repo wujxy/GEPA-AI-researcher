@@ -350,6 +350,27 @@ class RuntimeBackendTest(unittest.TestCase):
 
             self.assertIn("docker://almalinux:9", runtime.command_prefix)
 
+    def test_apptainer_backend_binds_git_common_dir_for_worktree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image = root / "executor.sif"
+            image.write_text("image", encoding="utf-8")
+            apptainer = root / "apptainer"
+            apptainer.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            os.chmod(apptainer, 0o755)
+            lease = _lease(root)
+            worktree = Path(lease.worktree_path)
+            common_git = root / "source" / ".git"
+            gitdir = common_git / "worktrees" / "repo1"
+            gitdir.mkdir(parents=True)
+            (gitdir / "commondir").write_text("../..\n", encoding="utf-8")
+            (worktree / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
+            config = _apptainer_config(root, image, apptainer)
+
+            runtime = ApptainerRuntimeBackend(root, config).prepare(_candidate(), lease, _record())
+
+            self.assertIn(f"{common_git}:{common_git}:rw", runtime.command_prefix)
+
     def test_apptainer_backend_dedupes_binds_by_target(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

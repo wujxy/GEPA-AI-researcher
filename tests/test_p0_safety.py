@@ -6,6 +6,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from gepa_researcher.loop.admission import CandidateAdmissionGate
 from gepa_researcher.agents.agent_client import AgentError, ClaudeCodeClient
@@ -199,6 +200,194 @@ class WorkspaceAndProvenanceTest(unittest.TestCase):
             self.assertIn("return 1", (Path(b.worktree_path) / "src" / "hot.cc").read_text(encoding="utf-8"))
             self.assertEqual(_git(repo, "rev-parse", "HEAD"), before_head)
             self.assertEqual(_git(repo, "status", "--porcelain"), before_status)
+
+    def test_worktree_add_skips_lfs_smudge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, baseline = _make_repo(root)
+            run_dir = root / "run"
+            config = {
+                "workspace": {
+                    "mode": "git_worktree",
+                    "repo_path": str(repo),
+                    "root": str(run_dir / "worktrees"),
+                    "baseline_ref": baseline,
+                    "branch_prefix": "gepa/test",
+                },
+            }
+            captured_env = {}
+
+            def fake_run(argv, **kwargs):
+                if argv[1:3] == ["-C", str(repo)] and argv[3:6] == ["rev-parse", "--verify", f"{baseline}^{{commit}}"]:
+                    return subprocess.CompletedProcess(argv, 0, stdout=baseline + "\n", stderr="")
+                if "worktree" in argv and "add" in argv:
+                    captured_env.update(kwargs.get("env") or {})
+                    self.assertIn("filter.lfs.required=false", argv)
+                    self.assertIn("filter.lfs.smudge=", argv)
+                    self.assertIn("filter.lfs.process=", argv)
+                    return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+                if argv[3:5] == ["rev-parse", "HEAD"]:
+                    return subprocess.CompletedProcess(argv, 0, stdout=baseline + "\n", stderr="")
+                return subprocess.run(argv, **kwargs)
+
+            with patch("gepa_researcher.execution.workspace.subprocess.run", side_effect=fake_run):
+                lease = WorkspaceManager(run_dir, config).prepare(_candidate())
+
+            self.assertEqual(lease.actual_start_sha, baseline)
+            self.assertEqual(captured_env.get("GIT_LFS_SKIP_SMUDGE"), "1")
+            self.assertEqual(captured_env.get("GIT_TERMINAL_PROMPT"), "0")
+
+    def test_worktree_materializes_pre_materialized_lfs_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, baseline = _make_repo(root)
+            fixture_dir = repo / "tests" / "fixtures" / "v107_rev1"
+            fixture_dir.mkdir(parents=True)
+            (fixture_dir / "charge_pdf.bin").write_bytes(b"real-binary-fixture")
+            (fixture_dir / "time_pdf.bin").write_bytes(b"another-real-fixture")
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-m", "fixtures")
+            baseline = _git(repo, "rev-parse", "HEAD")
+            run_dir = root / "run"
+            config = {
+                "workspace": {
+                    "mode": "git_worktree",
+                    "repo_path": str(repo),
+                    "root": str(run_dir / "worktrees"),
+                    "baseline_ref": baseline,
+                    "branch_prefix": "gepa/test",
+                    "pre_materialized_lfs_paths": ["tests/fixtures/v107_rev1/*.bin"],
+                },
+            }
+
+            lease = WorkspaceManager(run_dir, config).prepare(_candidate())
+
+            materialized = Path(lease.worktree_path) / "tests" / "fixtures" / "v107_rev1"
+            self.assertEqual((materialized / "charge_pdf.bin").read_bytes(), b"real-binary-fixture")
+            self.assertEqual((materialized / "time_pdf.bin").read_bytes(), b"another-real-fixture")
+
+    def test_worktree_rejects_non_relative_materialized_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, baseline = _make_repo(root)
+            run_dir = root / "run"
+            config = {
+                "workspace": {
+                    "mode": "git_worktree",
+                    "repo_path": str(repo),
+                    "root": str(run_dir / "worktrees"),
+                    "baseline_ref": baseline,
+                    "branch_prefix": "gepa/test",
+                    "pre_materialized_lfs_paths": ["../outside.bin"],
+                },
+            }
+
+            with self.assertRaisesRegex(Exception, "repo-relative"):
+                WorkspaceManager(run_dir, config).prepare(_candidate())
+
+    def test_worktree_rejects_unmatched_materialized_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, baseline = _make_repo(root)
+            run_dir = root / "run"
+            config = {
+                "workspace": {
+                    "mode": "git_worktree",
+                    "repo_path": str(repo),
+                    "root": str(run_dir / "worktrees"),
+                    "baseline_ref": baseline,
+                    "branch_prefix": "gepa/test",
+                    "pre_materialized_lfs_paths": ["tests/fixtures/v107_rev1/*.bin"],
+                },
+            }
+
+            with self.assertRaisesRegex(Exception, "matched no files"):
+                WorkspaceManager(run_dir, config).prepare(_candidate())
+
+    def test_controller_snapshot_ignores_editor_debris_but_not_source_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, baseline = _make_repo(root)
+            run_dir = root / "run"
+            config = {
+                "workspace": {
+                    "mode": "git_worktree",
+                    "repo_path": str(repo),
+                    "root": str(run_dir / "worktrees"),
+                    "baseline_ref": baseline,
+                    "branch_prefix": "gepa/test",
+                },
+            }
+            manager = WorkspaceManager(run_dir, config)
+            snapshot = manager.controller_snapshot()
+
+            cache_dir = repo / ".cache" / "clangd" / "index"
+            cache_dir.mkdir(parents=True)
+            (cache_dir / "hot.cc.idx").write_text("index\n", encoding="utf-8")
+            (repo / "judgement.json").write_text("{}\n", encoding="utf-8")
+            manager.assert_controller_unchanged(snapshot)
+
+            (repo / "src" / "external.cc").write_text("int external() { return 1; }\n", encoding="utf-8")
+            with self.assertRaisesRegex(Exception, "controller repository changed"):
+                manager.assert_controller_unchanged(snapshot)
+
+    def test_protect_controller_recovers_stale_lock_and_readonly_checkout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, baseline = _make_repo(root)
+            run_dir = root / "run"
+            config = {
+                "workspace": {
+                    "mode": "git_worktree",
+                    "repo_path": str(repo),
+                    "root": str(run_dir / "worktrees"),
+                    "baseline_ref": baseline,
+                    "branch_prefix": "gepa/test",
+                },
+            }
+            manager = WorkspaceManager(run_dir, config)
+            lock = repo / ".gepa-running.lock"
+            lock.write_text("GEPA controller checkout is in use.\npid=99999999\n", encoding="utf-8")
+            for path in [repo, lock, repo / "src", repo / "src" / "hot.cc"]:
+                path.chmod(path.stat().st_mode & ~0o222)
+
+            with manager.protect_controller():
+                self.assertTrue(lock.exists())
+                self.assertIn(f"pid={os.getpid()}", lock.read_text(encoding="utf-8"))
+                self.assertEqual(repo.stat().st_mode & 0o222, 0)
+
+            self.assertFalse(lock.exists())
+            self.assertNotEqual(repo.stat().st_mode & 0o200, 0)
+            self.assertNotEqual((repo / "src" / "hot.cc").stat().st_mode & 0o200, 0)
+
+    def test_protect_controller_write_protects_worktree_and_restores_modes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, baseline = _make_repo(root)
+            run_dir = root / "run"
+            config = {
+                "workspace": {
+                    "mode": "git_worktree",
+                    "repo_path": str(repo),
+                    "root": str(run_dir / "worktrees"),
+                    "baseline_ref": baseline,
+                    "branch_prefix": "gepa/test",
+                },
+            }
+            manager = WorkspaceManager(run_dir, config)
+            repo_mode_before = repo.stat().st_mode
+            source_mode_before = (repo / "src").stat().st_mode
+
+            with manager.protect_controller():
+                self.assertTrue((repo / ".gepa-running.lock").exists())
+                self.assertEqual(repo.stat().st_mode & 0o222, 0)
+                self.assertEqual((repo / "src").stat().st_mode & 0o222, 0)
+                with self.assertRaises(OSError):
+                    (repo / "clangd.tmp").write_text("cache\n", encoding="utf-8")
+
+            self.assertFalse((repo / ".gepa-running.lock").exists())
+            self.assertEqual(repo.stat().st_mode, repo_mode_before)
+            self.assertEqual((repo / "src").stat().st_mode, source_mode_before)
 
     def test_audit_commit_records_changed_files_and_ignores_runtime_debris(self):
         # The commit audit looks only at the delivered commit, never the working

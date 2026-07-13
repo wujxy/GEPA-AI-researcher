@@ -62,7 +62,7 @@ class DeriveRequirementsTest(unittest.TestCase):
             self.assertIn(tool, req.tools, f"missing detected tool {tool}")
         # Reference/build-shaped commands do not become runtime entrypoints, but
         # they do require a generic build bootstrap in the generated image.
-        self.assertEqual(req.image_required_tools, ["bash", "cmake", "make", "gcc", "g++", "git"])
+        self.assertEqual(req.image_required_tools, ["bash", "cmake", "make", "gcc", "g++", "git", "python3", "pytest"])
 
     def test_pure_python_project(self):
         resolved = {
@@ -75,7 +75,7 @@ class DeriveRequirementsTest(unittest.TestCase):
         self.assertFalse(req.cvmfs_required)
         self.assertTrue(req.is_pure_python)
         self.assertEqual(req.suggested_base, "docker://python:3.11-slim")
-        self.assertEqual(req.image_required_tools, ["bash", "python3"])
+        self.assertEqual(req.image_required_tools, ["bash", "python3", "pytest"])
 
     def test_python3_dedups_bare_python(self):
         resolved = {
@@ -115,15 +115,62 @@ class DeriveRequirementsTest(unittest.TestCase):
         self.assertEqual(req.image_required_tools, ["bash", "cmake", "make", "gcc", "g++", "git"])
         self.assertEqual(resolved["contracts"]["runtime"], {"setup": [], "check": []})
 
+    def test_pytest_validation_becomes_image_requirement(self):
+        resolved = {
+            "task": {"validation_commands": ["python -m pytest tests/test_consistency.py"]},
+            "contracts": {"resources": {"accessible_paths": ["/cvmfs/juno.ihep.ac.cn"]}},
+        }
+
+        req = derive_requirements(resolved)
+
+        self.assertIn("pytest", req.tools)
+        self.assertIn("python3", req.image_required_tools)
+        self.assertIn("pytest", req.image_required_tools)
+        self.assertEqual(
+            ci._packages_for_tools(req.image_required_tools, "docker://almalinux:9"),
+            ["python3", "python3-pytest"],
+        )
+        rpm_runtime = ci._runtime_packages_for_base("docker://almalinux:9")
+        for package in (
+            "bash",
+            "time",
+            "git-lfs",
+            "python-unversioned-command",
+            "python3-pip",
+            "python3-pytest",
+            "rsync",
+            "openssh-clients",
+        ):
+            self.assertIn(package, rpm_runtime)
+        self.assertNotIn("coreutils", rpm_runtime)
+        for project_package in ("libSM", "libX11", "mesa-libGL", "freetype"):
+            self.assertNotIn(project_package, rpm_runtime)
+
+        deb_runtime = ci._runtime_packages_for_base("docker://python:3.11-slim")
+        for package in (
+            "bash",
+            "coreutils",
+            "time",
+            "git-lfs",
+            "python-is-python3",
+            "python3-pip",
+            "python3-pytest",
+            "rsync",
+            "openssh-client",
+        ):
+            self.assertIn(package, deb_runtime)
+        for project_package in ("libsm6", "libx11-6", "libgl1", "libfreetype6"):
+            self.assertNotIn(project_package, deb_runtime)
+
     def test_tool_package_mapping_matches_common_bases(self):
-        tools = ["bash", "cmake", "make", "gcc", "g++", "git", "ninja"]
+        tools = ["bash", "cmake", "make", "gcc", "g++", "git", "ninja", "python"]
         self.assertEqual(
             ci._packages_for_tools(tools, "docker://almalinux:9"),
-            ["cmake", "make", "gcc", "gcc-c++", "git", "ninja-build"],
+            ["cmake", "make", "gcc", "gcc-c++", "git", "ninja-build", "python3", "python-unversioned-command"],
         )
         self.assertEqual(
             ci._packages_for_tools(tools, "docker://python:3.11-slim"),
-            ["cmake", "make", "gcc", "g++", "git", "ninja-build"],
+            ["cmake", "make", "gcc", "g++", "git", "ninja-build", "python3", "python-is-python3"],
         )
 
     def test_explicit_bootstrap_tools_are_image_requirements(self):

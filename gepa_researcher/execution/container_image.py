@@ -132,6 +132,9 @@ _RPM_TOOL_PACKAGES = {
     "make": ["make"],
     "ninja": ["ninja-build"],
     "git": ["git"],
+    "python3": ["python3"],
+    "python": ["python3", "python-unversioned-command"],
+    "pytest": ["python3-pytest"],
     "which": ["which"],
 }
 _DEB_TOOL_PACKAGES = {
@@ -141,8 +144,77 @@ _DEB_TOOL_PACKAGES = {
     "make": ["make"],
     "ninja": ["ninja-build"],
     "git": ["git"],
+    "python3": ["python3"],
+    "python": ["python3", "python-is-python3"],
+    "pytest": ["python3-pytest"],
     "which": ["which"],
 }
+_RPM_CVMFS_RUNTIME_PACKAGES = [
+    # General executor conveniences for projects that mount external runtime
+    # environments. Project-specific libraries still belong in config-declared
+    # apptainer.extra_packages or a user-provided image.
+    "bash",
+    # Alma/RHEL-style minimal images often ship coreutils-single; installing
+    # full coreutils conflicts with it, while coreutils-single already provides
+    # the shell primitives GEPA needs.
+    "findutils",
+    "grep",
+    "sed",
+    "gawk",
+    "diffutils",
+    "patch",
+    "tar",
+    "gzip",
+    "bzip2",
+    "xz",
+    "unzip",
+    "zip",
+    "file",
+    "which",
+    "hostname",
+    "procps-ng",
+    "util-linux",
+    "time",
+    "less",
+    "rsync",
+    "openssh-clients",
+    "git",
+    "git-lfs",
+    "python3",
+    "python-unversioned-command",
+    "python3-pip",
+    "python3-pytest",
+]
+_DEB_CVMFS_RUNTIME_PACKAGES = [
+    "bash",
+    "coreutils",
+    "findutils",
+    "grep",
+    "sed",
+    "gawk",
+    "diffutils",
+    "patch",
+    "tar",
+    "gzip",
+    "bzip2",
+    "xz-utils",
+    "unzip",
+    "zip",
+    "file",
+    "hostname",
+    "procps",
+    "util-linux",
+    "time",
+    "less",
+    "rsync",
+    "openssh-client",
+    "git",
+    "git-lfs",
+    "python3",
+    "python-is-python3",
+    "python3-pip",
+    "python3-pytest",
+]
 _RPM_BASE_HINTS = ("almalinux", "rockylinux", "centos", "fedora", "ubi", "oraclelinux", "amazonlinux")
 
 
@@ -264,6 +336,10 @@ def derive_requirements(resolved_config: dict) -> Requirements:
         if "gcc" in tools or "g++" in tools:
             build_bootstrap.extend(["gcc", "g++"])
         image_required_tools = _dedupe(image_required_tools + build_bootstrap)
+    if "python3" in tools or "pytest" in tools:
+        image_required_tools = _dedupe(image_required_tools + ["python3"])
+    if "pytest" in tools:
+        image_required_tools = _dedupe(image_required_tools + ["pytest"])
     if is_pure_python:
         image_required_tools = _dedupe(image_required_tools + ["python3"])
 
@@ -627,6 +703,15 @@ def _packages_for_tools(tools: list[str], base: str) -> list[str]:
     return _dedupe(packages)
 
 
+def _runtime_packages_for_base(base: str) -> list[str]:
+    if not base.startswith("docker://"):
+        return []
+    base_l = base.lower()
+    if any(hint in base_l for hint in _RPM_BASE_HINTS):
+        return list(_RPM_CVMFS_RUNTIME_PACKAGES)
+    return list(_DEB_CVMFS_RUNTIME_PACKAGES)
+
+
 def _build_sif(
     base: str,
     out: Path,
@@ -859,6 +944,8 @@ def materialize_executor_image(
     claude_bind = resolve_claude_bind(req.claude_command)
     base_image = str(runtime_spec.get("image") or apptainer_cfg.get("base_image") or req.suggested_base)
     auto_packages = _packages_for_tools(req.image_required_tools, base_image)
+    if req.cvmfs_required:
+        auto_packages = _dedupe(auto_packages + _runtime_packages_for_base(base_image))
     extra_packages = _dedupe(
         auto_packages
         + list(apptainer_cfg.get("extra_packages") or [])

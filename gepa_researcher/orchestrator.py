@@ -66,6 +66,10 @@ class ResearchOrchestrator:
         self.pareto = ParetoSelector()
 
     def run(self) -> LoopState:
+        with self.workspace_manager.protect_controller():
+            return self._run_protected()
+
+    def _run_protected(self) -> LoopState:
         controller_snapshot = self.workspace_manager.controller_snapshot()
         self._assert_run_dir_reusable()
         state = self.store.load_or_create_state(self.config["task"]["name"], self.config.get("resume", False))
