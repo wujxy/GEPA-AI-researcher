@@ -589,10 +589,79 @@ class AgentComponentsTest(unittest.TestCase):
         prompt = client.prompts[0][1]
         self.assertIn("Trace decision facts", prompt)
         self.assertIn("'primary': 0.5", prompt)
+        self.assertIn("final response MUST be exactly one parseable JSON object", prompt)
+        self.assertIn("NEVER return a judgement report in Markdown", prompt)
+        self.assertIn("Markdown table", prompt)
         self.assertNotIn("expected_gain", prompt)
         self.assertNotIn("EXPECTED_IMPROVEMENT_SHOULD_NOT_APPEAR", prompt)
         self.assertNotIn("PRIOR_SHOULD_NOT_APPEAR", prompt)
         self.assertNotIn("SCORE_SHOULD_NOT_APPEAR", prompt)
+
+
+    def test_judger_repair_transcribes_after_non_json(self):
+        err = AgentError("Agent did not return a parseable JSON object.")
+        err.raw_output = "**JUDGEMENT COMPLETE**\n\nScore: 1.0 (passed)\nFeedback: keep this candidate."
+        repaired = type(
+            "Result",
+            (),
+            {
+                "text": "{}",
+                "data": {
+                    "score": 1.0,
+                    "passed": True,
+                    "per_sample_scores": [{"sample_id": "task_execution", "score": 1.0, "notes": "passed"}],
+                    "failure_categories": [],
+                    "actionable_feedback": ["keep this candidate"],
+                    "confidence": "high",
+                },
+            },
+        )()
+        client = QueuedClient([err, repaired])
+        candidate = _make_candidate("cand_judge_repair")
+        trace = Trace(candidate_id=candidate.candidate_id, round_id=0, samples=[])
+        judgment = AgentJudger(client).judge(candidate, trace, {"task": {"goal": "g"}, "judger": {"repair_retries": 1}})
+
+        self.assertEqual(len(client.prompts), 2)
+        repair_prompt = client.prompts[1][1]
+        self.assertIn("PREVIOUS attempt", repair_prompt)
+        self.assertIn("transcribe that judgment", repair_prompt)
+        self.assertIn("**JUDGEMENT COMPLETE**", repair_prompt)
+        self.assertEqual(judgment.score, 1.0)
+        self.assertTrue(judgment.passed)
+        self.assertTrue(judgment.artifacts.get("repair_applied"))
+        self.assertIn("Score: 1.0", judgment.artifacts.get("original_raw_output", ""))
+
+    def test_judger_repair_failure_falls_back_to_failed_judgment(self):
+        err1 = AgentError("first judger attempt produced no JSON")
+        err1.raw_output = "**JUDGEMENT COMPLETE**"
+        err2 = AgentError("repair attempt produced no JSON")
+        err2.raw_output = "still markdown"
+        client = QueuedClient([err1, err2])
+        candidate = _make_candidate("cand_judge_fallback")
+        trace = Trace(candidate_id=candidate.candidate_id, round_id=0, samples=[])
+
+        judgment = AgentJudger(client).judge(candidate, trace, {"task": {"goal": "g"}, "judger": {"repair_retries": 1}})
+
+        self.assertEqual(len(client.prompts), 2)
+        self.assertEqual(judgment.score, 0.0)
+        self.assertFalse(judgment.passed)
+        self.assertEqual(judgment.failure_categories, ["judger_invalid_json"])
+        self.assertTrue(judgment.artifacts.get("deterministic"))
+        self.assertIn("still markdown", judgment.artifacts.get("repair_raw_output", ""))
+
+    def test_judger_non_json_falls_back_when_repair_disabled(self):
+        err = AgentError("judger produced no JSON")
+        err.raw_output = "markdown only"
+        client = QueuedClient([err])
+        candidate = _make_candidate("cand_judge_no_repair")
+        trace = Trace(candidate_id=candidate.candidate_id, round_id=0, samples=[])
+
+        judgment = AgentJudger(client).judge(candidate, trace, {"task": {"goal": "g"}, "judger": {"repair_retries": 0}})
+
+        self.assertEqual(len(client.prompts), 1)
+        self.assertEqual(judgment.failure_categories, ["judger_invalid_json"])
+        self.assertFalse(judgment.passed)
+
 
 
     def test_executor_repair_skipped_when_disabled(self):

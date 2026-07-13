@@ -166,6 +166,27 @@ class ConfigSystemTest(unittest.TestCase):
             self.assertTrue(Path(config["task"]["data_files"][0]).is_absolute())
             self.assertTrue(Path(config["context"]["paths"][0]).is_absolute())
 
+    def test_max_parallel_candidates_is_not_capped_by_candidates_per_round(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_path, _ = self._write_fixture(root)
+            task = yaml.safe_load(task_path.read_text(encoding="utf-8"))
+            task["loop"] = {
+                "seed_count": 6,
+                "max_rounds": 1,
+                "min_rounds": 0,
+                "patience": 1,
+                "candidates_per_round": 3,
+                "max_parallel_candidates": 5,
+            }
+            task_path.write_text(yaml.safe_dump(task, sort_keys=False), encoding="utf-8")
+
+            config = load_and_resolve(task_path)
+
+            self.assertEqual(config["generation"]["batch_size"], 3)
+            self.assertEqual(config["initialization"]["seed_count"], 6)
+            self.assertEqual(config["executor"]["max_workers"], 5)
+
     def test_resolver_maps_extended_task_knobs(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -484,12 +505,17 @@ class ConfigSystemTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             task_path, _ = self._write_fixture(root)
-            for command in ("validate", "resolve", "explain"):
+            commands = [
+                ["validate", "--no-materialize"],
+                ["resolve"],
+                ["explain"],
+            ]
+            for command in commands:
                 stdout = StringIO()
                 stderr = StringIO()
                 with self.assertRaises(SystemExit) as raised:
                     with redirect_stdout(stdout), redirect_stderr(stderr):
-                        cli_main([command, "--config", str(task_path)])
+                        cli_main([*command, "--config", str(task_path)])
                 self.assertEqual(raised.exception.code, 0)
             self.assertFalse((root / "runs").exists())
             self.assertFalse(any(path.name == "worktrees" for path in root.rglob("*")))

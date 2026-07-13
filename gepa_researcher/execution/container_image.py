@@ -10,9 +10,9 @@ caches it by a content fingerprint, and merges the derived image path / binds /
 Design notes
 ------------
 - The image is intentionally THIN. For CVMFS-backed projects (e.g. JUNO/OMILREC)
-  the toolchain (gcc/cmake/ROOT/python) comes from a read-only ``/cvmfs`` bind, so
-  the image only needs ``bash``/coreutils plus a glibc that matches the CVMFS-built
-  binaries (hence ``almalinux:9`` when CVMFS is detected).
+  project libraries and experiment software come from read-only binds, while the
+  image provides a conservative bootstrap shell/build tool floor so the executor
+  can discover and run the project without turning config into a preflight script.
 - Claude Code is NOT baked in. The host nvm node-version directory is bound
   read-only at the same absolute path inside the container, so the (already
   allowlisted) host ``PATH`` resolves ``claude`` with zero rewriting.
@@ -117,12 +117,33 @@ _TOOL_PATTERNS: dict[str, str] = {
     "g++": r"\bg\+\+\b",
     "cmake": r"\bcmake\b",
     "make": r"\bmake\b",
+    "ninja": r"\bninja\b",
     "pytest": r"\bpytest\b",
     "bash": r"\bbash\b",
     "root": r"\broot\b",
 }
-_BUILD_TOOLS = {"gcc", "g++", "cmake", "make"}
+_BUILD_TOOLS = {"gcc", "g++", "cmake", "make", "ninja"}
 _PURE_PYTHON_OK = {"python3", "python", "pytest", "bash", "git"}
+
+_RPM_TOOL_PACKAGES = {
+    "gcc": ["gcc"],
+    "g++": ["gcc-c++"],
+    "cmake": ["cmake"],
+    "make": ["make"],
+    "ninja": ["ninja-build"],
+    "git": ["git"],
+    "which": ["which"],
+}
+_DEB_TOOL_PACKAGES = {
+    "gcc": ["gcc"],
+    "g++": ["g++"],
+    "cmake": ["cmake"],
+    "make": ["make"],
+    "ninja": ["ninja-build"],
+    "git": ["git"],
+    "which": ["which"],
+}
+_RPM_BASE_HINTS = ("almalinux", "rockylinux", "centos", "fedora", "ubi", "oraclelinux", "amazonlinux")
 
 
 def _collect_command_strings(resolved_config: dict) -> list[str]:
@@ -156,7 +177,10 @@ def _collect_command_strings(resolved_config: dict) -> list[str]:
     add_runtime_commands(runtime_ir)
     commands.extend((resolved_config.get("task") or {}).get("benchmark_commands") or [])
     commands.extend((resolved_config.get("task") or {}).get("validation_commands") or [])
-    commands.extend(((resolved_config.get("contracts") or {}).get("build") or {}).get("commands") or [])
+    # Reference commands are hints for the executor and image bootstrap only; GEPA
+    # never turns them into setup/preflight/build entrypoints.
+    commands.extend((contracts.get("reference") or {}).get("commands") or [])
+    commands.extend((contracts.get("build") or {}).get("commands") or [])
     return [str(item) for item in commands if item]
 
 
@@ -227,9 +251,19 @@ def derive_requirements(resolved_config: dict) -> Requirements:
     else:
         suggested_base = "docker://python:3.11-slim"
 
-    # What the IMAGE itself must provide. CVMFS supplies the compiler/python stack;
-    # pure-python images must ship python3. bash is always required.
+    # What the IMAGE itself must provide. Reference commands remain hints, but
+    # CMake/C++-shaped projects need a generic bootstrap floor in the image so the
+    # executor can actually build after binding user-guaranteed project resources.
     image_required_tools = _dedupe(["bash"] + explicit_bootstrap_tools)
+    if has_build_tools:
+        build_bootstrap: list[str] = []
+        if {"cmake", "make", "ninja"} & set(tools):
+            build_bootstrap.extend(["cmake", "make", "gcc", "g++", "git"])
+        if "ninja" in tools:
+            build_bootstrap.append("ninja")
+        if "gcc" in tools or "g++" in tools:
+            build_bootstrap.extend(["gcc", "g++"])
+        image_required_tools = _dedupe(image_required_tools + build_bootstrap)
     if is_pure_python:
         image_required_tools = _dedupe(image_required_tools + ["python3"])
 
@@ -335,7 +369,7 @@ def _fingerprint(
 # --------------------------------------------------------------------------- #
 
 
-def _run(argv: list[str], *, timeout: int) -> subprocess.CompletedProcess:
+def _run(argv: list[str], *, timeout: int, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(
         argv,
         stdout=subprocess.PIPE,
@@ -343,7 +377,20 @@ def _run(argv: list[str], *, timeout: int) -> subprocess.CompletedProcess:
         text=True,
         timeout=timeout,
         check=False,
+        env=env,
     )
+
+
+def _sanitized_build_env() -> dict[str, str]:
+    env = os.environ.copy()
+    for key in (
+        "APPTAINER_BIND",
+        "APPTAINER_BINDPATH",
+        "SINGULARITY_BIND",
+        "SINGULARITY_BINDPATH",
+    ):
+        env.pop(key, None)
+    return env
 
 
 def _is_executable(path: str | Path) -> bool:
@@ -568,6 +615,18 @@ def _probe_host_runtime(apptainer: str, *, tiny: str = _DEFAULT_TINY) -> dict:
     return result
 
 
+def _packages_for_tools(tools: list[str], base: str) -> list[str]:
+    """Map executable names to installable package names for generated images."""
+    if not base.startswith("docker://"):
+        return []
+    base_l = base.lower()
+    package_map = _RPM_TOOL_PACKAGES if any(hint in base_l for hint in _RPM_BASE_HINTS) else _DEB_TOOL_PACKAGES
+    packages: list[str] = []
+    for tool in tools:
+        packages.extend(package_map.get(tool, []))
+    return _dedupe(packages)
+
+
 def _build_sif(
     base: str,
     out: Path,
@@ -587,7 +646,7 @@ def _build_sif(
     if packages:
         recipe_path = _write_package_recipe(base, packages)
         build_source = str(recipe_path)
-    result = _run([apptainer, "build", str(tmp_out), build_source], timeout=timeout)
+    result = _run([apptainer, "build", str(tmp_out), build_source], timeout=timeout, env=_sanitized_build_env())
     if recipe_path is not None:
         try:
             recipe_path.unlink()
@@ -620,6 +679,12 @@ def _write_package_recipe(base: str, packages: list[str]) -> Path:
     package_args = " ".join(shlex.quote(pkg) for pkg in packages)
     recipe = f"""Bootstrap: docker
 From: {from_image}
+
+%setup
+    rootfs="${{APPTAINER_ROOTFS:-${{SINGULARITY_ROOTFS:-}}}}"
+    if [ -n "$rootfs" ]; then
+        mkdir -p "$rootfs/data" "$rootfs/cvmfs" "$rootfs/scratch" "$rootfs/work"
+    fi
 
 %post
     set -eu
@@ -793,7 +858,12 @@ def materialize_executor_image(
     req = derive_requirements(resolved_config)
     claude_bind = resolve_claude_bind(req.claude_command)
     base_image = str(runtime_spec.get("image") or apptainer_cfg.get("base_image") or req.suggested_base)
-    extra_packages = _dedupe(list(apptainer_cfg.get("extra_packages") or []) + list(runtime_spec.get("tools") or []))
+    auto_packages = _packages_for_tools(req.image_required_tools, base_image)
+    extra_packages = _dedupe(
+        auto_packages
+        + list(apptainer_cfg.get("extra_packages") or [])
+        + list(runtime_spec.get("tools") or [])
+    )
 
     fingerprint = _fingerprint(base_image, req.tools, claude_bind, extra_packages)
     CACHE_DIR.mkdir(parents=True, exist_ok=True)

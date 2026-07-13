@@ -60,8 +60,9 @@ class DeriveRequirementsTest(unittest.TestCase):
         self.assertEqual(req.suggested_base, "docker://almalinux:9")
         for tool in ("bash", "python", "pytest", "cmake"):
             self.assertIn(tool, req.tools, f"missing detected tool {tool}")
-        # Only bash must live in the (thin) image; the rest come from CVMFS.
-        self.assertEqual(req.image_required_tools, ["bash"])
+        # Reference/build-shaped commands do not become runtime entrypoints, but
+        # they do require a generic build bootstrap in the generated image.
+        self.assertEqual(req.image_required_tools, ["bash", "cmake", "make", "gcc", "g++", "git"])
 
     def test_pure_python_project(self):
         resolved = {
@@ -92,6 +93,38 @@ class DeriveRequirementsTest(unittest.TestCase):
         req = derive_requirements(resolved)
         self.assertIn("python3", req.tools)
         self.assertIn("git", req.tools)
+
+    def test_reference_commands_derive_bootstrap_without_runtime_setup(self):
+        resolved = {
+            "runtime": {"allowed_commands": []},
+            "task": {"benchmark_commands": [], "validation_commands": []},
+            "contracts": {
+                "runtime": {"setup": [], "check": []},
+                "reference": {
+                    "commands": [
+                        "source /cvmfs/juno.ihep.ac.cn/el9_amd64_gcc11/Release/J26.1.1/setup.sh",
+                        "cmake -S . -B build -DCMAKE_BUILD_TYPE=Release",
+                        "cmake --build build --parallel",
+                    ]
+                },
+            },
+        }
+        req = derive_requirements(resolved)
+        self.assertTrue(req.cvmfs_required)
+        self.assertIn("cmake", req.tools)
+        self.assertEqual(req.image_required_tools, ["bash", "cmake", "make", "gcc", "g++", "git"])
+        self.assertEqual(resolved["contracts"]["runtime"], {"setup": [], "check": []})
+
+    def test_tool_package_mapping_matches_common_bases(self):
+        tools = ["bash", "cmake", "make", "gcc", "g++", "git", "ninja"]
+        self.assertEqual(
+            ci._packages_for_tools(tools, "docker://almalinux:9"),
+            ["cmake", "make", "gcc", "gcc-c++", "git", "ninja-build"],
+        )
+        self.assertEqual(
+            ci._packages_for_tools(tools, "docker://python:3.11-slim"),
+            ["cmake", "make", "gcc", "g++", "git", "ninja-build"],
+        )
 
     def test_explicit_bootstrap_tools_are_image_requirements(self):
         resolved = {
@@ -125,6 +158,35 @@ class DeriveRequirementsTest(unittest.TestCase):
     def test_default_claude_command(self):
         req = derive_requirements({"runtime": {"allowed_commands": []}})
         self.assertEqual(req.claude_command, "claude")
+
+
+class BuildSifTest(unittest.TestCase):
+    def test_build_sif_clears_host_bind_environment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "image.sif"
+            seen = {}
+
+            def fake_run(argv, *, timeout, env=None):
+                seen["env"] = env or {}
+                tmp_out = Path(argv[2])
+                tmp_out.write_text("sif", encoding="utf-8")
+                return _completed(0)
+
+            with patch.dict(
+                os.environ,
+                {
+                    "APPTAINER_BIND": "/datafs,/data",
+                    "APPTAINER_BINDPATH": "/publicfs",
+                    "SINGULARITY_BIND": "/junofs",
+                    "SINGULARITY_BINDPATH": "/hpcfs",
+                },
+                clear=False,
+            ), patch.object(ci, "_run", side_effect=fake_run):
+                ci._build_sif("docker://almalinux:9", out, extra_packages=["make"])
+                self.assertTrue(out.exists())
+
+        for key in ("APPTAINER_BIND", "APPTAINER_BINDPATH", "SINGULARITY_BIND", "SINGULARITY_BINDPATH"):
+            self.assertNotIn(key, seen["env"])
 
 
 class FingerprintTest(unittest.TestCase):

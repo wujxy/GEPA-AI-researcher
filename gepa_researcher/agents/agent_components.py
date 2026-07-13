@@ -627,6 +627,14 @@ class AgentJudger:
 
     def judge(self, candidate: Candidate, trace: Trace, config: dict[str, Any]) -> Judgment:
         judger_context = build_judger_context(candidate, trace, config)
+        call_context = AgentCallContext(
+            role="judger",
+            round_id=candidate.round_id,
+            phase=str(config.get("_eval_phase", "pareto")),
+            candidate_id=candidate.candidate_id,
+            execution_id=config.get("_execution_id"),
+            parent_candidate_id=candidate.parent_ids[0] if candidate.parent_ids else None,
+        )
         prompt = f"""
 You are the JUDGER agent in a bounded GEPA-style research loop.
 
@@ -650,7 +658,13 @@ Rubric:
 - Penalize unsupported claims, missing metrics, regressions, overfitting to feedback, or failure to follow the candidate contract.
 - Do not assume hidden task facts that are not present in candidate facts, trace evidence, the task goal, or the judger contract.
 - Return actionable feedback that helps the next proposer.
-- Return only a JSON object, no prose outside JSON.
+
+Final delivery contract (mandatory):
+- Your final response MUST be exactly one parseable JSON object matching the schema below.
+- Wrapping the JSON in a ```json code fence is acceptable; any prose, Markdown table, heading, commentary, or natural-language summary outside the JSON is forbidden.
+- NEVER return a judgement report in Markdown.
+- If evidence is incomplete, ambiguous, contradictory, or insufficient, still return the JSON object with passed=false, an appropriately low score, failure_categories, actionable_feedback, and confidence="low|medium".
+- Do not ask for more data, do not say you will continue later, and do not emit a natural-language wrap-up.
 
 Required JSON schema:
 {{
@@ -662,30 +676,139 @@ Required JSON schema:
   "confidence": "low|medium|high"
 }}
 """
-        result = _run_agent_json(
-            self.client,
-            prompt,
-            "judger",
-            AgentCallContext(
-                role="judger",
-                round_id=candidate.round_id,
-                phase=str(config.get("_eval_phase", "pareto")),
-                candidate_id=candidate.candidate_id,
-                execution_id=config.get("_execution_id"),
-                parent_candidate_id=candidate.parent_ids[0] if candidate.parent_ids else None,
-            ),
+        repair_meta: dict[str, Any] = {}
+        try:
+            result = _run_agent_json(self.client, prompt, "judger", call_context)
+        except AgentError as exc:
+            raw_output = str(getattr(exc, "raw_output", None) or exc)[:4000]
+            repair_retries = int(config.get("judger", {}).get("repair_retries", 1))
+            if repair_retries <= 0:
+                return self._fallback_judgment(candidate, config, raw_output, "judger returned non-JSON output")
+            try:
+                result = _run_agent_json(
+                    self._repair_client_for_config(config),
+                    self._repair_prompt(raw_output, judger_context),
+                    "judger",
+                    call_context,
+                )
+                repair_meta = {"repair_applied": True, "original_raw_output": raw_output}
+            except AgentError as repair_exc:
+                repair_raw = str(getattr(repair_exc, "raw_output", None) or repair_exc)[:4000]
+                return self._fallback_judgment(
+                    candidate,
+                    config,
+                    raw_output,
+                    "judger returned non-JSON output and repair failed",
+                    repair_raw_output=repair_raw,
+                )
+        return self._judgment_from_data(candidate, config, result.data, result.text, result, repair_meta)
+
+    def _repair_client_for_config(self, config: dict[str, Any]) -> ClaudeCodeClient:
+        if not isinstance(self.client, ClaudeCodeClient):
+            return self.client
+        repair_timeout = int(config.get("judger", {}).get("repair_timeout_seconds", 300))
+        timeout_seconds = min(int(self.client.timeout_seconds), repair_timeout)
+        return ClaudeCodeClient(
+            command=self.client.command,
+            cwd=self.client.cwd,
+            timeout_seconds=timeout_seconds,
+            extra_args=list(self.client.extra_args),
+            heartbeat_seconds=self.client.heartbeat_seconds,
+            usage_tracker=self.client.usage_tracker,
         )
-        data = result.data
+
+    def _repair_prompt(self, raw_output: str, judger_context: dict[str, Any]) -> str:
+        return f"""
+You are the JUDGER agent in a bounded GEPA-style research loop. A PREVIOUS attempt
+at this exact judgment finished WITHOUT returning a parseable JSON object. Your ONLY
+job now is to transcribe that judgment into the JSON schema below. DO NOT re-run,
+re-score from scratch, inspect files, or ask for more data.
+
+Previous non-JSON raw output:
+{raw_output}
+
+Judger context used for the previous attempt:
+{format_judger_context(judger_context)}
+
+Produce EXACTLY one JSON object matching this schema:
+{{
+  "score": 0.0,
+  "passed": false,
+  "per_sample_scores": [{{"sample_id": "task_execution", "score": 0.0, "notes": ""}}],
+  "failure_categories": ["category"],
+  "actionable_feedback": ["specific next action"],
+  "confidence": "low|medium|high"
+}}
+
+If the previous raw output clearly contains a score, passed flag, sample scores,
+failure categories, feedback, or confidence, preserve those facts. If any required
+field is missing or ambiguous, choose the conservative value: score=0.0, passed=false,
+failure_categories=["judger_invalid_json"], and confidence="low". Return only the
+JSON object.
+"""
+
+    def _judgment_from_data(
+        self,
+        candidate: Candidate,
+        config: dict[str, Any],
+        data: dict[str, Any],
+        raw_text: str,
+        result: Any,
+        extra_artifacts: dict[str, Any] | None = None,
+    ) -> Judgment:
+        try:
+            score = float(data.get("score", 0.0))
+        except (TypeError, ValueError):
+            score = 0.0
         return Judgment(
             candidate_id=candidate.candidate_id,
             round_id=candidate.round_id,
-            score=float(data.get("score", 0.0)),
+            score=score,
             passed=bool(data.get("passed", False)),
             per_sample_scores=list(data.get("per_sample_scores", [])),
             failure_categories=list(data.get("failure_categories", [])),
             actionable_feedback=list(data.get("actionable_feedback", [])),
             confidence=str(data.get("confidence", "medium")),
-            artifacts={"agent_raw": result.text, "eval_phase": config.get("_eval_phase", "pareto"), "sample_ids": config.get("_selected_sample_ids", []), **_call_artifact(result), **data},
+            artifacts={
+                "agent_raw": raw_text,
+                "eval_phase": config.get("_eval_phase", "pareto"),
+                "sample_ids": config.get("_selected_sample_ids", []),
+                **_call_artifact(result),
+                **data,
+                **(extra_artifacts or {}),
+            },
+        )
+
+    def _fallback_judgment(
+        self,
+        candidate: Candidate,
+        config: dict[str, Any],
+        raw_output: str,
+        reason: str,
+        *,
+        repair_raw_output: str | None = None,
+    ) -> Judgment:
+        artifacts = {
+            "deterministic": True,
+            "agent_raw": raw_output,
+            "eval_phase": config.get("_eval_phase", "pareto"),
+            "sample_ids": config.get("_selected_sample_ids", []),
+            "error": reason,
+        }
+        if repair_raw_output is not None:
+            artifacts["repair_raw_output"] = repair_raw_output
+        return Judgment(
+            candidate_id=candidate.candidate_id,
+            round_id=candidate.round_id,
+            score=0.0,
+            passed=False,
+            per_sample_scores=[],
+            failure_categories=["judger_invalid_json"],
+            actionable_feedback=[
+                "Judger returned non-JSON output; retry judging with the stricter JSON-only contract."
+            ],
+            confidence="low",
+            artifacts=artifacts,
         )
 
 

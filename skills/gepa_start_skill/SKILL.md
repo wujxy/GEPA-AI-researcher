@@ -109,16 +109,18 @@ document the omission in `manifest.json` so a reader knows it was deliberate.
 │   ├── CLAUDE.md             # repo-level rules: idempotency, build/test quick-ref, hard rules
 │   └── TEMP/                 # mount points for assets bind-mounted at runtime
 ├── config/                    # *optional* — the task + profile for THIS pack
-│   ├── <pack-name>.task.json
-│   └── <pack-name>.project.profile.json
+│   ├── <pack-name>.task.yaml
+│   └── <pack-name>.project.profile.yaml
 └── runs/                      # GEPA run outputs land here (gitignore this)
 ```
 
-This shape is not arbitrary — it mirrors how GEPA's config resolves resources
-(see Part 2): `resources.context_paths` points at `context/`, `resources.skills`
-names the skills in `skills/`, `resources.readonly_assets` bind-mounts
-`assets/`, and `source.repo_path` points at `repo/`. The structure exists so the
-config can reference real files.
+This shape is not arbitrary — it mirrors how GEPA's canonical config resolves
+resources (see Part 2): `source.path` points at `repo/`, `docs` points at
+`context/` and any reference files, `provided_paths` declares external env/data
+paths GEPA should bind, `reference.commands` records user-provided command hints,
+and `repo_overlays` bind-mounts package-local assets into the worktree. The
+structure exists so the config can reference real files without turning the
+config into an executor script.
 
 ### 1.3 Populate each layer
 
@@ -133,7 +135,7 @@ they are regenerable and pollute the clean baseline. If the project needs a
 build directory, the executor creates it inside its own worktree at run time.
 
 **`context/` — the facts.** These are the documents GEPA inlines into the
-proposer and executor prompts (via `resources.context_paths`, truncated to a
+proposer and executor prompts (via `docs`, truncated to a
 per-file cap). Write them for an agent that has never seen the project:
 
 - The **optimization context** restates the 1.1 contract: objective, metric,
@@ -224,7 +226,7 @@ Part 1, not during a 6-round run. Add helper skills (a dev-guide, a
 reference-fit-repro skill) only if the executor genuinely needs them; do not pad
 the pack.
 
-A subtle but critical point: **GEPA does not auto-load `resources.skills` into
+A subtle but critical point: **GEPA does not auto-load profile `skills:` into
 the spawned claude.** The skill names in the config surface only as *text* in
 the prompt ("Skills: [...]"). For the executor to actually invoke a skill, the
 SKILL.md files must live where Claude Code discovers skills relative to the
@@ -236,7 +238,7 @@ are invocable. Confirm this in Part 1's dry-run.
 **`assets/` — large read-only fixtures.** Anything too big or too
 environment-specific to live in the repo (a multi-GB table, a calibration
 file, an input dataset) goes here and is **bind-mounted** into the worktree at
-run time via `resources.readonly_assets` (`{source, target}`). The executor
+run time via `repo_overlays` (`{source, target}`). The executor
 reads it from `target` as if it were in the repo. Never commit these into
 `repo/` — a 1 GB file in git makes every worktree operation slow and every
 candidate diff noisy.
@@ -331,257 +333,307 @@ CLI whose only hard dependency is PyYAML; the agent backend is the `claude` CLI.
 
 ```bash
 cd <GEPA-AI-researcher checkout>
-pipx install -e .          # or: pip install -e .  (Python ≥3.10)
+pipx install -e .          # or: pip install -e .  (Python >=3.10)
 gepa doctor                # host check: git, python, apptainer, claude
 ```
 
 Then ensure the **executor backend** is available:
 
 - The `claude` CLI — the executor is a spawned `claude -p` subprocess. Install
-  (`curl -fsSL https://claude.ai/install.sh | bash` or
-  `npm install -g @anthropic-ai/claude-code`), run `claude doctor` and
-  authenticate with a Claude-Code-capable account. If the small/fast sub-task
-  model is gateway-routed, export `ANTHROPIC_SMALL_FAST_MODEL` to a value your
-  gateway resolves, or `claude -p` returns rc=1.
-- **Apptainer (optional, recommended for non-trivial tasks)** — if the task
-  needs a toolchain or filesystem the host doesn't have, set
-  `runtime_backend: apptainer` (see 2.3). GEPA auto-builds and caches the
-  executor image; Docker is not required. Install Apptainer separately or let
-  GEPA run a site install hook.
+  and authenticate with a Claude-Code-capable account. If the small/fast
+  sub-task model is gateway-routed, export `ANTHROPIC_SMALL_FAST_MODEL` to a
+  value your gateway resolves, or `claude -p` returns rc=1.
+- **Apptainer (optional, recommended for non-trivial tasks)** — use it when the
+  task needs filesystem isolation, CVMFS, or host paths that should be bound in
+  explicitly. GEPA auto-builds and caches the executor SIF before `run` starts;
+  Docker is not required on the host. Install Apptainer separately or configure
+  a site install hook.
 
 ### 2.2 Author the two config files
 
-GEPA uses a strict three-layer config: a **task** file (per experiment), a
-**project profile** (once per project), and a resolved **snapshot** GEPA
-generates at run time. The canonical complete examples are
-`examples/function_discovery/task.yaml` + `project.profile.yaml` (a generic
-local task) and `examples/omilrec/` (a containerized C++ task) — read them once,
-then write your own. Schema is `schema_version: 1`; unknown fields are **errors
-at `gepa validate`**, deliberately, so a misspelled knob fails loud.
+GEPA now has one canonical user-facing model, still split into two files:
 
-**Path resolution rules (get these right or paths silently miss):**
+- **Task file** — controls the optimization experiment and loop evolution.
+- **Project profile** — declares the source tree, docs, user-guaranteed runnable
+  paths, optional reference commands, safety ceiling, agent command, and
+  isolation mode.
+
+`schema_version` is optional for new configs. Old v1/v2/legacy configs remain
+accepted only through migration; after loading, GEPA uses the same canonical
+internal shape for every run. Do not add separate version-specific behavior.
+
+**User responsibility vs GEPA responsibility:** the user guarantees that the
+provided source/docs/paths are sufficient for an executor agent to run the
+project. GEPA binds those paths, passes the docs/reference commands as context,
+creates isolated worktrees/artifacts, and audits candidate edits. GEPA does
+**not** turn setup/check/build command lists into mandatory runtime preflight.
+Reference commands are hints for the executor, not enforced steps.
+
+**Path resolution rules:**
+
 - Paths in the **task** file are relative to the **task file**.
-- `project.profile` is a path relative to the **task file** (can be absolute).
-- `source.repo_path` is relative to the **profile file** (can be absolute).
-- `project.ref` / `source.default_ref` is resolved to a real git SHA via
-  `git -C <repo> rev-parse --verify <ref>^{commit}`; for `git_worktree` mode a
-  ref is **required**. Pin it to the pack's baseline commit.
+- `project.profile` is relative to the **task file** (or absolute).
+- Paths in the **project profile** are relative to the **profile file** (or absolute).
+- `source.path` is the project source directory.
+- `project.ref` / `source.default_ref` resolves to a real git SHA via
+  `git -C <repo> rev-parse --verify <ref>^{commit}`; for `git_worktree`, a ref
+  is required. Pin it to the pack's baseline commit.
 
 **Task file (`<pack>.task.yaml`)** — the experiment:
 
 ```yaml
-schema_version: 1
 kind: task
 
 task:
   name: <unique-task-name>
-  goal: <one sentence: improve <metric> while keeping every gate green,
-        editing only <editable set>, from <baseline>.>
-  samples:                       # optional; names the eval subsets
+  goal: >
+    Improve <metric> while preserving every validation gate, editing only the
+    admitted source files, from baseline <baseline>.
+  samples:
     - sample_id: <feedback_sample>
-      description: Used for the D_feedback minibatch.
+      description: Used for the feedback minibatch.
     - sample_id: <pareto_sample>
-      description: Used for the D_pareto full evaluation.
+      description: Used for Pareto/full evaluation.
 
 project:
-  profile: <pack>.project.profile.yaml   # path relative to THIS file
-  ref: <baseline-sha-or-ref>             # resolved to a real SHA; required for worktrees
+  profile: <pack>.project.profile.yaml
+  ref: <baseline-sha-or-ref>
 
 metric:
   name: <metric_name>
-  direction: minimize           # or maximize
+  direction: minimize        # or maximize
+  description: <what is measured>
   unit: <unit>
-  command: <one shell command that prints the metric number, env-prefixed as needed>
-  repeats: <N>                  # >=3 for noisy metrics; raise until signal > noise
+  command: <one shell command that prints the metric number>
+  repeats: <N>
   improvement:
-    mode: relative_percent      # or absolute
-    minimum: <threshold>        # the dry-run noise floor informs this
+    mode: relative_percent   # or absolute
+    minimum: <threshold>
 
 validation:
   checks:
     - name: <gate-name>
       command: <shell command>
       success_criteria: <human-readable pass condition>
-    # ... one entry per gate from the 1.1 contract, in the order the skill runs them
 
 safety:
-  editable_paths: [<editable globs>]   # subset of the profile's; cannot broaden it
-  frozen_paths: [<immutable globs>]    # tests, fixtures, references, build config
+  editable_paths: [<editable globs>]
+  frozen_paths: [<immutable globs>]
   max_files_per_candidate: <N>
   max_commits_per_candidate: 1
 
-budget:
-  max_rounds: <N>              # total mutation rounds
-  min_rounds: <N>              # no early stop before this
-  patience: <N>                # rounds with no improvement before early stop
+loop:
+  seed_count: <N>                # initial proposals
+  max_rounds: <N>
+  min_rounds: <N>
+  patience: <N>
   candidates_per_round: <N>
+  max_parallel_candidates: <N>   # executor candidate parallelism cap
+  enable_merge: false
 
-# Optional knobs (defaults shown) — omit any you don't need:
-initialization: { seed_count: <N> }      # default = candidates_per_round
-generation:     { batch_size: <N>, enable_merge: false }
-gepa:
+selection:
+  minibatch_size: 1
   frontier_policy: pareto
   acceptance_policy: minibatch_improves_then_pareto
-  minibatch_size: 1
   parent_sampling: pareto_win_weighted
   feedback_sample_ids: [<from task.samples>]
   pareto_sample_ids: [<from task.samples>]
-judger: { pass_threshold: 0.85 }
-usage_tracking: { enabled: true, persist_raw_envelope: true,
-                  print_round_summary: true, print_run_summary: true }
-evidence: { visualize_when_applicable: false, plot_selection_policy: proposer_selects,
-            artifact_formats: [], guidance: <one line> }
+
+executor:
+  timeout_seconds: <per-candidate wall-clock cap>
+  repair_retries: 1
+
+judger:
+  pass_threshold: 0.85
+
+usage_tracking:
+  enabled: true
+  persist_raw_envelope: true
+  print_round_summary: true
+  print_run_summary: true
+
+evidence:
+  visualize_when_applicable: false
+  plot_selection_policy: proposer_selects
+  artifact_formats: []
+  guidance: <one line>
 ```
 
-**Project profile (`<pack>.project.profile.yaml`)** — the project, once:
+**Project profile (`<pack>.project.profile.yaml`)** — the project envelope:
 
 ```yaml
-schema_version: 1
 kind: project_profile
 name: <project-name>
 
 source:
-  repo_path: <path to repo/, relative to THIS file or absolute>
+  path: <path to repo/, relative to THIS file or absolute>
   default_ref: <baseline-sha-or-ref>
-  workspace_mode: git_worktree      # git_worktree (per-candidate worktree + commit audit)
-                                    #   or artifact_directory (artifacts only, no source worktree)
+  workspace_mode: git_worktree      # per-candidate worktree + commit audit
+                                    # or artifact_directory for no source worktree
 
-environment:                        # v1: the task's environment narrative
-  description: <one line: OS, toolchain, how it's provisioned>
-  setup_commands:
-    - <source /abs/or/profile-relative/setup.sh>
-    - <source InstallArea/setup.sh>      # if the build installs an overlay
-  python_command: <python>               # absolute if a specific interpreter is needed
-  dependency_policy: <e.g. "Use installed packages only; do not install.">
+docs:
+  - <../pack/context/<TASK>_OPTIMIZATION_CONTEXT.md>
+  - <../pack/context/SEEDS_<TASK>.md>
+  - <../pack/context/SOURCE_INVENTORY_<TASK>.json>
+  - <../pack/manifest.json>
+  - <repo/README.md>
+  - <repo/CLAUDE.md>
 
-resources:
-  data_files: [<input/output files the proposer/executor see, abs or profile-relative>]
-  context_paths:                       # docs GEPA inlines into proposer+executor prompts
-    - <../pack/context/<TASK>_OPTIMIZATION_CONTEXT.md>
-    - <../pack/context/SEEDS_<TASK>.md>
-    - <../pack/context/SOURCE_INVENTORY_<TASK>.json>
-  skills: [<pack-name>-opt-flow, <helper-skills>]   # names only — text in prompts; NOT auto-loaded
-  readonly_assets:                     # large fixtures bind-mounted into the worktree
-    - source: <../pack/assets/fixtures/<large>>
-      target: <TEMP/fixtures/<large>>
-  pre_materialized_lfs_paths: [<repo-relative LFS globs already materialized>]
-  generated_tracked_paths: [<benchmarks/*.csv — appended each candidate, tracked>]
-  hash_artifacts: [<build/bin/tool, InstallArea/lib/lib.so — fingerprinted for cache>]
+provided_paths:
+  - path: </abs/or/profile-relative/environment-or-data-path>
+    mode: ro        # ro or rw
+    role: environment
+    note: User guarantees this path is sufficient with the docs to run the project.
+  - path: </abs/or/profile-relative/input-data>
+    mode: ro
+    role: input_data
+  - path: </abs/or/profile-relative/resource-pack>
+    mode: ro
+    role: resource_pack
+
+reference:
+  commands:
+    - <source /path/to/setup.sh>
+    - <cmake -S . -B build -DCMAKE_BUILD_TYPE=Release>
+    - <cmake --build build --target install --parallel>
+    - <metric or validation command>
+  note: User-provided references only; GEPA must not auto-execute them.
+
+repo_overlays:
+  - source: <../pack/assets/fixtures/<large>>
+    target: <TEMP/fixtures/<large>>
+    mode: ro
+    purpose: fixture
+
+skills:
+  - <pack-name>-opt-flow
+  - <helper-skill>
+
+isolation:
+  backend: local          # local or apptainer
+  mode: bind_paths
+  # image: /abs/path/prebuilt.sif     # optional; if omitted, GEPA materializes one
+  apptainer:
+    executable: apptainer
+    cleanenv: false
+    containall: false
+    writable_tmpfs: true
+    auto_init_claude_home: true
+    # base_image: docker://almalinux:9   # optional override for auto materialization
+    # extra_packages: []                 # optional image packages
 
 agent:
   command: claude
-  timeout_seconds: <per-candidate wall-clock cap; >= time for build+all gates>
+  timeout_seconds: <per-candidate wall-clock cap>
   extra_args:
     - --permission-mode
     - acceptEdits
     - --allowedTools
     - Read,Edit,Write,Glob,Grep,Bash
 
-execution:
-  lifecycle: materialize_once       # materialize_once (reuse across candidates) or stateless
-  max_parallel_candidates: <N>       # caps executor worker parallelism
-  fail_fast: false
-  runtime_backend: local             # local (default) or apptainer
-  # apptainer: { ... }               # see 2.3
-
-safety:                              # the project safety ceiling; task may tighten, not broaden
+safety:
   editable_paths: [<editable globs>]
   frozen_paths: [<immutable globs>]
   max_files_per_candidate: <N>
   max_commits_per_candidate: 1
 ```
 
-A few non-obvious rules the schema enforces (so you don't learn them from a
-failed `validate`):
+A few non-obvious rules the schema enforces:
 
 - `project.profile` and `project.inline` are mutually exclusive. Use `profile`
   for real projects; `inline` only for tiny tests.
 - Task `safety.editable_paths` must be a **subset** of the profile's — the task
   can tighten, never broaden. Frozen lists concatenate. `max_files`/`max_commits`
   take the min.
-- `budget.patience` resolves to `no_improvement_patience`; `budget.min_rounds`
-  blocks early stop before that many rounds; `judger.pass_threshold` enables
-  early stop once the best score crosses it (after `min_rounds`).
-- `gepa.feedback_sample_ids` / `pareto_sample_ids` select named `task.samples`.
-  Omit them and GEPA deterministically splits the configured samples. With one
-  sample, both use it.
+- `loop.max_parallel_candidates` is authoritative for candidate executor
+  concurrency, capped by `loop.candidates_per_round`.
+- `loop.seed_count`, rounds, patience, candidate counts, executor timeout,
+  repair retries, selection policy, pass threshold, and safety policy are the
+  knobs that control system evolution. Keep them in the task file.
+- `reference.commands` replaces old `environment.setup/check`, `runtime.setup/check`,
+  `build.commands`, `allowed_commands`, and image-package inference. Migration
+  maps old command lists into reference commands only.
 - Role contracts: the **proposer** sees objective/metric/resources/safety/runtime
-  + prior context + feedback; the **executor** adds `validation`; the **judger**
-  sees objective/metric/validation only. `agent.*` (command/timeout/extra_args)
-  is host-side plumbing and **never** appears in any role prompt — so don't put
-  task instructions there.
+  + prior context + feedback + reference context; the **executor** adds
+  validation; the **judger** sees objective/metric/validation. `agent.*` is
+  host-side plumbing and never a place for task instructions.
 - Sensitive keys (token/secret/password/credential/api-key) are redacted in
   `config.snapshot.json`; raw agent envelopes land under `usage/raw/` when
   `persist_raw_envelope` is on.
 
-### 2.3 Containerized executor (when the host can't run the task)
+### 2.3 Containerized executor
 
-If the task needs a toolchain, CVMFS, or a filesystem the host lacks, set
-`execution.runtime_backend: apptainer`. GEPA derives the image from your config,
-builds/reuses a thin SIF, and validates it by really running commands inside it.
-Two common shapes:
+If `isolation.backend: apptainer`, GEPA prepares the executor environment before
+starting the loop:
+
+- `run` and `validate` materialize/reuse the local executor SIF by default.
+- `resolve` and `explain` are pure inspection unless you pass `--materialize`.
+- `--no-materialize` skips image preparation for `run`/`validate`, mostly for
+  debugging schema-only resolution.
+- If `isolation.image` is set to a local `.sif`, GEPA uses it.
+- If `isolation.image` is omitted, GEPA derives a thin image from the project:
+  `docker://almalinux:9` for CVMFS/build-tool projects, `docker://python:3.11-slim`
+  for pure Python, unless `isolation.apptainer.base_image` overrides it.
+- GEPA binds repo, artifacts, scratch/tmp, a per-execution Claude home, docs,
+  `provided_paths`, `repo_overlays`, and the host Claude/NVM directory when
+  needed. It also rewrites the executor command to the in-container absolute
+  Claude path and injects the needed PATH prefix.
+- GEPA does not infer project package installs from reference command strings.
+
+Apptainer profile shape:
 
 ```yaml
-# Thin auto-materialized image (default). GEPA picks almalinux:9 when your
-# commands reference /cvmfs or build tools (gcc/g++/cmake/make), or
-# python:3.11-slim for pure-Python tasks. Override with apptainer.base_image.
-execution:
-  runtime_backend: apptainer
+isolation:
+  backend: apptainer
+  mode: bind_paths
+  # image: /abs/path/prebuilt.sif
   apptainer:
-    auto_image: true
-    command: claude
-    cleanenv: true
-    containall: true
+    executable: apptainer
+    cleanenv: false
+    containall: false
     writable_tmpfs: true
-    container_repo: /workspace/repo
-    container_artifacts: /workspace/artifacts
-    container_scratch: /workspace/scratch
-    container_home: /workspace/home
-    env_allowlist: []
-    readonly_binds: []
-    extra_binds: []
-
-# Or your own prebuilt SIF:
-#   apptainer: { auto_image: false, image: /abs/path/your.sif }
+    auto_init_claude_home: true
+    # userns: true                 # GEPA auto-detects when needed unless pinned
+    # base_image: docker://almalinux:9
+    # extra_packages: []
+    # readonly_binds: []
+    # extra_binds: []
 ```
 
-**Two apptainer pitfalls that bite at run time — verify both in the dry-run:**
+**Apptainer pitfalls to verify in the dry-run:**
 
-1. **Bind-mounted external inputs must be visible inside the container.** If a
-   `setup_commands` entry or gate command references a host path (a `/cvmfs/...`
-   release, a `/data/...` dataset), that path must be bound into the container
-   AND present on the host *before* launch. GEPA warns and skips a `/cvmfs` bind
-   it can't find — so a setup script that sources `/cvmfs/.../setup.sh` will
-   fail with "No such file or directory" inside the container even though it
-   works on the host. Source/mount CVMFS (and any `/data` input) on the host
-   first, and confirm the bind covers it.
-2. **Skills are not auto-loaded by the apptainer backend either.** The same
-   text-only rule from 1.3 applies. GEPA projects the host `~/.claude` into the
-   container home, so skills installed in the user's `~/.claude/skills/` ride
-   along — but `resources.skills` config strings still become only prompt text.
-   Place the pack's skills where the executor's cwd discovers them, or in the
-   user skills dir, and confirm invocation in the dry-run.
+1. **The host paths must exist before launch.** If the project relies on
+   `/cvmfs/...`, `/data/...`, a resource pack, or a local SIF, those paths must
+   be visible on the host. GEPA binds declared paths faithfully; it does not
+   create the physics/software environment for you.
+2. **Reference commands are hints, not preflight.** If the executor must source
+   a setup script or run a build command, the executor skill/docs must say so.
+   The config records those commands for context; GEPA does not execute them.
+3. **Skills are not auto-loaded by config strings.** `skills:` names are prompt
+   context. Put `SKILL.md` files where Claude Code discovers them relative to
+   the executor working directory or in the user's skill directory, and confirm
+   invocation in the dry-run.
+4. **Do not bind host `$HOME` directly.** GEPA creates a per-execution home and
+   copies minimal Claude auth/session material when `auto_init_claude_home` is on.
 
-Do **not** bind the host `$HOME` directly; use a minimal `claude_home_template`
-project into the per-execution HOME.
-
-### 2.4 Validate, then launch
+### 2.4 Validate, inspect, then launch
 
 ```bash
-# Pure config validation (no run, no worktree). Fix every error before running.
+# Validate canonical config and, for apptainer, prepare/reuse the executor SIF.
 gepa validate --config <pack>.task.yaml
 
-# Inspect what GEPA actually resolved (paths absolute, SHA resolved, defaults):
-gepa resolve  --config <pack>.task.yaml
-gepa explain  --config <pack>.task.yaml
+# Inspect resolved config without materializing:
+gepa resolve --config <pack>.task.yaml
+gepa explain --config <pack>.task.yaml
 
-# If using apptainer, build/reuse + validate the image explicitly first:
-gepa doctor          --config <pack>.task.yaml
-gepa setup-apptainer --config <pack>.task.yaml
+# Inspect resolved config after Apptainer materialization:
+gepa resolve --materialize --config <pack>.task.yaml
+
+# Host/runtime diagnostics:
+gepa doctor --config <pack>.task.yaml
 ```
 
-`validate` is strict and fast — run it until it's clean. A config that fails
-`validate` will fail worse mid-run. Only then launch:
+Only then launch:
 
 ```bash
 gepa run --config <pack>.task.yaml --run-dir <pack>/runs/run-001
@@ -589,19 +641,18 @@ gepa run --config <pack>.task.yaml --run-dir <pack>/runs/run-001
 
 Notes:
 
-- `--run-dir` is optional but strongly recommended; **resume requires the same
-  explicit run dir**: `gepa run --config <pack>.task.yaml --run-dir <same> --resume`.
-- For a first end-to-end smoke, set a tiny `budget` (1–2 rounds, 1–2 candidates)
-  and watch the first candidate's trace under `<run-dir>/traces/`. Confirm from
-  the trace that the executor prompt reports the right worktree/repo paths,
-  the container (if any) can run the build + gates + metric, generated files
-  land under the candidate artifacts/scratch area, and the host-side commit
-  audit records the expected worktree diff. A clean smoke at small budget is
-  the last dry-run; scale the budget up only after it.
-- `gepa` is stdlib-only and not pip-installed into the loop's environment; if
-  you launch via a wrapper script rather than the `gepa` console entry, run
-  from the `GEPA-AI-researcher/` checkout so `gepa_researcher` is importable,
-  or `pipx install -e .` once.
+- Use a **new run dir** after changing config/resolver/runtime code. Old run
+  directories keep their `config.snapshot.json`, including old image/command
+  values.
+- `--run-dir` is optional but strongly recommended; resume requires the same
+  explicit run dir: `gepa run --config <pack>.task.yaml --run-dir <same> --resume`.
+- For a first end-to-end smoke, use small loop values: 1 round, 1-2 candidates,
+  and `max_parallel_candidates: 1`. Confirm from the trace that the executor
+  prompt reports the right worktree/repo paths, the container (if any) can run
+  the build/gates/metric, generated files land under candidate artifacts/scratch,
+  and the host-side commit audit records the expected worktree diff.
+- If every candidate fails with `resource_missing` or `environment_failure`, do
+  not raise the budget. Go back to Part 1.4 and dry-run the pack.
 
 ### 2.5 What each run produces
 
