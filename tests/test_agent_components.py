@@ -154,7 +154,16 @@ class AgentComponentsTest(unittest.TestCase):
         self.assertIn("Visual evidence", prompt)
         self.assertIn("artifact_paths", prompt)
         self.assertIn("candidate's visual evidence plan", prompt)
+        self.assertIn("Runnable envelope guidance", prompt)
         self.assertIn("host-runtime passthrough plus provided paths", prompt)
+        self.assertIn("known-good build/test/benchmark path", prompt)
+        self.assertIn("do not silently fall back to older paths", prompt)
+        self.assertIn("try the project/host pytest executable", prompt)
+        self.assertIn("report the candidate as incomplete", prompt)
+        self.assertIn("distinguish infrastructure failure from command-selection failure", prompt)
+        self.assertIn("Metric evidence must come from fresh foreground execution", prompt)
+        self.assertIn("Do not use historical logs", prompt)
+        self.assertIn("configured repeat count", prompt)
 
     def test_agent_proposer_requests_candidate_batch(self):
         client = CapturingClient(
@@ -598,6 +607,10 @@ class AgentComponentsTest(unittest.TestCase):
         self.assertIn("0.95-1.00: exceptional / exceeds goal", prompt)
         self.assertIn("0.50-0.60: barely useful / noisy or marginal", prompt)
         self.assertIn("duplicate with no new value", prompt)
+        self.assertIn("Evidence caps are mandatory upper bounds", prompt)
+        self.assertIn("Cap at 0.75 if the primary metric was not freshly measured", prompt)
+        self.assertIn("Cap at 0.60 if the baseline is unclear", prompt)
+        self.assertIn("suspected accumulated improvements", prompt)
         self.assertNotIn("expected_gain", prompt)
         self.assertNotIn("EXPECTED_IMPROVEMENT_SHOULD_NOT_APPEAR", prompt)
         self.assertNotIn("PRIOR_SHOULD_NOT_APPEAR", prompt)

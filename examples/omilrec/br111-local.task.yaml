@@ -4,10 +4,11 @@ task:
   name: omilrec-br111-speed-opt
   goal: >
     Optimize OMILREC speed from the local Br1.11.0 clean baseline only.
-    Minimize ms/evt while keeping every per-candidate gate green: FCN drift
-    <=1e-13, consistency within 4mm/7keV, multithread output bit-identical,
-    and no speed regression above +5%. Candidates must use facts verified in
-    this clean package and edit only admitted OMILRECV2 source files.
+    Aim for roughly 1x speedup over the baseline, meaning about 2x throughput
+    or substantially lower ms/evt, while keeping every per-candidate gate green:
+    FCN drift <=1e-13, consistency within 4mm/7keV, multithread output
+    bit-identical, and no speed regression above +5%. Candidates must use facts
+    verified in this clean package and edit only admitted OMILRECV2 source files.
   samples:
     - sample_id: local_100evt_speed
       description: Local 100-event benchmark and validation gates.
@@ -62,9 +63,9 @@ safety:
 
 loop:
   seed_count: 6
-  max_rounds: 4
-  min_rounds: 1
-  patience: 2
+  max_rounds: 10
+  min_rounds: 10
+  patience: 10
   candidates_per_round: 3
   max_parallel_candidates: 5
   enable_merge: false
