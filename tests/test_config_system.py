@@ -57,17 +57,41 @@ class ConfigSystemTest(unittest.TestCase):
                 "workdir": "/workspace/repo",
                 "command": "claude",
                 "append_agent_args": True,
-                "apptainer": {"auto_image": True, "executable": "apptainer", "cleanenv": False},
+                "apptainer": {
+                    "auto_image": True,
+                    "executable": "apptainer",
+                    "cleanenv": False,
+                    "base_image": "docker://almalinux:9",
+                    "bootstrap_tools": ["bash"],
+                    "extra_packages": [],
+                },
+            },
+            "executor_image": {
+                "base": "docker://almalinux:9",
+                "bootstrap_tools": ["bash"],
+                "packages": [],
+            },
+            "filesystem": {"readable": ["/cvmfs/example"], "writable": ["scratch"]},
+            "environment": {
+                "shell": "bash",
                 "env": {"pass": ["PATH"], "set": {"FIXTURE_ENV": "1"}},
                 "setup": ["source /opt/setup.sh", "?source InstallArea/setup.sh"],
-                "check": ["which python3"],
-                "mounts": {"repo": {"TEMP/fixtures/time_pdf.bin": "assets/fixtures/time_pdf.bin"}, "extra": []},
+                "check": ["command -v python3"],
             },
             "resources": {
                 "data_files": ["input.csv"],
                 "context_paths": ["context.md"],
                 "skills": ["fixture-skill"],
+                "repo_overlays": [
+                    {
+                        "source": "assets/fixtures/time_pdf.bin",
+                        "target": "TEMP/fixtures/time_pdf.bin",
+                        "mode": "ro",
+                        "purpose": "fixture",
+                    }
+                ],
             },
+            "build": {"commands": ["cmake --build build"]},
             "agent": {
                 "timeout_seconds": 40,
                 "extra_args": ["--token", "supersecret", "--allowedTools", "Read"],
@@ -224,7 +248,7 @@ class ConfigSystemTest(unittest.TestCase):
                     {"op": "source", "path": "/opt/setup.sh", "required": True},
                     {"op": "source", "path": "InstallArea/setup.sh", "required": False, "base": "workdir"},
                 ],
-                "preflight": [{"name": "check-1", "command": "which python3", "required": True}],
+                "preflight": [{"name": "check-1", "command": "command -v python3", "required": True}],
                 "mounts": [
                     {
                         "source": str(asset),
@@ -232,7 +256,20 @@ class ConfigSystemTest(unittest.TestCase):
                         "mode": "ro",
                     }
                 ],
-                "apptainer": {"auto_image": True, "executable": "apptainer", "cleanenv": False},
+                "apptainer": {
+                    "auto_image": True,
+                    "executable": "apptainer",
+                    "cleanenv": False,
+                    "base_image": "docker://almalinux:9",
+                    "bootstrap_tools": ["bash"],
+                    "extra_packages": [],
+                },
+                "executor_image": {
+                    "base_image": "docker://almalinux:9",
+                    "os_family": "",
+                    "bootstrap_tools": ["bash"],
+                    "extra_packages": [],
+                },
             })
 
     def test_runtime_repo_mount_source_resolves_relative_to_profile_dir(self):
@@ -252,10 +289,10 @@ class ConfigSystemTest(unittest.TestCase):
             task_path, _ = self._write_fixture(root)
             profile_path = root / "profile.yaml"
             profile = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
-            profile["runtime"]["mounts"]["repo"] = {"TEMP/missing.bin": "assets/missing.bin"}
+            profile["resources"]["repo_overlays"] = [{"source": "assets/missing.bin", "target": "TEMP/missing.bin"}]
             profile_path.write_text(yaml.safe_dump(profile, sort_keys=False), encoding="utf-8")
 
-            with self.assertRaisesRegex(ConfigError, r"runtime\.mounts\.repo\.TEMP/missing\.bin: source does not exist: .*resolved relative to profile_dir"):
+            with self.assertRaisesRegex(ConfigError, r"resources\.repo_overlays\[0\]\.source: source does not exist: .*resolved relative to profile_dir"):
                 load_and_resolve(task_path)
 
     def test_runtime_v2_rejects_legacy_runtime_fields(self):
@@ -264,10 +301,10 @@ class ConfigSystemTest(unittest.TestCase):
             task_path, _ = self._write_fixture(root)
             profile_path = root / "profile.yaml"
             profile = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
-            profile["environment"] = {"setup_commands": ["source setup.sh"]}
+            profile["typo"] = {"setup_commands": ["source setup.sh"]}
             profile_path.write_text(yaml.safe_dump(profile, sort_keys=False), encoding="utf-8")
 
-            with self.assertRaisesRegex(ConfigError, r"environment: unknown field"):
+            with self.assertRaisesRegex(ConfigError, r"typo: unknown field"):
                 load_and_resolve(task_path)
 
     def test_apptainer_runtime_image_required_only_when_auto_disabled(self):

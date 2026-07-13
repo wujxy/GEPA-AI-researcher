@@ -27,6 +27,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import time
@@ -61,6 +62,8 @@ class Requirements:
     suggested_base: str
     image_required_tools: list[str]  # subset the IMAGE itself must provide
     claude_command: str
+    accessible_paths: list[str] = field(default_factory=list)
+    writable_paths: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -81,6 +84,7 @@ class ImageMaterialization:
     claude_bind: ClaudeBind
     userns: bool
     derived_readonly_binds: list[dict] = field(default_factory=list)
+    derived_extra_binds: list[dict] = field(default_factory=list)
     derived_env_allowlist: list[str] = field(default_factory=list)
     diagnostics: dict = field(default_factory=dict)
 
@@ -123,31 +127,90 @@ _PURE_PYTHON_OK = {"python3", "python", "pytest", "bash", "git"}
 def _collect_command_strings(resolved_config: dict) -> list[str]:
     """All command strings that the executor may run, from the resolved config."""
     runtime = resolved_config.get("runtime") or {}
+    runtime_ir = resolved_config.get("_runtime_ir") or {}
     commands: list[str] = list(runtime.get("allowed_commands") or [])
     python_cmd = runtime.get("python_command")
     if python_cmd:
         commands.append(str(python_cmd))
-    # Defense in depth: also pull setup + benchmark + validation from contracts/task.
+
+    def add_runtime_commands(runtime_section: dict) -> None:
+        for item in runtime_section.get("init") or []:
+            if isinstance(item, dict):
+                if item.get("command"):
+                    commands.append(str(item["command"]))
+                elif item.get("path"):
+                    commands.append(str(item["path"]))
+            else:
+                commands.append(str(item))
+        for item in runtime_section.get("preflight") or []:
+            if isinstance(item, dict) and item.get("command"):
+                commands.append(str(item["command"]))
+            elif item:
+                commands.append(str(item))
+        commands.extend(runtime_section.get("setup_commands") or [])
+
     contracts = resolved_config.get("contracts") or {}
-    commands.extend((contracts.get("runtime") or {}).get("setup_commands") or [])
+    add_runtime_commands(contracts.get("runtime") or {})
+    add_runtime_commands(runtime)
+    add_runtime_commands(runtime_ir)
     commands.extend((resolved_config.get("task") or {}).get("benchmark_commands") or [])
     commands.extend((resolved_config.get("task") or {}).get("validation_commands") or [])
+    commands.extend(((resolved_config.get("contracts") or {}).get("build") or {}).get("commands") or [])
     return [str(item) for item in commands if item]
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    return list(dict.fromkeys(str(item) for item in items if str(item)))
+
+
+def _collect_accessible_paths(resolved_config: dict) -> list[str]:
+    contracts = resolved_config.get("contracts") or {}
+    resources = contracts.get("resources") or {}
+    return _dedupe([str(item) for item in resources.get("accessible_paths") or [] if item])
+
+
+def _collect_writable_paths(resolved_config: dict) -> list[str]:
+    contracts = resolved_config.get("contracts") or {}
+    resources = contracts.get("resources") or {}
+    return _dedupe([str(item) for item in resources.get("writable_paths") or [] if item])
+
+
+def _collect_executor_image(resolved_config: dict) -> dict[str, Any]:
+    runtime_ir = resolved_config.get("_runtime_ir") or {}
+    image = dict(runtime_ir.get("executor_image") or {})
+    apptainer = dict(((resolved_config.get("executor") or {}).get("apptainer") or {}))
+    if apptainer.get("base_image") and not image.get("base_image"):
+        image["base_image"] = apptainer["base_image"]
+    image["bootstrap_tools"] = _dedupe(
+        list(image.get("bootstrap_tools") or []) + list(apptainer.get("bootstrap_tools") or [])
+    )
+    image["extra_packages"] = _dedupe(
+        list(image.get("extra_packages") or []) + list(apptainer.get("extra_packages") or [])
+    )
+    return image
 
 
 def derive_requirements(resolved_config: dict) -> Requirements:
     """Derive image requirements from the resolved config (pure)."""
-    blob = "\n".join(_collect_command_strings(resolved_config))
+    command_blob = "\n".join(_collect_command_strings(resolved_config))
+    accessible_paths = _collect_accessible_paths(resolved_config)
+    writable_paths = _collect_writable_paths(resolved_config)
+    executor_image = _collect_executor_image(resolved_config)
+    explicit_bootstrap_tools = list(executor_image.get("bootstrap_tools") or [])
+    blob = "\n".join([command_blob, *accessible_paths, *writable_paths, *explicit_bootstrap_tools])
     tools: list[str] = []
     for name, pattern in _TOOL_PATTERNS.items():
         if re.search(pattern, blob):
             tools.append(name)
+    tools = _dedupe(tools + explicit_bootstrap_tools)
     # Drop the bare 'python' token if 'python3' is present (avoid double counting).
     if "python3" in tools and "python" in tools:
         tools.remove("python")
 
-    cvmfs_required = "/cvmfs/" in blob
-    cvmfs_paths = ["/cvmfs"] if cvmfs_required else []
+    cvmfs_paths = sorted({"/cvmfs" for item in accessible_paths if item == "/cvmfs" or item.startswith("/cvmfs/")})
+    cvmfs_required = bool(cvmfs_paths) or "/cvmfs/" in command_blob
+    if cvmfs_required and not cvmfs_paths:
+        cvmfs_paths = ["/cvmfs"]
 
     has_build_tools = bool(_BUILD_TOOLS & set(tools))
     is_pure_python = (
@@ -163,9 +226,9 @@ def derive_requirements(resolved_config: dict) -> Requirements:
 
     # What the IMAGE itself must provide. CVMFS supplies the compiler/python stack;
     # pure-python images must ship python3. bash is always required.
-    image_required_tools = ["bash"]
+    image_required_tools = _dedupe(["bash"] + explicit_bootstrap_tools)
     if is_pure_python:
-        image_required_tools.append("python3")
+        image_required_tools = _dedupe(image_required_tools + ["python3"])
 
     agent_command = str((resolved_config.get("agent") or {}).get("command") or "claude")
     return Requirements(
@@ -176,6 +239,8 @@ def derive_requirements(resolved_config: dict) -> Requirements:
         suggested_base=suggested_base,
         image_required_tools=image_required_tools,
         claude_command=agent_command,
+        accessible_paths=accessible_paths,
+        writable_paths=writable_paths,
     )
 
 
@@ -558,14 +623,20 @@ def _probe_tools(
     desired_extra = ["git"] if "git" not in strict_tools else []
 
     for tool in strict_tools + desired_extra:
-        probe_argv = base_argv + [str(sif), tool, "--version"]
-        result = _run(probe_argv, timeout=60)
-        entry = {
-            "ok": result.returncode == 0,
-            "version": (result.stdout or result.stderr).strip().splitlines()[0]
-            if (result.returncode == 0 and (result.stdout or result.stderr).strip())
-            else "",
-        }
+        tool_q = shlex.quote(tool)
+        if tool.startswith("/"):
+            check = f"test -x {tool_q} && printf '%s\n' {tool_q}"
+        else:
+            check = f"command -v -- {tool_q}"
+        result = _run(base_argv + [str(sif), "/usr/bin/env", "bash", "-lc", check], timeout=60)
+        ok = result.returncode == 0
+        version = ""
+        if ok:
+            version_cmd = f"({tool_q} --version || {tool_q} -V || true) 2>&1"
+            version_result = _run(base_argv + [str(sif), "/usr/bin/env", "bash", "-lc", version_cmd], timeout=60)
+            version_text = (version_result.stdout or version_result.stderr or "").strip()
+            version = version_text.splitlines()[0] if version_text else ""
+        entry = {"ok": ok, "version": version}
         diagnostics["tools"][tool] = entry
         if tool in desired_extra and not entry["ok"]:
             diagnostics["warnings"].append(
@@ -694,17 +765,47 @@ def materialize_executor_image(
         sif_path, req, claude_bind, userns=userns, apptainer=apptainer_exe
     )
 
-    derived_binds: list[dict] = []
-    if req.cvmfs_required and Path("/cvmfs").is_dir():
-        derived_binds.append({"source": "/cvmfs", "target": "/cvmfs", "mode": "ro"})
-    elif req.cvmfs_required:
-        tool_diagnostics["warnings"].append(
-            "/cvmfs referenced by commands but not mounted on host; CVMFS bind skipped"
-        )
+    derived_readonly_binds: list[dict] = []
+    derived_extra_binds: list[dict] = []
+    seen_readonly: set[tuple[str, str]] = set()
+    seen_extra: set[tuple[str, str]] = set()
+
+    def add_bind(target_list: list[dict], seen: set[tuple[str, str]], source: str, mode: str) -> None:
+        key = (source, source)
+        if key in seen:
+            return
+        target_list.append({"source": source, "target": source, "mode": mode})
+        seen.add(key)
+
+    accessible_bind_paths = set(req.accessible_paths or [])
+    accessible_bind_paths.update(req.cvmfs_paths or [])
+    for source in sorted(accessible_bind_paths):
+        if not source.startswith("/"):
+            tool_diagnostics["warnings"].append(
+                f"accessible path is not absolute; bind skipped: {source}"
+            )
+            continue
+        bind_source = "/cvmfs" if source == "/cvmfs" or source.startswith("/cvmfs/") else source
+        if Path(bind_source).exists():
+            add_bind(derived_readonly_binds, seen_readonly, bind_source, "ro")
+        else:
+            tool_diagnostics["warnings"].append(
+                f"accessible path is not mounted on host; bind skipped: {bind_source}"
+            )
+    for source in sorted(set(req.writable_paths or [])):
+        if not source.startswith("/"):
+            tool_diagnostics["warnings"].append(
+                f"writable path is not absolute; bind skipped: {source}"
+            )
+            continue
+        if Path(source).exists():
+            add_bind(derived_extra_binds, seen_extra, source, "rw")
+        else:
+            tool_diagnostics["warnings"].append(
+                f"writable path is not mounted on host; bind skipped: {source}"
+            )
     if claude_bind.enabled and claude_bind.nvm_node_dir:
-        derived_binds.append(
-            {"source": claude_bind.nvm_node_dir, "target": claude_bind.nvm_node_dir, "mode": "ro"}
-        )
+        add_bind(derived_readonly_binds, seen_readonly, claude_bind.nvm_node_dir, "ro")
 
     diagnostics = {
         **tool_diagnostics,
@@ -729,7 +830,8 @@ def materialize_executor_image(
         requirements=req,
         claude_bind=claude_bind,
         userns=userns,
-        derived_readonly_binds=derived_binds,
+        derived_readonly_binds=derived_readonly_binds,
+        derived_extra_binds=derived_extra_binds,
         derived_env_allowlist=[],
         diagnostics=diagnostics,
     )
@@ -824,6 +926,9 @@ def finalize_runtime(
     apptainer["image"] = mat.sif_path
     apptainer["readonly_binds"] = _merge_binds(
         apptainer.get("readonly_binds") or [], mat.derived_readonly_binds
+    )
+    apptainer["extra_binds"] = _merge_binds(
+        apptainer.get("extra_binds") or [], mat.derived_extra_binds
     )
     if runtime_apptainer is not apptainer:
         runtime_apptainer.update(apptainer)

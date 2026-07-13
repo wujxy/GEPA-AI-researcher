@@ -25,7 +25,10 @@ PROFILE_KEYS = {
     # V2_PROFILE_KEYS below.
     "environment", "execution",
 }
-V2_PROFILE_KEYS = {"schema_version", "kind", "name", "source", "runtime", "resources", "agent", "safety"}
+V2_PROFILE_KEYS = {
+    "schema_version", "kind", "name", "source", "runtime", "resources",
+    "executor_image", "filesystem", "environment", "build", "agent", "safety",
+}
 
 SECTION_KEYS = {
     "task": {"name", "goal", "samples"},
@@ -46,16 +49,20 @@ SECTION_KEYS = {
     "usage_tracking": {"enabled", "persist_raw_envelope", "print_round_summary", "print_run_summary"},
     "evidence": {"visualize_when_applicable", "plot_selection_policy", "artifact_formats", "guidance"},
     "source": {"repo_path", "default_ref", "workspace_mode"},
-    "resources": {"data_files", "context_paths", "skills", "readonly_assets", "pre_materialized_lfs_paths", "generated_tracked_paths", "hash_artifacts"},
+    "resources": {"data_files", "context_paths", "skills", "readonly_assets", "accessible_paths", "repo_overlays", "pre_materialized_lfs_paths", "generated_tracked_paths", "hash_artifacts"},
+    "repo_overlay": {"source", "target", "mode", "purpose"},
+    "executor_image": {"base", "base_image", "os_family", "bootstrap_tools", "packages", "extra_packages"},
+    "filesystem": {"readable", "writable"},
+    "build": {"commands"},
     "agent": {"command", "timeout_seconds", "extra_args"},
-    "environment": {"description", "setup_commands", "python_command", "dependency_policy"},
+    "environment": {"description", "setup_commands", "python_command", "dependency_policy", "shell", "setup", "check", "env"},
     "execution": {"runtime_backend", "lifecycle", "max_parallel_candidates", "fail_fast", "apptainer"},
     "apptainer": {"image", "executable", "command", "container_repo", "container_artifacts", "container_scratch", "container_home", "claude_home_template", "claude_host_home", "base_image", "container_claude_dir", "install_command", "auto_image", "cleanenv", "containall", "writable_tmpfs", "userns", "auto_bind_claude_auth", "auto_init_claude_home", "env_allowlist", "extra_exec_args", "extra_packages", "source_scripts", "passthrough_environment", "validation_commands", "runtime_init", "readonly_binds", "extra_binds", "home_readonly_binds"},
     "runtime_init": {"description", "setup_commands", "python_command", "dependency_policy", "validation_commands"},
     "asset": {"source", "target"},
     "bind": {"source", "target", "mode"},
     "runtime": {"backend", "workdir", "command", "append_agent_args", "apptainer", "env", "setup", "check", "mounts"},
-    "runtime_apptainer": {"image", "executable", "auto_image", "base_image", "extra_packages", "cleanenv", "containall", "writable_tmpfs", "userns", "extra_exec_args", "claude_home_template", "claude_host_home", "auto_init_claude_home", "home_readonly_binds", "install_command", "container_claude_dir", "auto_bind_claude_auth"},
+    "runtime_apptainer": {"image", "executable", "auto_image", "base_image", "extra_packages", "bootstrap_tools", "cleanenv", "containall", "writable_tmpfs", "userns", "extra_exec_args", "claude_home_template", "claude_host_home", "auto_init_claude_home", "home_readonly_binds", "install_command", "container_claude_dir", "auto_bind_claude_auth"},
     "runtime_env": {"pass", "set"},
     "runtime_mounts": {"repo", "extra"},
     "runtime_extra_mount": {"source", "target", "mode"},
@@ -153,7 +160,16 @@ def _resolve_task_v2(task_config: dict[str, Any], task_path: Path) -> dict[str, 
 
     safety = _merge_safety(profile.get("safety") or {}, task_config.get("safety") or {})
     resources = _resolve_resources_v2(profile.get("resources") or {}, profile_base)
-    runtime_ir = _compile_runtime_ir(profile["runtime"], profile_base)
+    filesystem = _resolve_filesystem_v2(profile.get("filesystem") or {}, profile_base)
+    resources["accessible_paths"] = _dedupe(resources["accessible_paths"] + filesystem["readable"])
+    resources["writable_paths"] = _dedupe(filesystem["writable"])
+    runtime_profile = _merge_environment_v2(profile["runtime"], profile.get("environment") or {})
+    runtime_ir = _compile_runtime_ir(runtime_profile, profile_base)
+    runtime_ir["mounts"].extend(_compile_repo_overlays(resources["repo_overlays"], runtime_ir["workdir"]))
+    executor_image = _resolve_executor_image_v2(profile.get("executor_image") or {})
+    runtime_ir["executor_image"] = executor_image
+    _apply_executor_image_to_apptainer(runtime_ir["apptainer"], executor_image)
+    build = _resolve_build_v2(profile.get("build") or {})
     metric = deepcopy(task_config["metric"])
     validation = deepcopy(task_config.get("validation") or {"checks": []})
     budget = task_config["budget"]
@@ -228,7 +244,23 @@ def _resolve_task_v2(task_config: dict[str, Any], task_path: Path) -> dict[str, 
             "print_round_summary": bool(usage_tracking_config.get("print_round_summary", True)),
             "print_run_summary": bool(usage_tracking_config.get("print_run_summary", True)),
         },
-        "contracts": {"objective": deepcopy(task_config["task"]), "metric": metric, "validation": validation, "resources": {"data_files": resources["data_files"], "repo_path": str(repo_path) if repo_path else None, "context_paths": resources["context_paths"], "skills": resources["skills"]}, "safety": safety, "runtime": runtime_contract},
+        "contracts": {
+            "objective": deepcopy(task_config["task"]),
+            "metric": metric,
+            "validation": validation,
+            "resources": {
+                "data_files": resources["data_files"],
+                "repo_path": str(repo_path) if repo_path else None,
+                "context_paths": resources["context_paths"],
+                "skills": resources["skills"],
+                "accessible_paths": resources["accessible_paths"],
+                "writable_paths": resources["writable_paths"],
+                "repo_overlays": resources["repo_overlays"],
+            },
+            "build": build,
+            "safety": safety,
+            "runtime": runtime_contract,
+        },
     }
     # Keep this mirror until container image materialization is moved to _runtime_ir.
     if runtime_ir["backend"] == "apptainer":
@@ -606,6 +638,15 @@ def _validate_profile_v2(data: dict[str, Any]) -> None:
     _optional_text_fields(source, ("repo_path", "default_ref", "workspace_mode"), "source")
     if mode not in {"git_worktree", "artifact_directory"}:
         raise ConfigError("source.workspace_mode: expected 'git_worktree' or 'artifact_directory'")
+    if "executor_image" in data:
+        _validate_executor_image_v2(_section(data.get("executor_image") or {}, "executor_image"))
+    if "filesystem" in data:
+        _validate_filesystem_v2(_section(data.get("filesystem") or {}, "filesystem"))
+    if "environment" in data:
+        _validate_project_environment_v2(_section(data.get("environment") or {}, "environment"))
+    if "build" in data:
+        build = _section(data.get("build") or {}, "build")
+        _string_list(build.get("commands", []), "build.commands")
     runtime = _section(data.get("runtime"), "runtime")
     if runtime.get("backend") not in {"local", "apptainer"}:
         raise ConfigError("runtime.backend: expected 'local' or 'apptainer'")
@@ -642,13 +683,49 @@ def _validate_profile_v2(data: dict[str, Any]) -> None:
         if "mode" in mount and mount["mode"] not in {"ro", "rw"}:
             raise ConfigError(f"runtime.mounts.extra[{index}].mode: expected 'ro' or 'rw'")
     resources = _section(data.get("resources") or {}, "resources")
-    for field in ("data_files", "context_paths", "skills", "pre_materialized_lfs_paths", "generated_tracked_paths", "hash_artifacts"):
+    for field in ("data_files", "context_paths", "skills", "accessible_paths", "pre_materialized_lfs_paths", "generated_tracked_paths", "hash_artifacts"):
         _string_list(resources.get(field, []), f"resources.{field}")
+    repo_overlays = resources.get("repo_overlays", [])
+    if not isinstance(repo_overlays, list):
+        raise ConfigError("resources.repo_overlays: expected list")
+    for index, overlay in enumerate(repo_overlays):
+        item = _section(overlay, "repo_overlay", f"resources.repo_overlays[{index}]")
+        _required_text(item, "source", f"resources.repo_overlays[{index}].source")
+        _required_text(item, "target", f"resources.repo_overlays[{index}].target")
+        if "mode" in item and item["mode"] not in {"ro", "rw"}:
+            raise ConfigError(f"resources.repo_overlays[{index}].mode: expected 'ro' or 'rw'")
+        if "purpose" in item:
+            _required_text(item, "purpose", f"resources.repo_overlays[{index}].purpose")
     agent = _section(data.get("agent") or {}, "agent")
     _string_list(agent.get("extra_args", []), "agent.extra_args")
     if "timeout_seconds" in agent:
         _positive_int(agent["timeout_seconds"], "agent.timeout_seconds")
     _validate_safety(_section(data.get("safety") or {}, "safety"), "safety")
+
+
+def _validate_executor_image_v2(executor_image: dict[str, Any]) -> None:
+    _optional_text_fields(executor_image, ("base", "base_image", "os_family"), "executor_image")
+    _string_list(executor_image.get("bootstrap_tools", []), "executor_image.bootstrap_tools")
+    _string_list(executor_image.get("packages", []), "executor_image.packages")
+    _string_list(executor_image.get("extra_packages", []), "executor_image.extra_packages")
+
+
+def _validate_filesystem_v2(filesystem: dict[str, Any]) -> None:
+    _string_list(filesystem.get("readable", []), "filesystem.readable")
+    _string_list(filesystem.get("writable", []), "filesystem.writable")
+
+
+def _validate_project_environment_v2(environment: dict[str, Any]) -> None:
+    _optional_text_fields(environment, ("shell",), "environment")
+    _string_list(environment.get("setup", []), "environment.setup")
+    _string_list(environment.get("check", []), "environment.check")
+    env = _section(environment.get("env") or {}, "runtime_env", "environment.env")
+    _string_list(env.get("pass", []), "environment.env.pass")
+    if "set" in env and not isinstance(env["set"], dict):
+        raise ConfigError("environment.env.set: expected object")
+    for key, value in (env.get("set") or {}).items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            raise ConfigError("environment.env.set: expected string values")
 
 
 def _validate_runtime_apptainer_v2(apptainer: dict[str, Any]) -> None:
@@ -663,6 +740,7 @@ def _validate_runtime_apptainer_v2(apptainer: dict[str, Any]) -> None:
             raise ConfigError(f"runtime.apptainer.{field}: expected boolean")
     _string_list(apptainer.get("extra_exec_args", []), "runtime.apptainer.extra_exec_args")
     _string_list(apptainer.get("extra_packages", []), "runtime.apptainer.extra_packages")
+    _string_list(apptainer.get("bootstrap_tools", []), "runtime.apptainer.bootstrap_tools")
     for field in ("home_readonly_binds",):
         values = apptainer.get(field, [])
         if not isinstance(values, list):
@@ -969,11 +1047,92 @@ def _within(pattern: str, ceilings: list[str]) -> bool:
     return False
 
 
+def _dedupe(items: list[str]) -> list[str]:
+    return list(dict.fromkeys(str(item) for item in items if str(item)))
+
+
+def _merge_environment_v2(runtime: dict[str, Any], environment: dict[str, Any]) -> dict[str, Any]:
+    result = deepcopy(runtime)
+    if not environment:
+        return result
+    if environment.get("setup"):
+        result["setup"] = list(result.get("setup") or []) + list(environment.get("setup") or [])
+    if environment.get("check"):
+        result["check"] = list(result.get("check") or []) + list(environment.get("check") or [])
+    env = deepcopy(result.get("env") or {})
+    env_profile = environment.get("env") or {}
+    env["pass"] = _dedupe(list(env.get("pass") or []) + list(env_profile.get("pass") or []))
+    env["set"] = {**dict(env.get("set") or {}), **dict(env_profile.get("set") or {})}
+    if env["pass"] or env["set"]:
+        result["env"] = env
+    return result
+
+
+def _resolve_executor_image_v2(executor_image: dict[str, Any]) -> dict[str, Any]:
+    base_image = executor_image.get("base_image") or executor_image.get("base") or ""
+    packages = list(executor_image.get("packages") or []) + list(executor_image.get("extra_packages") or [])
+    return {
+        "base_image": str(base_image) if base_image else "",
+        "os_family": str(executor_image.get("os_family") or ""),
+        "bootstrap_tools": _dedupe(list(executor_image.get("bootstrap_tools") or [])),
+        "extra_packages": _dedupe(packages),
+    }
+
+
+def _apply_executor_image_to_apptainer(apptainer: dict[str, Any], executor_image: dict[str, Any]) -> None:
+    if executor_image.get("base_image") and not apptainer.get("base_image"):
+        apptainer["base_image"] = executor_image["base_image"]
+    apptainer["bootstrap_tools"] = _dedupe(
+        list(apptainer.get("bootstrap_tools") or []) + list(executor_image.get("bootstrap_tools") or [])
+    )
+    apptainer["extra_packages"] = _dedupe(
+        list(apptainer.get("extra_packages") or []) + list(executor_image.get("extra_packages") or [])
+    )
+
+
+def _resolve_filesystem_v2(filesystem: dict[str, Any], base: Path) -> dict[str, Any]:
+    return {
+        "readable": [str(_path(item, base)) for item in filesystem.get("readable", [])],
+        "writable": [str(_path(item, base)) for item in filesystem.get("writable", [])],
+    }
+
+
+def _resolve_build_v2(build: dict[str, Any]) -> dict[str, Any]:
+    return {"commands": list(build.get("commands") or [])}
+
+
+def _compile_repo_overlays(overlays: list[dict[str, str]], workdir: str) -> list[dict[str, str]]:
+    result: list[dict[str, str]] = []
+    for item in overlays:
+        result.append({
+            "source": item["source"],
+            "target": f"{workdir}/{str(item['target']).lstrip('/')}",
+            "mode": str(item.get("mode") or "ro"),
+        })
+    return result
+
+
 def _resolve_resources_v2(resources: dict[str, Any], base: Path) -> dict[str, Any]:
+    repo_overlays: list[dict[str, str]] = []
+    for index, item in enumerate(resources.get("repo_overlays") or []):
+        source = _path(item["source"], base)
+        if not source.exists():
+            raise ConfigError(
+                f"resources.repo_overlays[{index}].source: source does not exist: {source} "
+                "(resolved relative to profile_dir)"
+            )
+        repo_overlays.append({
+            "source": str(source),
+            "target": str(item["target"]),
+            "mode": str(item.get("mode") or "ro"),
+            "purpose": str(item.get("purpose") or ""),
+        })
     return {
         "data_files": [str(_path(item, base)) for item in resources.get("data_files", [])],
         "context_paths": [str(_path(item, base)) for item in resources.get("context_paths", [])],
         "skills": list(resources.get("skills") or []),
+        "accessible_paths": [str(_path(item, base)) for item in resources.get("accessible_paths", [])],
+        "repo_overlays": repo_overlays,
         "pre_materialized_lfs_paths": list(resources.get("pre_materialized_lfs_paths") or []),
         "generated_tracked_paths": list(resources.get("generated_tracked_paths") or []),
         "hash_artifacts": list(resources.get("hash_artifacts") or []),

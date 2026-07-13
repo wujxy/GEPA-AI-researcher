@@ -93,6 +93,35 @@ class DeriveRequirementsTest(unittest.TestCase):
         self.assertIn("python3", req.tools)
         self.assertIn("git", req.tools)
 
+    def test_explicit_bootstrap_tools_are_image_requirements(self):
+        resolved = {
+            "_runtime_ir": {
+                "executor_image": {
+                    "bootstrap_tools": ["bash", "which"],
+                    "extra_packages": ["which"],
+                }
+            },
+            "runtime": {"allowed_commands": []},
+        }
+        req = derive_requirements(resolved)
+        self.assertIn("which", req.tools)
+        self.assertEqual(req.image_required_tools, ["bash", "which"])
+
+    def test_filesystem_paths_are_collected_by_mode(self):
+        resolved = {
+            "contracts": {
+                "resources": {
+                    "accessible_paths": ["/cvmfs/juno.ihep.ac.cn"],
+                    "writable_paths": ["/scratch/project"],
+                }
+            },
+            "runtime": {"allowed_commands": []},
+        }
+        req = derive_requirements(resolved)
+        self.assertEqual(req.accessible_paths, ["/cvmfs/juno.ihep.ac.cn"])
+        self.assertEqual(req.writable_paths, ["/scratch/project"])
+        self.assertEqual(req.cvmfs_paths, ["/cvmfs"])
+
     def test_default_claude_command(self):
         req = derive_requirements({"runtime": {"allowed_commands": []}})
         self.assertEqual(req.claude_command, "claude")
@@ -333,6 +362,9 @@ class FinalizeRuntimeTest(unittest.TestCase):
                 {"source": "/cvmfs", "target": "/cvmfs", "mode": "ro"},   # dup of existing
                 {"source": "/n", "target": "/n", "mode": "ro"},
             ],
+            derived_extra_binds=[
+                {"source": "/scratch/project", "target": "/scratch/project", "mode": "rw"},
+            ],
         )
         with patch.object(ci, "ensure_apptainer", return_value=ApptainerDiscovery("/usr/bin/apptainer", "test")), \
              patch.object(ci, "_probe_host_runtime", return_value=self._fake_probe()), \
@@ -344,6 +376,8 @@ class FinalizeRuntimeTest(unittest.TestCase):
         # /cvmfs deduped, /n appended.
         sources = [(b["source"], b["target"]) for b in appt["readonly_binds"]]
         self.assertEqual(sources, [("/cvmfs", "/cvmfs"), ("/n", "/n")])
+        extra_sources = [(b["source"], b["target"], b["mode"]) for b in appt["extra_binds"]]
+        self.assertEqual(extra_sources, [("/scratch/project", "/scratch/project", "rw")])
         self.assertIn("_materialization", resolved["_meta"])
 
     def test_userns_not_overridden_when_user_pinned(self):
