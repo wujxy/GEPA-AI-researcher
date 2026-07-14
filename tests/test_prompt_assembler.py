@@ -1,6 +1,7 @@
 from gepa_researcher.context.blocks import (
     ContextBlock,
     ContextBlockKind,
+    ContextRenderMode,
     ContextRole,
     ContextVisibility,
     SourceRef,
@@ -166,3 +167,103 @@ def test_prompt_budget_comes_from_assembler_not_context_config():
     assert "summary 0" in prompt
     assert '"candidate:cand_2"' in prompt
     assert "omitted_context_refs" in prompt
+
+
+def test_prompt_assembler_filters_blocks_by_visibility_and_role():
+    blocks = [
+        ContextBlock(
+            block_id="run:task",
+            kind=ContextBlockKind.RUN_FACT,
+            title="Task",
+            summary="goal",
+            inline_content={"goal": "improve"},
+            source_refs=[],
+            entity_refs=[],
+            visibility=ContextVisibility.AGENT,
+            role_scope=[ContextRole.EXECUTOR],
+        ),
+        ContextBlock(
+            block_id="candidate:judge-only",
+            kind=ContextBlockKind.CANDIDATE_FACT,
+            title="Judge only",
+            summary="judge secret",
+            inline_content={"candidate_id": "judge-only"},
+            source_refs=[SourceRef(source_type="candidate", source_id="judge-only")],
+            entity_refs=[],
+            visibility=ContextVisibility.AGENT,
+            role_scope=[ContextRole.JUDGE],
+        ),
+        ContextBlock(
+            block_id="internal:note",
+            kind=ContextBlockKind.DERIVED_SUMMARY,
+            title="Internal",
+            summary="internal secret",
+            inline_content={"secret": True},
+            source_refs=[SourceRef(source_type="internal", source_id="note")],
+            entity_refs=[],
+            visibility=ContextVisibility.INTERNAL,
+            role_scope=[ContextRole.EXECUTOR],
+        ),
+    ]
+    view = ContextView(
+        role=ContextRole.EXECUTOR,
+        envelope=ContextEnvelope(role="executor", round_id=1, phase="implementation"),
+        blocks=blocks,
+        metadata={},
+    )
+
+    prompt = PromptAssembler().render_context_blocks(view)
+
+    assert "improve" in prompt
+    assert "judge secret" not in prompt
+    assert "internal secret" not in prompt
+
+
+def test_prompt_assembler_rejects_mismatched_view_role():
+    view = ContextView(
+        role=ContextRole.JUDGE,
+        envelope=ContextEnvelope(role="executor", round_id=1, phase="implementation"),
+        blocks=[],
+        metadata={},
+    )
+
+    try:
+        PromptAssembler().render_context_blocks(view)
+    except ValueError as exc:
+        assert "role mismatch" in str(exc)
+    else:
+        raise AssertionError("expected role mismatch to be rejected")
+
+
+def test_prompt_assembler_renders_actionable_artifact_refs():
+    block = ContextBlock(
+        block_id="artifact:plot",
+        kind=ContextBlockKind.ARTIFACT_REF,
+        title="Artifact: plot",
+        summary="plot: artifacts/execution/plot.png",
+        inline_content={
+            "artifact_id": "plot",
+            "execution_id": "exec-1",
+            "kind": "plot",
+            "path": "artifacts/execution/plot.png",
+            "sha256": "abc",
+            "size_bytes": 123,
+        },
+        source_refs=[SourceRef(source_type="artifact", source_id="plot", path="artifacts/execution/plot.png")],
+        entity_refs=[],
+        visibility=ContextVisibility.AGENT,
+        role_scope=[ContextRole.JUDGE],
+        render_mode=ContextRenderMode.REF,
+    )
+    view = ContextView(
+        role=ContextRole.JUDGE,
+        envelope=ContextEnvelope(role="judger", round_id=1, phase="pareto"),
+        blocks=[block],
+        metadata={},
+    )
+
+    prompt = PromptAssembler().render_context_blocks(view)
+
+    assert "artifact_ref=artifact:plot" in prompt
+    assert "path=artifacts/execution/plot.png" in prompt
+    assert "plot: artifacts/execution/plot.png" in prompt

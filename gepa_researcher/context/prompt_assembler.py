@@ -6,7 +6,7 @@ from typing import Any
 
 from ..config.contracts import format_role_contract
 from ..models.schemas import Candidate, LoopState, Trace
-from .blocks import ContextBlock, ContextBlockKind, ContextRenderMode, ContextRole
+from .blocks import ContextBlock, ContextBlockKind, ContextRenderMode, ContextRole, ContextVisibility
 from .views import ContextView
 
 
@@ -181,6 +181,7 @@ Required JSON schema:
         return _render_legacy_context(view, role, empty)
 
     def render_context_blocks(self, view: ContextView) -> str:
+        _validate_view_role(view)
         lines = ["Context envelope:", json.dumps(view.envelope.to_dict(), ensure_ascii=False, sort_keys=True)]
         selected, omitted = self._select_blocks(view)
         for block in selected:
@@ -194,7 +195,7 @@ Required JSON schema:
     def _select_blocks(
         self, view: ContextView
     ) -> tuple[list[ContextBlock], list[str]]:
-        blocks = sorted(view.blocks, key=lambda item: (item.kind.value, item.block_id))
+        blocks = sorted(_agent_visible_blocks(view), key=lambda item: (item.kind.value, item.block_id))
         budget = self.max_prompt_blocks
         if budget is None:
             return blocks, []
@@ -229,7 +230,18 @@ Required JSON schema:
             for ref in block.source_refs
         )
         header = f"{block.title} [kind={block.kind.value}; sources=[{sources}]]"
-        if block.render_mode is ContextRenderMode.REF or block.kind is ContextBlockKind.ARTIFACT_REF:
+        if block.kind is ContextBlockKind.ARTIFACT_REF:
+            content = dict(block.inline_content or {})
+            path = content.get("path") or next((ref.path for ref in block.source_refs if ref.path), None)
+            details = [f"artifact_ref={block.block_id}"]
+            if path:
+                details.append(f"path={path}")
+            if content.get("sha256"):
+                details.append(f"sha256={content['sha256']}")
+            if content.get("size_bytes") is not None:
+                details.append(f"size_bytes={content['size_bytes']}")
+            return f"{header}: {block.summary or ''}\n" + "\n".join(details)
+        if block.render_mode is ContextRenderMode.REF:
             return f"{header}: ref={block.block_id}"
         if block.render_mode is ContextRenderMode.SUMMARY or block.inline_content is None:
             return f"{header}: {block.summary or ''}\ncontent_ref={block.block_id}"
@@ -239,6 +251,26 @@ Required JSON schema:
     @staticmethod
     def _join(*sections: PromptSection) -> str:
         return "\n\n".join(section.body.strip() for section in sections if section.mandatory or section.body).strip() + "\n"
+
+
+def _validate_view_role(view: ContextView) -> None:
+    envelope_role = str(view.envelope.role)
+    valid_roles = {view.role.value}
+    if view.role is ContextRole.JUDGE:
+        valid_roles.add("judger")
+    if envelope_role not in valid_roles:
+        raise ValueError(f"context view role mismatch: view={view.role.value} envelope={envelope_role}")
+
+
+def _agent_visible_blocks(view: ContextView) -> list[ContextBlock]:
+    blocks: list[ContextBlock] = []
+    for block in view.blocks:
+        if block.visibility is not ContextVisibility.AGENT:
+            continue
+        if block.role_scope is not None and view.role not in block.role_scope:
+            continue
+        blocks.append(block)
+    return blocks
 
 
 def _format_config_for_role(config: dict[str, Any], role: str) -> str:

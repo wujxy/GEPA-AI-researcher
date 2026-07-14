@@ -9,6 +9,10 @@ source:
 pre_materialized_lfs_paths:
   - tests/fixtures/v107_rev1/*.bin
 
+generated_tracked_paths:
+  - benchmarks/speed.csv
+  - benchmarks/drift.csv
+
 docs:
   - ../../../omilrec-br111-executor-pack/context/BR111_OPTIMIZATION_CONTEXT.md
   - ../../../omilrec-br111-executor-pack/context/SEEDS_BR111.md

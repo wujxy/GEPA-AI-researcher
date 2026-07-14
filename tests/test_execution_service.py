@@ -246,5 +246,8 @@ def test_runner_adapter_builds_transient_agent_config_without_mutating_card(tmp_
     assert executor.config["_candidate_repo"] == str(repo)
     assert executor.config["_execution_id"] == spec.execution_id
     assert executor.config["_execution_mode"] == "evaluate_only"
+    assert executor.config["_context_view"]["role"] == "executor"
+    assert executor.config["_context_view"]["envelope"]["candidate_id"] == card.candidate_id
+    assert any(block["block_id"] == f"candidate:{card.candidate_id}" for block in executor.config["_context_view"]["blocks"])
     assert card.to_dict()["result_revision"] is None
     assert "repo_path" not in card.to_dict()

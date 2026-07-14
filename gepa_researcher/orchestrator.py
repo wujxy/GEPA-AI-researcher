@@ -106,12 +106,22 @@ class ResearchOrchestrator:
             config=self.config,
             materializer=RepositoryMaterializer(self.run_dir, self.config.get("workspace", {})),
             execution_store=self.execution_store,
-            git_result_service=GitResultService(self.config.get("candidate_policy", {})),
+            git_result_service=GitResultService(self._git_result_policy()),
             runner=RunnerAdapter(self.executor, self.run_dir),
             artifact_store=self.artifact_store,
         )
         self.gate = GEPAGate()
         self.pareto = ParetoSelector()
+
+    def _git_result_policy(self) -> dict[str, Any]:
+        policy = dict(self.config.get("candidate_policy", {}) or {})
+        workspace = dict(self.config.get("workspace", {}) or {})
+        policy["readonly_allowed_dirty_globs"] = [
+            *list(workspace.get("pre_materialized_lfs_paths") or []),
+            *list(workspace.get("generated_tracked_paths") or []),
+            *list(workspace.get("clean_start_ignore_globs") or []),
+        ]
+        return policy
 
     def run(self) -> LoopState:
         with self.workspace_manager.protect_controller():

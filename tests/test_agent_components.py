@@ -6,6 +6,7 @@ from io import StringIO
 from pathlib import Path
 
 from gepa_researcher.agents.agent_client import AgentError, ClaudeCodeClient
+from gepa_researcher.agents.adapters import JudgerAdapter
 from gepa_researcher.agents.agent_components import AgentExecutor, AgentJudger, AgentProposer, AgentProtocolError
 from gepa_researcher.context.blocks import ContextBlock, ContextBlockKind, ContextRole, ContextVisibility, SourceRef
 from gepa_researcher.context.views import ContextView
@@ -171,6 +172,123 @@ class AgentComponentsTest(unittest.TestCase):
         self.assertEqual(executor["selected_sample_ids"], ["s1"])
         self.assertEqual(judger["role"], "judger")
         self.assertEqual(judger["candidate_id"], "cand_env")
+
+    def test_executor_uses_serialized_context_view(self):
+        client = CapturingClient(
+            {
+                "summary": "ran analysis",
+                "implementation": {},
+                "validation": {},
+                "metrics": {},
+                "diagnostics": [],
+                "artifact_paths": [],
+                "errors": [],
+            }
+        )
+        view = ContextView(
+            role=ContextRole.EXECUTOR,
+            envelope=ContextEnvelope(role="executor", round_id=0, phase="implementation", candidate_id="cand_ctx"),
+            blocks=[
+                ContextBlock(
+                    block_id="candidate:cand_ctx",
+                    kind=ContextBlockKind.CANDIDATE_FACT,
+                    title="Candidate",
+                    summary="serialized executor context",
+                    inline_content={"candidate_id": "cand_ctx"},
+                    source_refs=[SourceRef(source_type="candidate", source_id="cand_ctx")],
+                    entity_refs=[],
+                    visibility=ContextVisibility.AGENT,
+                    role_scope=[ContextRole.EXECUTOR],
+                )
+            ],
+            metadata={},
+        ).to_dict()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            AgentExecutor(client, Path(tmp)).execute(
+                _make_candidate("cand_ctx"),
+                {"task": {"goal": "g"}, "runtime": {}, "evidence": {}, "_context_view": view},
+            )
+
+        prompt = client.prompts[0][1]
+        self.assertIn("Context envelope", prompt)
+        self.assertIn("serialized executor context", prompt)
+
+    def test_judger_uses_serialized_context_view(self):
+        client = CapturingClient(
+            {
+                "score": 0.4,
+                "passed": False,
+                "per_sample_scores": [],
+                "failure_categories": ["weak"],
+                "actionable_feedback": ["try again"],
+                "confidence": "medium",
+            }
+        )
+        candidate = _make_candidate("cand_judge_ctx")
+        trace = Trace(candidate_id=candidate.candidate_id, round_id=0, samples=[])
+        view = ContextView(
+            role=ContextRole.JUDGE,
+            envelope=ContextEnvelope(role="judger", round_id=0, phase="pareto", candidate_id="cand_judge_ctx"),
+            blocks=[
+                ContextBlock(
+                    block_id="trace:cand_judge_ctx",
+                    kind=ContextBlockKind.DERIVED_SUMMARY,
+                    title="Trace",
+                    summary="serialized judge context",
+                    inline_content={"candidate_id": "cand_judge_ctx"},
+                    source_refs=[SourceRef(source_type="trace", source_id="cand_judge_ctx")],
+                    entity_refs=[],
+                    visibility=ContextVisibility.AGENT,
+                    role_scope=[ContextRole.JUDGE],
+                )
+            ],
+            metadata={},
+        ).to_dict()
+
+        AgentJudger(client).judge(candidate, trace, {"task": {"goal": "g"}, "_context_view": view})
+
+        prompt = client.prompts[0][1]
+        self.assertIn("Context envelope", prompt)
+        self.assertIn("serialized judge context", prompt)
+
+    def test_judger_adapter_injects_serialized_context_view_when_run_dir_is_available(self):
+        candidate = _make_candidate("cand_adapter_ctx")
+        trace = Trace(candidate_id=candidate.candidate_id, round_id=0, samples=[])
+
+        class RecordingJudger:
+            def __init__(self):
+                self.config = None
+
+            def judge(self, candidate, trace, config):
+                self.config = config
+                return type(
+                    "Judgment",
+                    (),
+                    {
+                        "candidate_id": candidate.candidate_id,
+                        "round_id": candidate.round_id,
+                        "score": 0.2,
+                    },
+                )()
+
+        recording = RecordingJudger()
+        with tempfile.TemporaryDirectory() as tmp:
+            JudgerAdapter(recording).evaluate_many(
+                [candidate],
+                type(
+                    "TraceBatch",
+                    (),
+                    {"round_id": 0, "traces": [trace], "failed_candidate_ids": []},
+                )(),
+                {"task": {"goal": "g"}, "_run_dir": tmp},
+            )
+
+        self.assertEqual(recording.config["_context_view"]["role"], "judge")
+        self.assertEqual(recording.config["_context_view"]["envelope"]["candidate_id"], candidate.candidate_id)
+        self.assertTrue(
+            any(block["block_id"] == f"trace:{candidate.candidate_id}:round:{candidate.round_id}" for block in recording.config["_context_view"]["blocks"])
+        )
 
     def test_proposer_rejects_missing_required_payload_fields(self):
         client = CapturingClient({"hypothesis": "h", "scope": "task_system"})

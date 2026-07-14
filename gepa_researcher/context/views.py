@@ -31,6 +31,15 @@ class ContextView:
             "metadata": deepcopy(self.metadata),
         }
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ContextView":
+        return cls(
+            role=ContextRole(str(data["role"])),
+            envelope=ContextEnvelope(**dict(data["envelope"])),
+            blocks=[ContextBlock.from_dict(dict(block)) for block in data.get("blocks") or []],
+            metadata=dict(data.get("metadata") or {}),
+        )
+
 
 class ContextViewBuilder:
     """Build deterministic, role-scoped views from the global context plane."""
@@ -44,9 +53,9 @@ class ContextViewBuilder:
         frontier: Any = None,
         parent_ids: list[str] | None = None,
     ) -> ContextView:
-        selected_parent_ids = sorted(set(map(str, parent_ids or _frontier_ids(frontier))))
+        selected_parent_ids = _dedupe_ordered(parent_ids or _frontier_ids(frontier))
         blocks = [
-            *_for_role(self.plane.run_fact_blocks(state), ContextRole.PROPOSER),
+            *_for_role(self.plane.run_fact_blocks(), ContextRole.PROPOSER),
             _loop_state_block(state, ContextRole.PROPOSER),
             *_for_role(self.plane.candidate_blocks(selected_parent_ids), ContextRole.PROPOSER),
             *_recent_judgment_blocks(self.plane, selected_parent_ids, ContextRole.PROPOSER),
@@ -109,7 +118,7 @@ def _envelope(
     return ContextEnvelope(
         role=role.value,
         round_id=round_id,
-        phase=str(config.get("_eval_phase", "proposal")),
+        phase=str(config.get("_eval_phase") or config.get("_agent_phase") or "proposal"),
         run_id=config.get("run_id"),
         candidate_id=candidate_id,
         execution_id=config.get("_execution_id"),
@@ -302,6 +311,18 @@ def _frontier_ids(frontier: Any) -> list[str]:
     if isinstance(frontier, (list, tuple, set)):
         return list(frontier)
     return []
+
+
+def _dedupe_ordered(values: Any) -> list[str]:
+    selected: list[str] = []
+    seen: set[str] = set()
+    for value in values or []:
+        item = str(value)
+        if item in seen:
+            continue
+        selected.append(item)
+        seen.add(item)
+    return selected
 
 
 def _metadata_value(value: Any) -> Any:

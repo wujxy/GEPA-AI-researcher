@@ -100,17 +100,26 @@ class FileCache:
         path: str,
     ) -> FileRecord:
         relative_path = Path(path)
-        source = Path(repo_root) / relative_path
+        if relative_path.is_absolute():
+            raise ValueError("file cache path must be relative to the repository")
+        repo_root = Path(repo_root).expanduser().resolve()
+        source = (repo_root / relative_path).resolve()
+        try:
+            normalized_path = source.relative_to(repo_root)
+        except ValueError as exc:
+            raise ValueError(f"file cache path escapes repository: {path}") from exc
+        if not source.is_file():
+            raise FileNotFoundError(f"file cache source is not a file: {source}")
         content = source.read_bytes()
         content_hash = hashlib.sha256(content).hexdigest()
         content_path = self.content_root / f"{content_hash}.txt"
         content_ref = content_path.relative_to(self.run_dir).as_posix()
         record = FileRecord(
-            key=FileCacheKey(repo_id, commit_sha, relative_path.as_posix(), content_hash),
+            key=FileCacheKey(repo_id, commit_sha, normalized_path.as_posix(), content_hash),
             size_bytes=len(content),
-            language=self._LANGUAGES.get(relative_path.suffix.lower(), "text"),
+            language=self._LANGUAGES.get(normalized_path.suffix.lower(), "text"),
             content_ref=content_ref,
-            summary=f"File {relative_path.as_posix()}",
+            summary=f"File {normalized_path.as_posix()}",
         )
 
         with self._lock:

@@ -48,8 +48,6 @@ class GlobalContextPlane:
             "task": task,
             "budget": deepcopy(dict(self.config.get("budget") or {})),
         }
-        if state is not None:
-            content["loop_state"] = state.to_dict()
         return [
             ContextBlock(
                 block_id=f"run:{task_name}",
@@ -73,7 +71,7 @@ class GlobalContextPlane:
                 source_id=card.candidate_id,
                 path=f"candidates/{card.candidate_id}.json",
             )
-            content = _without_timestamps(card.to_dict())
+            content = _scrub_agent_raw(_without_timestamps(card.to_dict()))
             block = ContextBlock(
                 block_id=f"candidate:{card.candidate_id}",
                 kind=ContextBlockKind.CANDIDATE_FACT,
@@ -180,4 +178,26 @@ def _without_timestamps(value: Any) -> Any:
         }
     if isinstance(value, list):
         return [_without_timestamps(item) for item in value]
+    return deepcopy(value)
+
+
+_RAW_CONTEXT_KEYS = {
+    "agent_raw",
+    "raw",
+    "raw_output",
+    "original_raw_output",
+    "repair_raw_output",
+    "repair_raw",
+}
+
+
+def _scrub_agent_raw(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _scrub_agent_raw(item)
+            for key, item in value.items()
+            if key not in _RAW_CONTEXT_KEYS
+        }
+    if isinstance(value, list):
+        return [_scrub_agent_raw(item) for item in value]
     return deepcopy(value)

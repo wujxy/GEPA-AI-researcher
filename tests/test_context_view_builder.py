@@ -100,3 +100,18 @@ def test_proposer_view_accepts_a_pareto_frontier_model(tmp_path):
 
     assert any(block["block_id"] == "candidate:cand_001" for block in view["blocks"])
     assert view["metadata"]["frontier"]["candidate_ids"] == ["cand_001"]
+
+
+def test_proposer_view_preserves_parent_order_and_separates_loop_state(tmp_path):
+    builder = ContextViewBuilder(_plane(tmp_path))
+
+    view = builder.for_proposer(
+        LoopState(task_name="task", round_id=2),
+        parent_ids=["cand_002", "cand_001", "cand_002"],
+    ).to_dict()
+
+    assert view["metadata"]["parent_ids"] == ["cand_002", "cand_001"]
+    run_blocks = [block for block in view["blocks"] if block["kind"] == "run_fact"]
+    assert len(run_blocks) == 1
+    assert "loop_state" not in run_blocks[0]["inline_content"]
+    assert any(block["kind"] == "loop_state" for block in view["blocks"])

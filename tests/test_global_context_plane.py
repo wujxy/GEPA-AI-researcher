@@ -24,6 +24,11 @@ def _candidate_card() -> CandidateCard:
             expected_improvement="improve metric",
             risk="may lose useful signal",
             prompt_text="reduce inputs",
+            metadata={
+                "agent_raw": "raw proposer transcript",
+                "strategy": "safe public strategy",
+                "nested": {"original_raw_output": "repair text", "kept": True},
+            },
         ),
         base_revision="a" * 40,
         status=CandidateStatus.GENERATED,
@@ -50,6 +55,9 @@ def test_context_plane_builds_candidate_block_with_source_refs(tmp_path):
     assert blocks[0].entity_refs[0].entity_id == "cand_001"
     assert blocks[0].source_refs[0].source_type == "candidate"
     assert plane.entity_store.get("candidate", "cand_001") is not None
+    assert "agent_raw" not in str(blocks[0].inline_content)
+    assert "original_raw_output" not in str(blocks[0].inline_content)
+    assert "safe public strategy" in str(blocks[0].inline_content)
 
 
 def test_context_plane_run_facts_are_deterministic(tmp_path):

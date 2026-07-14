@@ -8,7 +8,6 @@ from typing import Any
 from .agent_client import AgentError, ClaudeCodeClient
 from ..config.contracts import format_role_contract
 from ..context.prompt_assembler import PromptAssembler
-from ..context.blocks import ContextBlock, ContextRole
 from ..context.views import ContextView
 from ..loop.context_views import (
     build_executor_context,
@@ -17,7 +16,7 @@ from ..loop.context_views import (
     candidate_for_executor,
     evidence_access_policy,
 )
-from ..models.schemas import AgentCallContext, Candidate, CandidateBatch, ContextEnvelope, Judgment, LoopState, SampleTrace, Trace
+from ..models.schemas import AgentCallContext, Candidate, CandidateBatch, Judgment, LoopState, SampleTrace, Trace
 
 
 class AgentProtocolError(ValueError):
@@ -334,18 +333,19 @@ _PROPOSER_FINAL_CONTRACT = """Final delivery contract (mandatory):
 
 
 def _proposer_context(state: LoopState, config: dict[str, Any]) -> ContextView | dict[str, Any]:
+    context_view = _context_view_from_config(config)
+    if context_view is not None:
+        return context_view
+    return build_proposer_context(state, config)
+
+
+def _context_view_from_config(config: dict[str, Any]) -> ContextView | None:
     context_view = config.get("_context_view")
     if isinstance(context_view, ContextView):
         return context_view
     if isinstance(context_view, dict) and {"role", "envelope", "blocks"} <= context_view.keys():
-        envelope = ContextEnvelope(**dict(context_view["envelope"]))
-        return ContextView(
-            role=ContextRole(str(context_view["role"])),
-            envelope=envelope,
-            blocks=[ContextBlock.from_dict(dict(block)) for block in context_view["blocks"]],
-            metadata=dict(context_view.get("metadata") or {}),
-        )
-    return build_proposer_context(state, config)
+        return ContextView.from_dict(context_view)
+    return None
 
 
 def _proposer_parent_ids(proposer_context: ContextView | dict[str, Any], config: dict[str, Any]) -> list[str]:
@@ -531,7 +531,7 @@ class AgentExecutor:
         host_cwd_value = config.get("_executor_host_cwd") or config.get("_candidate_repo_host")
         host_cwd = Path(host_cwd_value) if host_cwd_value else visible_repo_dir
         execution_mode = str(config.get("_execution_mode", "implement_and_validate"))
-        executor_context = config.get("_context_view") if isinstance(config.get("_context_view"), ContextView) else build_executor_context(candidate, config, self.run_dir, visible_round_dir, visible_repo_dir, execution_mode)
+        executor_context = _context_view_from_config(config) or build_executor_context(candidate, config, self.run_dir, visible_round_dir, visible_repo_dir, execution_mode)
         legacy_executor_context = {} if isinstance(executor_context, ContextView) else executor_context
         prompt = f"""
 You are the EXECUTOR agent in a bounded GEPA-style research loop.
@@ -745,7 +745,7 @@ class AgentJudger:
         self.client = client
 
     def judge(self, candidate: Candidate, trace: Trace, config: dict[str, Any]) -> Judgment:
-        judger_context = config.get("_context_view") if isinstance(config.get("_context_view"), ContextView) else build_judger_context(candidate, trace, config)
+        judger_context = _context_view_from_config(config) or build_judger_context(candidate, trace, config)
         legacy_judger_context = {} if isinstance(judger_context, ContextView) else judger_context
         call_context = AgentCallContext(
             role="judger",

@@ -100,7 +100,7 @@ class ClaudeCodeClient:
             print(f"[{started_at.astimezone().strftime('%Y-%m-%d %H:%M:%S')}] resolved Claude command: {command.display}", flush=True)
         if command_prefix:
             print(f"[{started_at.astimezone().strftime('%Y-%m-%d %H:%M:%S')}] command prefix: {' '.join(command_prefix)}", flush=True)
-        process_env = {**os.environ, **(env or {})} if inherit_host_env else dict(env or {})
+        process_env = _process_env(env or {}, inherit_host_env=inherit_host_env)
         proc = subprocess.Popen(
             cmd,
             cwd=str(cwd or self.cwd) if (cwd or self.cwd) else None,
@@ -273,6 +273,24 @@ def _without_output_format(args: list[str]) -> list[str]:
             continue
         result.append(item)
     return result
+
+
+_CLEAN_ENV_PASSTHROUGH = (
+    "LD_LIBRARY_PATH",
+    "DYLD_LIBRARY_PATH",
+)
+
+
+def _process_env(env: dict[str, str], *, inherit_host_env: bool) -> dict[str, str]:
+    if inherit_host_env:
+        return {**os.environ, **env}
+    process_env = {
+        key: value
+        for key in _CLEAN_ENV_PASSTHROUGH
+        if (value := os.environ.get(key)) is not None
+    }
+    process_env.update(env)
+    return process_env
 
 
 def _try_json_dict(text: str) -> dict[str, Any] | None:

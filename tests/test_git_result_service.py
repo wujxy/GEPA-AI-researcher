@@ -110,6 +110,21 @@ def test_readonly_guard_rejects_tracked_file_change_without_commit(tmp_path: Pat
         service.assert_readonly_unchanged(_spec(ExecutionPhase.PARETO_EVAL, baseline), session, before)
 
 
+def test_readonly_guard_allows_declared_generated_tracked_output(tmp_path: Path):
+    repo, baseline = _make_repo(tmp_path)
+    (repo / "benchmarks").mkdir()
+    (repo / "benchmarks" / "speed.csv").write_text("candidate,score\nbaseline,1\n", encoding="utf-8")
+    _git(repo, "add", "benchmarks/speed.csv")
+    _git(repo, "commit", "-m", "tracked benchmark")
+    baseline = _git(repo, "rev-parse", "HEAD")
+    session = _session(tmp_path, repo, baseline)
+    service = GitResultService(candidate_policy={"readonly_allowed_dirty_globs": ["benchmarks/speed.csv"]})
+    before = service.snapshot(session)
+    (repo / "benchmarks" / "speed.csv").write_text("candidate,score\ncandidate,2\n", encoding="utf-8")
+
+    service.assert_readonly_unchanged(_spec(ExecutionPhase.PARETO_EVAL, baseline), session, before)
+
+
 def test_readonly_guard_ignores_untracked_runtime_debris(tmp_path: Path):
     repo, baseline = _make_repo(tmp_path)
     session = _session(tmp_path, repo, baseline)

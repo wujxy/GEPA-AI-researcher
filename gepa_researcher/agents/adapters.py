@@ -7,6 +7,8 @@ from ..domain.candidate import CandidateCard
 from ..domain.execution import ExecutionPhase, ExecutionSpec
 from ..execution.runtime_backend import RuntimeLease
 from ..execution.sandbox import SandboxSession
+from ..context.plane import GlobalContextPlane
+from ..context.views import ContextView, ContextViewBuilder
 from ..models.schemas import (
     Candidate,
     Judgment,
@@ -15,6 +17,11 @@ from ..models.schemas import (
     Trace,
     TraceBatch,
 )
+from ..storage.artifact_store import ArtifactStore
+from ..storage.candidate_store import CandidateStore
+from ..storage.event_store import EventStore
+from ..storage.execution_store import ExecutionStore
+from ..storage.store import RunStore
 
 
 class RunnerAdapter:
@@ -52,6 +59,16 @@ class RunnerAdapter:
         if spec.dataset_ref is not None and "_selected_sample_ids" not in candidate_config:
             candidate_config["_selected_sample_ids"] = [spec.dataset_ref]
         candidate_config["_executor_timeout_seconds"] = spec.budget.wall_seconds
+        context_view = _build_executor_view(
+            self.run_dir,
+            candidate_config,
+            candidate,
+            Path(runtime_lease.artifact_path),
+            Path(runtime_lease.repo_path),
+            candidate_config["_execution_mode"],
+        )
+        if context_view is not None:
+            candidate_config["_context_view"] = context_view.to_dict()
         return self.executor.execute(candidate, candidate_config)
 
 
@@ -131,7 +148,11 @@ class JudgerAdapter:
                     )
                 )
             else:
-                judgments.append(self.judger.judge(candidate, trace, config))
+                judger_config = dict(config)
+                context_view = _build_judger_view(judger_config, candidate, trace)
+                if context_view is not None:
+                    judger_config["_context_view"] = context_view.to_dict()
+                judgments.append(self.judger.judge(candidate, trace, judger_config))
 
         best = max(judgments, key=lambda judgment: judgment.score, default=None)
         summary = {
@@ -141,3 +162,47 @@ class JudgerAdapter:
             "failed_candidate_ids": list(trace_batch.failed_candidate_ids),
         }
         return JudgmentBatch(round_id=trace_batch.round_id, judgments=judgments, summary=summary)
+
+
+def _context_plane(run_dir: Path, config: dict[str, Any]) -> GlobalContextPlane:
+    event_store = EventStore(run_dir)
+    return GlobalContextPlane(
+        run_dir,
+        config,
+        candidate_store=CandidateStore(run_dir),
+        execution_store=ExecutionStore(run_dir, event_store=event_store),
+        event_store=event_store,
+        artifact_store=ArtifactStore(run_dir),
+        store=RunStore(run_dir),
+    )
+
+
+def _build_executor_view(
+    run_dir: Path,
+    config: dict[str, Any],
+    candidate: Candidate,
+    round_dir: Path,
+    repo_dir: Path,
+    execution_mode: str,
+) -> ContextView | None:
+    try:
+        return ContextViewBuilder(_context_plane(run_dir, config)).for_executor(
+            candidate,
+            config,
+            run_dir,
+            round_dir,
+            repo_dir,
+            execution_mode,
+        )
+    except Exception:
+        return None
+
+
+def _build_judger_view(config: dict[str, Any], candidate: Candidate, trace: Trace) -> ContextView | None:
+    run_dir_value = config.get("_run_dir") or config.get("run_dir")
+    if not run_dir_value:
+        return None
+    try:
+        return ContextViewBuilder(_context_plane(Path(run_dir_value), config)).for_judge(candidate, trace, config)
+    except Exception:
+        return None
