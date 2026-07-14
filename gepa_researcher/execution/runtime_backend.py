@@ -7,7 +7,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..models.schemas import Candidate, ExecutionRecord, WorkspaceLease
+from ..domain.execution import ExecutionRecord, ExecutionSpec
+from .sandbox import SandboxSession
 
 
 class RuntimeBackendError(RuntimeError):
@@ -49,21 +50,21 @@ class LocalRuntimeBackend:
 
     def prepare(
         self,
-        candidate: Candidate,
-        lease: WorkspaceLease,
+        spec: ExecutionSpec,
+        session: SandboxSession,
         record: ExecutionRecord,
     ) -> RuntimeLease:
         return RuntimeLease(
             backend=self.name,
-            repo_path=lease.worktree_path,
-            artifact_path=lease.artifact_path,
-            host_cwd=lease.worktree_path,
+            repo_path=str(session.repo_path),
+            artifact_path=str(session.artifact_path),
+            host_cwd=str(session.repo_path),
             env={
-                "GEPA_CANDIDATE_ID": candidate.candidate_id,
+                "GEPA_CANDIDATE_ID": spec.candidate_id,
                 "GEPA_EXECUTION_ID": record.execution_id,
-                "GEPA_PARENT_SHA": record.requested_parent_sha,
-                "GEPA_WORKTREE": lease.worktree_path,
-                "GEPA_ARTIFACTS": lease.artifact_path,
+                "GEPA_INPUT_REVISION": spec.input_revision,
+                "GEPA_WORKTREE": str(session.repo_path),
+                "GEPA_ARTIFACTS": str(session.artifact_path),
             },
             inherit_host_env=True,
         )
@@ -87,8 +88,8 @@ class ApptainerRuntimeBackend:
 
     def prepare(
         self,
-        candidate: Candidate,
-        lease: WorkspaceLease,
+        spec: ExecutionSpec,
+        session: SandboxSession,
         record: ExecutionRecord,
     ) -> RuntimeLease:
         image = self._required_image()
@@ -98,12 +99,12 @@ class ApptainerRuntimeBackend:
         if shutil.which(apptainer) is None and not Path(apptainer).expanduser().exists():
             raise RuntimeBackendError(f"apptainer executable was not found: {apptainer}")
 
-        host_artifacts = Path(lease.artifact_path).expanduser().resolve()
-        host_repo = Path(lease.worktree_path).expanduser().resolve()
+        host_artifacts = Path(session.artifact_path).expanduser().resolve()
+        host_repo = Path(session.repo_path).expanduser().resolve()
+        host_scratch = Path(session.scratch_path).expanduser().resolve()
 
         # Per-execution directory structure using execution_id
         execution_id = record.execution_id
-        host_scratch = host_artifacts / f"scratch_{execution_id}"
         host_home = host_artifacts / f"home_{execution_id}"
         host_tmp = host_scratch / "tmp"
 
@@ -123,7 +124,7 @@ class ApptainerRuntimeBackend:
             prefix.append("--userns")
         prefix.extend(str(a) for a in self.apptainer_config.get("extra_exec_args", []) or [])
         # Update container paths for per-execution structure
-        container_scratch = f"{self.container_artifacts}/scratch_{execution_id}"
+        container_scratch = self.container_scratch
         container_home = f"{self.container_artifacts}/home_{execution_id}"
 
         home_readonly_binds = self._home_readonly_binds(host_home, container_home)
@@ -136,7 +137,7 @@ class ApptainerRuntimeBackend:
             prefix.extend(["--bind", bind])
 
         # Build environment variables for --env passing
-        env = self._build_environment(candidate, record, container_scratch)
+        env = self._build_environment(spec, record, container_scratch)
 
         # Add environment variables via --env mechanism (Apptainer best practice).
         # subprocess passes argv directly, so values must not be shell-quoted here.
@@ -359,11 +360,11 @@ class ApptainerRuntimeBackend:
         names = list((self.runtime_spec.get("env") or {}).get("pass") or [])
         return {name: os.environ[name] for name in dict.fromkeys(names) if name in os.environ}
 
-    def _build_environment(self, candidate: Candidate, record: ExecutionRecord, container_scratch: str) -> dict[str, str]:
+    def _build_environment(self, spec: ExecutionSpec, record: ExecutionRecord, container_scratch: str) -> dict[str, str]:
         env = {
-            "GEPA_CANDIDATE_ID": candidate.candidate_id,
+            "GEPA_CANDIDATE_ID": spec.candidate_id,
             "GEPA_EXECUTION_ID": record.execution_id,
-            "GEPA_PARENT_SHA": record.requested_parent_sha,
+            "GEPA_INPUT_REVISION": spec.input_revision,
             "GEPA_WORKTREE": self.container_repo,
             "GEPA_ARTIFACTS": self.container_artifacts,
             "TMPDIR": f"{container_scratch}/tmp",

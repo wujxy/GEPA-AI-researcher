@@ -8,6 +8,7 @@ from pathlib import Path
 from gepa_researcher.storage.io_utils import read_json
 from gepa_researcher.models.schemas import Candidate, CandidateBatch
 from gepa_researcher.orchestrator import ResearchOrchestrator
+from gepa_researcher.config import load_and_resolve
 
 from tests._fakes import FakeExecutor, FakeJudger, fake_components, make_generic_config
 
@@ -135,10 +136,10 @@ class OrchestratorSmokeTest(unittest.TestCase):
             self.assertEqual(proposer.single_calls, 2)
 
     def test_claude_config_uses_conda_myenv_runtime(self):
-        config = read_json(Path("examples/function_discovery/config.claude.json"))
+        config = load_and_resolve(Path("examples/function_discovery/config.claude.json"))
 
-        self.assertEqual(config["runtime"]["conda_env"], "myenv")
-        self.assertEqual(config["runtime"]["python_command"], "conda run -n myenv python")
+        self.assertEqual(config["runtime"]["backend"], "local")
+        self.assertEqual(config["_runtime_spec"]["command"], "claude")
         self.assertIn("Bash(conda run -n myenv python *)", config["agent"]["extra_args"])
         self.assertEqual(config["generation"]["batch_size"], 5)
         self.assertFalse(config["generation"]["enable_merge"])
@@ -150,7 +151,6 @@ class OrchestratorSmokeTest(unittest.TestCase):
         self.assertEqual(config["executor"]["max_workers"], 3)
         self.assertEqual(config["executor"]["executor_timeout_seconds"], 900)
         self.assertFalse(config["executor"]["fail_fast"])
-        self.assertTrue(config["executor"]["per_candidate_workspace"])
         self.assertTrue(config["evidence"]["visualize_when_applicable"])
         self.assertEqual(config["evidence"]["plot_selection_policy"], "proposer_selects")
         self.assertNotIn("preferred_plots", config["evidence"])

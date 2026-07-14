@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -9,7 +10,11 @@ from typing import Any
 from .loop.admission import CandidateAdmissionGate
 from .agents.agent_client import ClaudeCodeClient
 from .agents.agent_components import AgentExecutor, AgentJudger, AgentProposer
-from .agents.adapters import ExecutorAdapter, JudgerAdapter
+from .agents.adapters import JudgerAdapter, RunnerAdapter
+from .domain.candidate import CandidateCard, CandidateStatus, ProposalIdea
+from .domain.execution import ExecutionPhase, ExecutionStatus
+from .execution.git_result import GitResultService
+from .execution.materializer import RepositoryMaterializer
 from .loop.context import load_prior_context
 from .display import (
     format_admission_summary,
@@ -29,10 +34,13 @@ from .loop.gate import GEPAGate
 from .storage.io_utils import append_jsonl, write_json
 from .loop.pareto import ParetoSelector
 from .storage.pool import CandidatePool
-from .storage.registry import ExecutionRegistry
 from .loop.runtime import config_for_eval, parent_trace_artifacts, recent_trace_summaries, resolve_dataset_split, select_feedback_minibatch
-from .models.schemas import Candidate, CandidateBatch, GateDecision, GenerationDecision, Judgment, JudgmentBatch, LoopState, ParetoFrontier, ScoreMatrix, Trace
+from .models.schemas import Candidate, CandidateBatch, GateDecision, GenerationDecision, Judgment, JudgmentBatch, LoopState, ParetoFrontier, ScoreMatrix, Trace, TraceBatch
 from .loop.score_matrix import ScoreMatrixBuilder
+from .services.candidate_scheduler import CandidateScheduler
+from .services.execution_service import ExecutionService
+from .storage.candidate_store import CandidateStore
+from .storage.execution_store import ExecutionStore
 from .storage.store import RunStore
 from .storage.usage import UsageTracker, format_round_usage, format_run_usage
 from .execution.workspace import WorkspaceManager
@@ -50,7 +58,8 @@ class ResearchOrchestrator:
             workspace.setdefault("branch_prefix", "gepa/<run-id>")
         self.usage_tracker = UsageTracker(self.run_dir, self.config.get("usage_tracking", {}))
         self.store = RunStore(self.run_dir)
-        self.registry = ExecutionRegistry(self.run_dir)
+        self.candidate_store = CandidateStore(self.run_dir)
+        self.execution_store = ExecutionStore(self.run_dir)
         self.workspace_manager = WorkspaceManager(self.run_dir, self.config)
         self.admission = CandidateAdmissionGate()
         self.dataset_split = resolve_dataset_split(self.config)
@@ -62,6 +71,25 @@ class ResearchOrchestrator:
             self.proposer, self.executor, self.judger = components
         else:
             self.proposer, self.executor, self.judger = self._build_components()
+        executor_timeout = int(
+            self.config.get("executor", {}).get(
+                "executor_timeout_seconds",
+                self.config.get("agent", {}).get("timeout_seconds", 600),
+            )
+        )
+        self.scheduler = CandidateScheduler(
+            run_id=self.run_dir.name,
+            wall_seconds=executor_timeout,
+            forbidden_paths=tuple((self.config.get("candidate_policy") or {}).get("frozen_globs", []) or ()),
+        )
+        self.execution_service = ExecutionService(
+            run_dir=self.run_dir,
+            config=self.config,
+            materializer=RepositoryMaterializer(self.run_dir, self.config.get("workspace", {})),
+            execution_store=self.execution_store,
+            git_result_service=GitResultService(self.config.get("candidate_policy", {})),
+            runner=RunnerAdapter(self.executor, self.run_dir),
+        )
         self.gate = GEPAGate()
         self.pareto = ParetoSelector()
 
@@ -144,6 +172,70 @@ class ResearchOrchestrator:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         return (config_path.parent / "runs" / stamp).resolve()
 
+    def _baseline_revision(self) -> str:
+        workspace = self.config.get("workspace", {})
+        if str(workspace.get("mode", "artifact_directory")) != "git_worktree":
+            return "0" * 40
+        repo_path = Path(str(workspace["repo_path"])).expanduser().resolve()
+        ref = str(workspace.get("baseline_ref") or "HEAD")
+        completed = subprocess.run(
+            ["git", "-C", str(repo_path), "rev-parse", "--verify", f"{ref}^{{commit}}"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(f"cannot resolve workspace baseline ref {ref!r}: {completed.stderr.strip()}")
+        return completed.stdout.strip()
+
+    def _known_candidate_ids(self) -> set[str]:
+        return {card.candidate_id for card in self.candidate_store.list_all()}
+
+    def _card_from_candidate(self, candidate: Candidate, *, status: CandidateStatus) -> CandidateCard:
+        existing = self.candidate_store.get(candidate.candidate_id)
+        if existing is not None:
+            existing.status = status
+            existing.touch()
+            return existing
+        proposal = ProposalIdea.from_candidate(candidate)
+        return CandidateCard(
+            candidate_id=candidate.candidate_id,
+            round_id=candidate.round_id,
+            parent_candidate_ids=tuple(candidate.parent_ids),
+            proposal_id=proposal.proposal_id,
+            proposal=proposal,
+            base_revision=self._base_revision_for_candidate(candidate),
+            status=status,
+        )
+
+    def _base_revision_for_candidate(self, candidate: Candidate) -> str:
+        if not candidate.parent_ids:
+            return self._baseline_revision()
+        parent = self.candidate_store.get(candidate.parent_ids[0])
+        if parent is None or parent.result_revision is None:
+            return self._baseline_revision()
+        return parent.result_revision
+
+    def _save_card_status(
+        self,
+        candidate_id: str,
+        status: CandidateStatus,
+        *,
+        final_decision: str | None = None,
+        score_summary: dict[str, float] | None = None,
+    ) -> None:
+        card = self.candidate_store.get(candidate_id)
+        if card is None:
+            return
+        card.status = status
+        if final_decision is not None:
+            card.final_decision = final_decision
+        if score_summary is not None:
+            card.score_summary.update(score_summary)
+        card.touch()
+        self.candidate_store.save(card)
+
     def _build_components(self):
         mode = self.config.get("components", {}).get("mode", "claude_code_agents")
         if mode == "claude_code_agents":
@@ -218,22 +310,27 @@ class ResearchOrchestrator:
         matrix = ScoreMatrixBuilder.from_batch(judgment_batch, {candidate.candidate_id for candidate in admitted_seeds})
         ScoreMatrixBuilder.persist(matrix, matrix_path)
         for candidate in admitted_seeds:
-            # A seed is rejected only if it committed a frozen-path violation; a
-            # missing metric or partial validation is scored by the judger, not a
-            # seed-killer.
             judgment = next((j for j in judgment_batch.judgments if j.candidate_id == candidate.candidate_id), None)
-            if judgment and any(cat == "frozen_violation" for cat in judgment.failure_categories):
-                self.registry.mark_candidate_status(candidate.candidate_id, "frozen_violation")
-                self._log(f"seed {candidate.candidate_id} rejected due to frozen-path violation")
-            else:
+            eligible = False
+            reject_reason = "missing judgment"
+            if judgment is not None:
+                eligible, reject_reason = self.gate._candidate_eligible(judgment, self.config)
+            if eligible and not self._candidate_has_stackable_result(candidate.candidate_id):
+                eligible = False
+                reject_reason = "missing accepted result SHA"
+            if eligible:
                 pool.add_accepted(candidate)
-                self.registry.mark_candidate_status(candidate.candidate_id, "accepted")
+                self._save_card_status(candidate.candidate_id, CandidateStatus.ACCEPTED, final_decision="accepted")
+            else:
+                self._save_card_status(candidate.candidate_id, CandidateStatus.REJECTED, final_decision=reject_reason)
+                self._log(f"seed {candidate.candidate_id} rejected during initialization: {reject_reason}")
         pool.persist()
         if not pool.active_ids():
-            raise RuntimeError("all seed candidates were rejected (frozen-path violation or executor failure) - no valid seeds available for mutation")
+            raise RuntimeError("all seed candidates were rejected during initialization - no valid seeds available for mutation")
         frontier = self.pareto.select(matrix, pool.active_ids())
         self._persist_frontier(frontier)
-        best = max(matrix.aggregate_scores.items(), key=lambda item: item[1], default=(None, None))
+        active_scores = {candidate_id: score for candidate_id, score in matrix.aggregate_scores.items() if candidate_id in set(pool.active_ids())}
+        best = max(active_scores.items(), key=lambda item: item[1], default=(None, None))
         init_feedback: list[str] = []
         for judgment in judgment_batch.judgments:
             init_feedback.extend(judgment.actionable_feedback)
@@ -252,6 +349,12 @@ class ResearchOrchestrator:
         })
         write_json(self.run_dir / "initialization.json", {"candidate_batch": batch.to_dict(), "trace_batch": trace_batch.to_dict(), "judgment_batch": judgment_batch.to_dict(), "score_matrix": matrix.to_dict()})
         self._log("GEPA initialization finished")
+
+    def _candidate_has_stackable_result(self, candidate_id: str) -> bool:
+        card = self.candidate_store.get(candidate_id)
+        if card is None:
+            return False
+        return bool(card.result_revision)
 
     def run_generation(self, round_id: int, state: LoopState) -> GenerationDecision:
         self.run_dir.mkdir(parents=True, exist_ok=True)
@@ -424,12 +527,16 @@ class ResearchOrchestrator:
             ))
         eval_config = config_for_eval(self.config, sample_ids, phase, self.prior_context)
         eval_config["_run_dir"] = str(self.run_dir)
-        trace_batch = ExecutorAdapter(
-            self.executor,
-            self.run_dir,
-            workspace_manager=self.workspace_manager,
-            registry=self.registry,
-        ).run_many(candidates, round_id, eval_config)
+        traces: list[Trace] = []
+        failed_ids: list[str] = []
+        for candidate in candidates:
+            card = self._ensure_candidate_card(candidate)
+            trace = self._execute_candidate_for_eval(card, phase, sample_ids, eval_config)
+            traces.append(trace)
+            if any(sample.error for sample in trace.samples):
+                failed_ids.append(candidate.candidate_id)
+            self._persist_trace(trace)
+        trace_batch = TraceBatch(round_id=round_id, traces=traces, failed_candidate_ids=failed_ids)
         for trace in trace_batch.traces:
             self._log_block(format_trace_summary(trace, phase, sample_ids))
         judgment_batch = JudgerAdapter(self.judger).evaluate_many(candidates, trace_batch, eval_config)
@@ -437,6 +544,58 @@ class ResearchOrchestrator:
         for judgment in judgment_batch.judgments:
             self._log_block(format_judgment_summary(judgment, phase))
         return trace_batch, judgment_batch
+
+    def _ensure_candidate_card(self, candidate: Candidate) -> CandidateCard:
+        card = self.candidate_store.get(candidate.candidate_id)
+        if card is not None:
+            return card
+        card = self._card_from_candidate(candidate, status=CandidateStatus.ADMITTED)
+        self.candidate_store.save(card)
+        return card
+
+    def _execute_candidate_for_eval(
+        self,
+        card: CandidateCard,
+        phase: str,
+        sample_ids: list[str],
+        eval_config: dict[str, Any],
+    ) -> Trace:
+        if card.result_revision is None:
+            impl_spec = self.scheduler.make_implementation(card)
+            impl_record, impl_trace = self.execution_service.execute(impl_spec, card)
+            self._record_card_execution(card, impl_record.execution_id)
+            if impl_record.status == ExecutionStatus.SUCCEEDED and impl_record.result_revision:
+                card.result_revision = impl_record.result_revision
+                card.status = CandidateStatus.MATERIALIZED
+                card.touch()
+                self.candidate_store.save(card)
+            else:
+                card.status = CandidateStatus.IMPLEMENTATION_FAILED
+                card.touch()
+                self.candidate_store.save(card)
+                return impl_trace
+
+        dataset_ref = f"{phase}:{','.join(sample_ids)}"
+        if phase == "feedback":
+            eval_spec = self.scheduler.make_feedback_eval(card, dataset_ref=dataset_ref)
+        else:
+            eval_spec = self.scheduler.make_pareto_eval(card, dataset_ref=dataset_ref)
+        eval_record, eval_trace = self.execution_service.execute(eval_spec, card)
+        self._record_card_execution(card, eval_record.execution_id)
+        if eval_record.status == ExecutionStatus.SUCCEEDED:
+            if card.status not in {CandidateStatus.ACCEPTED, CandidateStatus.REJECTED}:
+                card.status = CandidateStatus.EVALUATED
+        else:
+            card.status = CandidateStatus.EVALUATION_FAILED
+        card.touch()
+        self.candidate_store.save(card)
+        return eval_trace
+
+    def _record_card_execution(self, card: CandidateCard, execution_id: str) -> None:
+        if execution_id not in card.execution_ids:
+            card.execution_ids.append(execution_id)
+            card.touch()
+            self.candidate_store.save(card)
 
     def _candidate_for_round(self, candidate: Candidate, round_id: int) -> Candidate:
         clone = deepcopy(candidate)
@@ -461,8 +620,16 @@ class ResearchOrchestrator:
             "parents": [parent.to_dict() for parent in parents],
             "parent_traces": parent_trace_artifacts(self.run_dir, [parent.candidate_id for parent in parents]),
             "parent_executions": {
-                parent.candidate_id: self.registry.execution(parent.candidate_id) or {}
+                parent.candidate_id: [
+                    record.to_dict()
+                    for record in self.execution_store.list_for_candidate(parent.candidate_id)
+                ]
                 for parent in parents
+            },
+            "parent_candidate_cards": {
+                parent.candidate_id: card.to_dict()
+                for parent in parents
+                if (card := self.candidate_store.get(parent.candidate_id)) is not None
             },
             "recent_feedback": self._recent_feedback(state),
             "recent_traces": recent_trace_summaries(self.run_dir),
@@ -499,18 +666,22 @@ class ResearchOrchestrator:
         for candidate_id in gate_decision.accepted:
             if candidate_id in by_id:
                 pool.add_accepted(by_id[candidate_id])
-                self.registry.mark_candidate_status(candidate_id, "accepted")
+                self._save_card_status(candidate_id, CandidateStatus.ACCEPTED, final_decision="accepted")
         for candidate_id in gate_decision.discarded:
             if candidate_id in by_id:
                 pool.add_discarded(by_id[candidate_id], gate_decision.reason_by_candidate.get(candidate_id, "discarded"))
-                self.registry.mark_candidate_status(candidate_id, "discarded")
+                self._save_card_status(
+                    candidate_id,
+                    CandidateStatus.REJECTED,
+                    final_decision=gate_decision.reason_by_candidate.get(candidate_id, "discarded"),
+                )
 
     def _admit_candidates(self, candidates: list[Candidate], pool: CandidatePool):
         batch_ids = [candidate.candidate_id for candidate in candidates]
         duplicate_ids = {candidate_id for candidate_id in batch_ids if batch_ids.count(candidate_id) > 1}
         decisions = []
         admitted = []
-        known_ids = self.registry.known_candidate_ids()
+        known_ids = self._known_candidate_ids()
         accepted_parents = set(pool.accepted_ids)
         for candidate in candidates:
             decision = self.admission.evaluate(
@@ -520,12 +691,23 @@ class ResearchOrchestrator:
                 accepted_parent_ids=accepted_parents,
                 batch_candidate_ids=set(batch_ids),
             )
+            if decision.admitted and candidate.parent_ids and self.candidate_store.get(candidate.parent_ids[0]) is not None:
+                parent = self.candidate_store.get(candidate.parent_ids[0])
+                if parent is not None and parent.result_revision is None:
+                    decision.admitted = False
+                    decision.failure_codes.append("PARENT_RESULT_MISSING")
+                    decision.details.append(f"parent has no result_revision: {candidate.parent_ids[0]}")
+                    decision.checks["parent_result"] = "fail"
             decisions.append(decision)
-            self.registry.record_admission(decision)
+            card_status = CandidateStatus.ADMITTED if decision.admitted else CandidateStatus.REJECTED
+            card = self._card_from_candidate(candidate, status=card_status)
+            if not decision.admitted:
+                card.final_decision = "rejected_pre_gate"
+            self.candidate_store.save(card)
             if decision.admitted:
                 admitted.append(candidate)
             else:
-                self.registry.mark_candidate_status(candidate.candidate_id, "rejected_pre_gate")
+                candidate.status = "rejected_pre_gate"
         return decisions, admitted
 
     def _generation_decision_from_gate(
@@ -583,7 +765,11 @@ class ResearchOrchestrator:
         write_json(round_dir / "candidate_batch.json", batch.to_dict())
         for candidate in batch.candidates:
             write_json(round_dir / candidate.candidate_id / "candidate.json", candidate.to_dict())
-            append_jsonl(self.run_dir / "candidates.jsonl", candidate.to_dict())
+
+    def _persist_trace(self, trace: Trace) -> None:
+        round_dir = self.run_dir / "traces" / f"round_{trace.round_id:03d}"
+        write_json(round_dir / trace.candidate_id / "trace.json", trace.to_dict())
+        append_jsonl(self.run_dir / "traces.jsonl", trace.to_dict())
 
     def _persist_admission_decisions(self, round_id: int, decisions) -> None:
         round_dir = self.run_dir / "traces" / f"round_{round_id:03d}"

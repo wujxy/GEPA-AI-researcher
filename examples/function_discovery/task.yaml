@@ -1,7 +1,6 @@
 # Complete GEPA task configuration example.
 # Paths here are relative to this task file. Profile paths are relative to the
 # profile file itself.
-schema_version: 1
 kind: task
 
 task:
@@ -52,21 +51,15 @@ safety:
   max_files_per_candidate: 3
   max_commits_per_candidate: 1
 
-budget:
+loop:
   max_rounds: 4
   min_rounds: 1
   patience: 2
   candidates_per_round: 5
-
-initialization:
   seed_count: 3
-
-generation:
-  # If set, overrides budget.candidates_per_round for mutation batches.
-  batch_size: 5
   enable_merge: false
 
-gepa:
+selection:
   frontier_policy: pareto
   acceptance_policy: minibatch_improves_then_pareto
   minibatch_size: 2

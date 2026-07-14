@@ -12,8 +12,15 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from gepa_researcher.domain.execution import (
+    CapabilityPolicy,
+    ExecutionBudget,
+    ExecutionPhase,
+    ExecutionRecord,
+    ExecutionSpec,
+)
 from gepa_researcher.execution.runtime_backend import ApptainerRuntimeBackend, RuntimeBackendError
-from gepa_researcher.models.schemas import Candidate, ExecutionRecord, WorkspaceLease
+from gepa_researcher.execution.sandbox import SandboxSession
 
 
 class ApptainerIntegrationTest(unittest.TestCase):
@@ -53,38 +60,46 @@ class ApptainerIntegrationTest(unittest.TestCase):
         else:
             cls.docker_available = False
 
-    def _create_test_lease(self, root: Path, candidate_id: str = "cand_000"):
-        """Create a test WorkspaceLease for testing."""
+    def _create_test_session(self, root: Path, execution_id: str = "exec-1"):
+        """Create a test SandboxSession for testing."""
         repo = root / "repo"
         artifacts = root / "artifacts"
+        scratch = root / f"scratch_{execution_id}"
         repo.mkdir(parents=True, exist_ok=True)
         artifacts.mkdir(parents=True, exist_ok=True)
+        scratch.mkdir(parents=True, exist_ok=True)
 
-        return WorkspaceLease(
-            candidate_id=candidate_id,
-            round_id=0,
-            requested_parent_sha="parent-sha",
-            actual_start_sha="parent-sha",
-            branch_name="test-branch",
-            worktree_path=str(repo),
-            artifact_path=str(artifacts),
+        return SandboxSession(
+            execution_id=execution_id,
+            repo_path=repo,
+            artifact_path=artifacts,
+            scratch_path=scratch,
+            input_revision="a" * 40,
             mode="artifact_directory",
+            temporary_paths=(repo, artifacts, scratch),
         )
 
     def _create_test_record(self, execution_id: str = "exec-1"):
         """Create a test ExecutionRecord for testing."""
-        return ExecutionRecord(
+        return ExecutionRecord.from_spec(self._create_test_spec(execution_id))
+
+    def _create_test_spec(self, execution_id: str = "exec-1"):
+        return ExecutionSpec(
             execution_id=execution_id,
-            candidate_id="cand_000",
+            run_id="run-001",
             round_id=0,
-            parent_candidate_id=None,
-            requested_parent_sha="parent-sha",
-            actual_start_sha="parent-sha",
-            result_sha=None,
-            branch_name="test-branch",
-            worktree_path="",
-            execution_mode="implement_and_validate",
-            status="executing",
+            candidate_id="cand_000",
+            phase=ExecutionPhase.IMPLEMENTATION,
+            input_revision="a" * 40,
+            dataset_ref=None,
+            evaluator_version=None,
+            budget=ExecutionBudget(wall_seconds=600),
+            capability_policy=CapabilityPolicy(
+                repo_writable=True,
+                network_allowed=False,
+                allowed_tools=("bash", "git"),
+                forbidden_paths=(),
+            ),
         )
 
     def _runtime_config(self, image: Path, apptainer: Path, *, command: str = "python", mounts=None, env_pass=None, env_set=None, **apptainer_overrides):
@@ -171,47 +186,15 @@ class ApptainerIntegrationTest(unittest.TestCase):
             # Create configuration
             config = self._runtime_config(fake_image, fake_apptainer, command="python")
 
-            # Test with multiple executions of the same candidate
-            lease = self._create_test_lease(root)
             backend = ApptainerRuntimeBackend(root / "run_dir", config)
 
             # First execution
             record1 = self._create_test_record("exec-1")
-            runtime1 = backend.prepare(
-                Candidate(
-                    candidate_id="cand_000",
-                    round_id=0,
-                    hypothesis="test",
-                    scope="test",
-                    proposed_change="test",
-                    rationale="test",
-                    expected_improvement="test",
-                    risk="test",
-                    prompt_text="test",
-                    created_at="now",
-                ),
-                lease,
-                record1
-            )
+            runtime1 = backend.prepare(self._create_test_spec("exec-1"), self._create_test_session(root, "exec-1"), record1)
 
             # Second execution (same candidate, different execution)
             record2 = self._create_test_record("exec-2")
-            runtime2 = backend.prepare(
-                Candidate(
-                    candidate_id="cand_000",
-                    round_id=0,
-                    hypothesis="test",
-                    scope="test",
-                    proposed_change="test",
-                    rationale="test",
-                    expected_improvement="test",
-                    risk="test",
-                    prompt_text="test",
-                    created_at="now",
-                ),
-                lease,
-                record2
-            )
+            runtime2 = backend.prepare(self._create_test_spec("exec-2"), self._create_test_session(root, "exec-2"), record2)
 
             # Verify that each execution gets unique directories
             self.assertIn("scratch_exec-1", runtime1.artifacts["host_scratch"])
@@ -242,19 +225,8 @@ class ApptainerIntegrationTest(unittest.TestCase):
             )
 
             runtime = ApptainerRuntimeBackend(root / "run_dir", config).prepare(
-                Candidate(
-                    candidate_id="cand_000",
-                    round_id=0,
-                    hypothesis="test",
-                    scope="test",
-                    proposed_change="test",
-                    rationale="test",
-                    expected_improvement="test",
-                    risk="test",
-                    prompt_text="test",
-                    created_at="now",
-                ),
-                self._create_test_lease(root),
+                self._create_test_spec(),
+                self._create_test_session(root),
                 self._create_test_record(),
             )
 
@@ -290,22 +262,10 @@ class ApptainerIntegrationTest(unittest.TestCase):
             (root / "writable").mkdir()
             (root / "asset").mkdir()
 
-            lease = self._create_test_lease(root)
             backend = ApptainerRuntimeBackend(root / "run_dir", config)
             runtime = backend.prepare(
-                Candidate(
-                    candidate_id="cand_000",
-                    round_id=0,
-                    hypothesis="test",
-                    scope="test",
-                    proposed_change="test",
-                    rationale="test",
-                    expected_improvement="test",
-                    risk="test",
-                    prompt_text="test",
-                    created_at="now",
-                ),
-                lease,
+                self._create_test_spec(),
+                self._create_test_session(root),
                 self._create_test_record()
             )
 
@@ -441,26 +401,11 @@ class ApptainerIntegrationTest(unittest.TestCase):
 
             config = self._runtime_config(fake_image, fake_apptainer, command="python")
 
-            lease = self._create_test_lease(root)
             backend = ApptainerRuntimeBackend(root / "run_dir", config)
-
-            # Create candidate
-            candidate = Candidate(
-                candidate_id="cand_000",
-                round_id=0,
-                hypothesis="test hypothesis",
-                scope="test_scope",
-                proposed_change="test change",
-                rationale="test rationale",
-                expected_improvement="test improvement",
-                risk="test risk",
-                prompt_text="test prompt",
-                created_at="now",
-            )
 
             # Prepare execution
             record = self._create_test_record("exec-1")
-            runtime = backend.prepare(candidate, lease, record)
+            runtime = backend.prepare(self._create_test_spec("exec-1"), self._create_test_session(root, "exec-1"), record)
 
             # Verify all components
             self.assertEqual(runtime.backend, "apptainer")

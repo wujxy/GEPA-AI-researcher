@@ -1,32 +1,40 @@
 # Complete GEPA project profile example.
 # Put stable project/runtime knowledge here. Task files reference this profile.
-schema_version: 1
 kind: project_profile
 name: function-discovery-local
 
 source:
   # Optional for artifact_directory, required for git_worktree.
-  repo_path: ../..
+  path: ../..
   default_ref: HEAD
   # artifact_directory gives each executor an artifact folder. git_worktree gives
   # each source-editing candidate an isolated Git worktree.
   workspace_mode: artifact_directory
 
-environment:
-  description: conda environment myenv
-  setup_commands: []
-  python_command: conda run -n myenv python
-  dependency_policy: Use installed packages only; do not install packages during the loop.
+isolation:
+  backend: local
+  workdir: /workspace/repo
+  command: claude
+  env:
+    pass: []
+    set: {}
 
-resources:
-  data_files:
-    - data/observations.csv
-  context_paths: []
-  skills: []
-  readonly_assets: []
-  pre_materialized_lfs_paths: []
-  generated_tracked_paths: []
-  hash_artifacts: []
+docs: []
+
+provided_paths:
+  - path: data/observations.csv
+    mode: ro
+    role: data_file
+
+reference:
+  commands: []
+  note: Use installed packages only; do not install packages during the loop.
+
+repo_overlays: []
+skills: []
+pre_materialized_lfs_paths: []
+generated_tracked_paths: []
+hash_artifacts: []
 
 agent:
   command: claude
@@ -45,11 +53,6 @@ agent:
     - "Bash(ls *)"
     - --allowedTools
     - "Bash(head *)"
-
-execution:
-  lifecycle: stateless
-  max_parallel_candidates: 3
-  fail_fast: false
 
 safety:
   editable_paths:

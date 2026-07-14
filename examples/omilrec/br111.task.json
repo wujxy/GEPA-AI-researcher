@@ -1,5 +1,4 @@
 {
-  "schema_version": 1,
   "kind": "task",
   "task": {
     "name": "omilrec-br111-speed-opt",
@@ -19,9 +18,6 @@
       "mode": "relative_percent",
       "minimum": 1.0
     }
-  },
-  "initialization": {
-    "seed_count": 3
   },
   "validation": {
     "checks": [
@@ -67,7 +63,8 @@
     "max_files_per_candidate": 5,
     "max_commits_per_candidate": 1
   },
-  "budget": {
+  "loop": {
+    "seed_count": 3,
     "max_rounds": 4,
     "patience": 2,
     "candidates_per_round": 3

@@ -6,9 +6,8 @@ source:
   default_ref: ff71809b81c6c887a276a14c29b4f86296f27571
   workspace_mode: git_worktree
 
-resources:
-  pre_materialized_lfs_paths:
-    - tests/fixtures/v107_rev1/*.bin
+pre_materialized_lfs_paths:
+  - tests/fixtures/v107_rev1/*.bin
 
 docs:
   - ../../../omilrec-br111-executor-pack-apptainer/context/BR111_OPTIMIZATION_CONTEXT.md

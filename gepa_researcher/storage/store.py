@@ -82,7 +82,6 @@ class RunStore:
         write_json(round_dir / "candidate_batch.json", batch.to_dict())
         for candidate in batch.candidates:
             write_json(round_dir / candidate.candidate_id / "candidate.json", candidate.to_dict())
-            append_jsonl(self.run_dir / "candidates.jsonl", candidate.to_dict())
 
     def save_admission_decisions(self, round_id: int, decisions: list[Any]) -> None:
         """Save admission gate decisions."""

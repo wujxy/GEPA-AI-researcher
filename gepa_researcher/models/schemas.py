@@ -51,43 +51,6 @@ class AdmissionDecision:
 
 
 @dataclass
-class WorkspaceLease:
-    candidate_id: str
-    round_id: int
-    requested_parent_sha: str
-    actual_start_sha: str
-    branch_name: str
-    worktree_path: str
-    artifact_path: str
-    mode: str = "artifact_directory"
-    status: str = "ready"
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-@dataclass
-class ExecutionRecord:
-    execution_id: str
-    candidate_id: str
-    round_id: int
-    parent_candidate_id: str | None
-    requested_parent_sha: str
-    actual_start_sha: str
-    result_sha: str | None
-    branch_name: str
-    worktree_path: str
-    changed_files: list[str] = field(default_factory=list)
-    commit_count: int = 0
-    execution_mode: str = "implement_and_validate"
-    status: str = "created"
-    artifacts: dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-@dataclass
 class CommitAudit:
     """What the executor's commit actually changed (read-only metadata).
 

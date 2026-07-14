@@ -1,48 +1,89 @@
 {
-  "resume": false,
-  "components": {
-    "mode": "claude_code_agents"
-  },
-  "agent": {
-    "command": "claude",
-    "cwd": "/datafs/users/wujxy/agent-sci/omilrec_opt/GEPA-AI-researcher",
-    "timeout_seconds": 900,
-    "extra_args": [
-      "--bare",
-      "--max-turns",
-      "32",
-      "--allowedTools",
-      "Read",
-      "--allowedTools",
-      "Write",
-      "--allowedTools",
-      "Bash(conda run -n myenv python *)",
-      "--allowedTools",
-      "Bash(python3 *)",
-      "--allowedTools",
-      "Bash(mkdir *)",
-      "--allowedTools",
-      "Bash(cat *)",
-      "--allowedTools",
-      "Bash(head *)",
-      "--allowedTools",
-      "Bash(ls *)"
+  "kind": "task",
+  "task": {
+    "name": "numeric_function_discovery",
+    "goal": "Infer a compact mathematical or statistical model for the observed one-dimensional measurements.",
+    "samples": [
+      {
+        "sample_id": "observations_fit",
+        "description": "Fit and explain the configured observations.csv file."
+      },
+      {
+        "sample_id": "residual_diagnostics",
+        "description": "Check residuals, uncertainty, and overfitting risk."
+      }
     ]
   },
-  "runtime": {
-    "environment": "conda",
-    "conda_env": "myenv",
-    "python_command": "conda run -n myenv python",
-    "python_executable": "/home/yoru/miniconda3/envs/myenv/bin/python",
-    "python_version": "3.11.15",
-    "dependency_policy": "Use packages already installed in conda environment myenv; do not install packages during the loop.",
-    "allowed_commands": [
-      "conda run -n myenv python",
-      "cat",
-      "head",
-      "mkdir"
+  "project": {
+    "profile": "project.profile.yaml",
+    "ref": "HEAD"
+  },
+  "metric": {
+    "name": "model_quality",
+    "direction": "maximize",
+    "description": "Reward compact models with strong evidence, reproducibility, and honest uncertainty.",
+    "command": "conda run -n myenv python -c \"print('executor should run the configured analysis, then report evidence')\"",
+    "unit": "score",
+    "repeats": 1,
+    "improvement": {
+      "mode": "absolute",
+      "minimum": 0.01
+    }
+  },
+  "validation": {
+    "checks": [
+      {
+        "name": "reproducible_analysis",
+        "command": "conda run -n myenv python -c \"import csv; rows=list(csv.reader(open('examples/function_discovery/data/observations.csv'))); assert rows\"",
+        "success_criteria": "Analysis uses only configured observations and produces reproducible evidence."
+      }
+    ]
+  },
+  "safety": {
+    "editable_paths": [
+      "examples/function_discovery/runs/**"
     ],
-    "artifact_dir_policy": "Write scripts and artifacts only under the provided round working directory."
+    "frozen_paths": [
+      "gepa_researcher/**",
+      "tests/**"
+    ],
+    "max_files_per_candidate": 3,
+    "max_commits_per_candidate": 1
+  },
+  "loop": {
+    "max_rounds": 4,
+    "min_rounds": 1,
+    "patience": 2,
+    "candidates_per_round": 5,
+    "seed_count": 3,
+    "max_parallel_candidates": 3,
+    "enable_merge": false
+  },
+  "selection": {
+    "frontier_policy": "pareto",
+    "acceptance_policy": "minibatch_improves_then_pareto",
+    "minibatch_size": 2,
+    "parent_sampling": "pareto_win_weighted",
+    "feedback_sample_ids": [
+      "observations_fit"
+    ],
+    "pareto_sample_ids": [
+      "observations_fit",
+      "residual_diagnostics"
+    ]
+  },
+  "executor": {
+    "timeout_seconds": 900,
+    "repair_retries": 1
+  },
+  "judger": {
+    "pass_threshold": 0.85
+  },
+  "usage_tracking": {
+    "enabled": true,
+    "persist_raw_envelope": true,
+    "print_round_summary": true,
+    "print_run_summary": true
   },
   "evidence": {
     "visualize_when_applicable": true,
@@ -51,44 +92,6 @@
       "png",
       "svg"
     ],
-    "guidance": "When visual evidence can help prove, falsify, or explain the conclusion, the proposer should choose task-appropriate plots and include them in the analysis plan. The executor should generate those planned plots when feasible. If plotting libraries are unavailable, generate a simple SVG/CSV-backed diagnostic or explain why no plot was produced."
-  },
-  "budget": {
-    "max_rounds": 4,
-    "no_improvement_patience": 2
-  },
-  "generation": {
-    "batch_size": 5,
-    "enable_merge": false
-  },
-  "gepa": {
-    "frontier_policy": "pareto",
-    "acceptance_policy": "minibatch_improves_then_pareto",
-    "minibatch_size": 2,
-    "parent_sampling": "pareto_win_weighted"
-  },
-  "executor": {
-    "max_workers": 3,
-    "executor_timeout_seconds": 900,
-    "fail_fast": false,
-    "per_candidate_workspace": true
-  },
-  "judger": {
-    "pass_threshold": 0.85
-  },
-  "task": {
-    "name": "numeric_function_discovery",
-    "goal": "Infer a compact mathematical or statistical function/model that describes the observed one-dimensional numeric measurements. Use only the observed data files and loop feedback. Do not assume hidden metadata exists.",
-    "data_files": [
-      "examples/function_discovery/data/observations.csv"
-    ]
-  },
-  "context": {
-    "paths": [],
-    "notes": [],
-    "skills": []
-  },
-  "initialization": {
-    "seed_count": 3
+    "guidance": "Create compact diagnostics only when they help prove or falsify the model."
   }
 }

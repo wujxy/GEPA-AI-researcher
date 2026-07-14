@@ -19,12 +19,11 @@ omilrec_opt/
 The project profiles intentionally include:
 
 ```yaml
-resources:
-  pre_materialized_lfs_paths:
-    - tests/fixtures/v107_rev1/*.bin
+pre_materialized_lfs_paths:
+  - tests/fixtures/v107_rev1/*.bin
 ```
 
-That field is required when the controller checkout has real local Git-LFS fixture binaries that must be copied into every per-candidate worktree. Without it, a worktree may contain 131-byte LFS pointer stubs and `test_fcn` can fail with errors such as `bad magic in binary file`.
+That field is required when the controller checkout has real local Git-LFS fixture binaries that must be copied into every per-execution sandbox. Without it, a sandbox may contain 131-byte LFS pointer stubs and `test_fcn` can fail with errors such as `bad magic in binary file`.
 
 Validate from the GEPA checkout:
 
@@ -40,4 +39,4 @@ python -m gepa_researcher.cli run --config examples/omilrec/br111-local.task.yam
 python -m gepa_researcher.cli run --config examples/omilrec/br111-apptainer.task.yaml --run-dir ../omilrec-br111-executor-pack-apptainer/runs/run-apptainer-<id>
 ```
 
-`task.template.yaml`, `project.profile.template.yaml`, and the legacy JSON examples are retained as older/template references. Prefer the `br111-*.yaml` files for new canonical runs.
+YAML and JSON examples use the same canonical task/profile schema. Prefer the `br111-*.yaml` files for the worked local/apptainer runs.

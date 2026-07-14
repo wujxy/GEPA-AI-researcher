@@ -14,27 +14,14 @@ class ConfigError(ValueError):
     """User-facing configuration error with a precise field path."""
 
 
-LEGACY_UNUSED_FIELDS = (
-    "gepa.frontier_policy",
-    "gepa.acceptance_policy",
-    "gepa.parent_sampling",
-    "candidate_policy.allow_merge",
-    "workspace.retention",
-    "workspace.keep_accepted",
-    "executor.per_candidate_workspace",
-)
-
-
 TASK_TOP_KEYS = {
-    "schema_version", "kind", "task", "project", "metric", "validation", "safety",
-    "budget", "initialization", "generation", "gepa", "loop", "selection", "executor",
-    "judger", "usage_tracking", "evidence",
+    "kind", "task", "project", "metric", "validation", "safety", "loop", "selection",
+    "executor", "judger", "usage_tracking", "evidence",
 }
 PROFILE_TOP_KEYS = {
-    "schema_version", "kind", "name", "source", "docs", "provided_paths", "reference",
-    "isolation", "repo_overlays", "skills", "agent", "safety",
-    # Legacy input accepted only for migration into the canonical shape.
-    "runtime", "resources", "filesystem", "environment", "build", "executor_image", "execution",
+    "kind", "name", "source", "docs", "provided_paths", "reference", "isolation",
+    "repo_overlays", "skills", "agent", "safety", "pre_materialized_lfs_paths",
+    "generated_tracked_paths", "hash_artifacts",
 }
 
 
@@ -66,31 +53,29 @@ def load_and_resolve(
 ) -> dict[str, Any]:
     config_path = config_path.expanduser().resolve()
     raw = load_config_file(config_path)
-    if raw.get("kind") != "task" and "project" not in raw:
-        resolved = _resolve_legacy(raw, config_path)
-    else:
-        resolved = _resolve_task(raw, config_path)
-    if resume and run_dir is None and resolved.get("_meta", {}).get("schema_version") != 0:
+    if raw.get("kind") != "task":
+        raise ConfigError("kind: run configuration must have kind: task")
+    resolved = _resolve_task(raw, config_path)
+    if resume and run_dir is None:
         raise ConfigError("resume: --resume requires an explicit --run-dir")
     if run_dir is not None:
         resolved["run_dir"] = str(run_dir.expanduser().resolve())
-    if resolved.get("_meta", {}).get("schema_version") != 0 or resume:
-        resolved["resume"] = bool(resume)
+    resolved["resume"] = bool(resume)
     return resolved
 
 
 def _resolve_task(raw_task: dict[str, Any], task_path: Path) -> dict[str, Any]:
-    task_config = _migrate_task(raw_task)
+    task_config = _canonical_task(raw_task)
     _validate_task(task_config)
     project = task_config["project"]
     source_files = {"task": str(task_path)}
     if "profile" in project:
         profile_path = _path(project["profile"], task_path.parent)
-        profile = _migrate_profile(load_config_file(profile_path))
+        profile = _canonical_profile(load_config_file(profile_path))
         profile_base = profile_path.parent
         source_files["profile"] = str(profile_path)
     else:
-        profile = _migrate_profile({"kind": "project_profile", "name": "inline", **deepcopy(project["inline"])})
+        profile = _canonical_profile({"kind": "project_profile", "name": "inline", **deepcopy(project["inline"])})
         profile_base = task_path.parent
         source_files["profile"] = "inline"
     _validate_profile(profile)
@@ -191,7 +176,7 @@ def _resolve_task(raw_task: dict[str, Any], task_path: Path) -> dict[str, Any]:
         "_meta": {
             "schema_version": "canonical",
             "source_files": source_files,
-            "warnings": list(task_config.get("_warnings") or []) + list(profile.get("_warnings") or []),
+            "warnings": [],
             "resolution": {"task": "canonical task config", "profile": profile.get("name", "inline"), "defaults": "gepa_researcher.config"},
         },
         "_runtime_spec": runtime_spec,
@@ -218,7 +203,6 @@ def _resolve_task(raw_task: dict[str, Any], task_path: Path) -> dict[str, Any]:
         },
         "initialization": {"seed_count": seed_count},
         "evidence": _resolve_evidence(task_config.get("evidence") or {}),
-        "execution": {"lifecycle": "materialize_once" if workspace_mode == "git_worktree" else "stateless"},
         "usage_tracking": _resolve_usage_tracking(task_config.get("usage_tracking") or {}),
         "contracts": {
             "objective": deepcopy(task_config["task"]),
@@ -251,106 +235,50 @@ def _resolve_task(raw_task: dict[str, Any], task_path: Path) -> dict[str, Any]:
     return resolved
 
 
-def _migrate_task(raw: dict[str, Any]) -> dict[str, Any]:
+def _canonical_task(raw: dict[str, Any]) -> dict[str, Any]:
     _reject_unknown(raw, TASK_TOP_KEYS, "")
     if isinstance(raw.get("metric"), dict):
         _reject_unknown(raw["metric"], {"name", "direction", "command", "description", "unit", "repeats", "improvement"}, "metric")
     data = deepcopy(raw)
-    warnings = []
-    if "schema_version" in data:
-        warnings.append(f"schema_version {data.get('schema_version')!r} migrated to canonical config")
-    task = deepcopy(data.get("task") or {})
-    metric = deepcopy(data.get("metric") or task.pop("metric", None) or {})
-    loop = deepcopy(data.get("loop") or {})
-    budget = data.get("budget") or {}
-    generation = data.get("generation") or {}
-    initialization = data.get("initialization") or {}
-    for src, dst in ((budget, "max_rounds"), (budget, "min_rounds"), (budget, "patience"), (budget, "candidates_per_round"), (generation, "enable_merge"), (initialization, "seed_count")):
-        if dst in src and dst not in loop:
-            loop[dst] = src[dst]
-    if "batch_size" in generation:
-        loop["candidates_per_round"] = generation["batch_size"]
     return {
         "kind": "task",
-        "task": task,
+        "task": deepcopy(data.get("task") or {}),
         "project": deepcopy(data.get("project") or {}),
-        "metric": metric,
+        "metric": deepcopy(data.get("metric") or {}),
         "validation": deepcopy(data.get("validation") or {"checks": []}),
         "safety": deepcopy(data.get("safety") or {}),
-        "loop": loop,
-        "selection": deepcopy(data.get("selection") or data.get("gepa") or {}),
+        "loop": deepcopy(data.get("loop") or {}),
+        "selection": deepcopy(data.get("selection") or {}),
         "executor": deepcopy(data.get("executor") or {}),
         "judger": deepcopy(data.get("judger") or {}),
         "usage_tracking": deepcopy(data.get("usage_tracking") or {}),
         "evidence": deepcopy(data.get("evidence") or {}),
-        "_warnings": warnings,
     }
 
 
-def _migrate_profile(raw: dict[str, Any]) -> dict[str, Any]:
+def _canonical_profile(raw: dict[str, Any]) -> dict[str, Any]:
     _reject_unknown(raw, PROFILE_TOP_KEYS, "")
     data = deepcopy(raw)
-    warnings = []
-    if "schema_version" in data:
-        warnings.append(f"profile schema_version {data.get('schema_version')!r} migrated to canonical config")
-    source = deepcopy(data.get("source") or {})
-    if "path" not in source and source.get("repo_path"):
-        source["path"] = source["repo_path"]
-    resources = data.get("resources") or {}
-    docs = _dedupe(list(data.get("docs") or []) + list(resources.get("context_paths") or []))
-    provided = list(data.get("provided_paths") or [])
-    for item in resources.get("accessible_paths") or []:
-        provided.append({"path": item, "mode": "ro", "role": "resource"})
-    for item in resources.get("data_files") or []:
-        provided.append({"path": item, "mode": "ro", "role": "data_file"})
-    for item in (data.get("filesystem") or {}).get("readable") or []:
-        provided.append({"path": item, "mode": "ro", "role": "provided_path"})
-    for item in (data.get("filesystem") or {}).get("writable") or []:
-        provided.append({"path": item, "mode": "rw", "role": "provided_path"})
     reference = deepcopy(data.get("reference") or {})
-    commands = list(reference.get("commands") or [])
-    environment = data.get("environment") or {}
-    runtime = data.get("runtime") or {}
-    build = data.get("build") or {}
-    commands.extend(environment.get("setup_commands") or [])
-    commands.extend(environment.get("setup") or [])
-    commands.extend(environment.get("check") or [])
-    commands.extend(runtime.get("setup") or [])
-    commands.extend(runtime.get("check") or [])
-    commands.extend(build.get("commands") or [])
-    reference["commands"] = _dedupe(commands)
     reference.setdefault("note", "User-provided references only; GEPA must not auto-execute them.")
-    execution = data.get("execution") or {}
-    apptainer = dict(runtime.get("apptainer") or execution.get("apptainer") or {})
     isolation = deepcopy(data.get("isolation") or {})
-    isolation.setdefault("backend", runtime.get("backend") or execution.get("runtime_backend") or "local")
+    isolation.setdefault("backend", "local")
     isolation.setdefault("mode", "bind_paths")
-    if not isolation.get("image"):
-        image_source = runtime.get("image") or apptainer.get("image") or (data.get("executor_image") or {}).get("base_image") or (data.get("executor_image") or {}).get("base") or ""
-        if image_source:
-            isolation["image"] = image_source
-    if apptainer:
-        isolation["apptainer"] = apptainer
-    agent = deepcopy(data.get("agent") or {})
-    if not agent.get("command") and runtime.get("command"):
-        agent["command"] = runtime["command"]
     return {
         "kind": "project_profile",
         "name": str(data.get("name") or "project"),
-        "source": source,
-        "docs": docs,
-        "provided_paths": provided,
+        "source": deepcopy(data.get("source") or {}),
+        "docs": list(data.get("docs") or []),
+        "provided_paths": list(data.get("provided_paths") or []),
         "reference": reference,
         "isolation": isolation,
-        "repo_overlays": list(data.get("repo_overlays") or resources.get("repo_overlays") or []),
-        "skills": list(data.get("skills") or resources.get("skills") or []),
-        "agent": agent,
+        "repo_overlays": list(data.get("repo_overlays") or []),
+        "skills": list(data.get("skills") or []),
+        "agent": deepcopy(data.get("agent") or {}),
         "safety": deepcopy(data.get("safety") or {}),
-        "pre_materialized_lfs_paths": list(resources.get("pre_materialized_lfs_paths") or []),
-        "generated_tracked_paths": list(resources.get("generated_tracked_paths") or []),
-        "hash_artifacts": list(resources.get("hash_artifacts") or []),
-        "_env": _merge_env_dicts(runtime.get("env") or {}, environment.get("env") or {}),
-        "_warnings": warnings,
+        "pre_materialized_lfs_paths": list(data.get("pre_materialized_lfs_paths") or []),
+        "generated_tracked_paths": list(data.get("generated_tracked_paths") or []),
+        "hash_artifacts": list(data.get("hash_artifacts") or []),
     }
 
 
@@ -450,7 +378,7 @@ def _resolve_repo_overlays(overlays: list[dict[str, Any]], base: Path) -> list[d
     for index, item in enumerate(overlays):
         source = _path(item["source"], base)
         if not source.exists():
-            raise ConfigError(f"resources.repo_overlays[{index}].source: source does not exist: {source} (resolved relative to profile_dir)")
+            raise ConfigError(f"repo_overlays[{index}].source: source does not exist: {source} (resolved relative to profile_dir)")
         result.append({"source": str(source), "target": str(item["target"]), "mode": str(item.get("mode") or "ro"), "purpose": str(item.get("purpose") or "")})
     return result
 
@@ -504,12 +432,8 @@ def _default_apptainer_options(apptainer: dict[str, Any]) -> dict[str, Any]:
 
 
 def _canonical_env(profile: dict[str, Any]) -> dict[str, Any]:
-    env = dict(profile.get("_env") or {})
+    env = dict((profile.get("isolation") or {}).get("env") or {})
     return {"pass": _dedupe(list(env.get("pass") or [])), "set": dict(env.get("set") or {})}
-
-
-def _merge_env_dicts(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
-    return {"pass": _dedupe(list(left.get("pass") or []) + list(right.get("pass") or [])), "set": {**dict(left.get("set") or {}), **dict(right.get("set") or {})}}
 
 
 def _merge_safety(profile: dict[str, Any], task: dict[str, Any]) -> dict[str, Any]:
@@ -545,31 +469,6 @@ def _validate_safety(safety: dict[str, Any], path: str) -> None:
     for name in ("max_files_per_candidate", "max_commits_per_candidate"):
         if name in safety:
             _positive_int(safety[name], f"{path}.{name}")
-
-
-def _resolve_legacy(raw: dict[str, Any], config_path: Path) -> dict[str, Any]:
-    resolved = deepcopy(raw)
-    warnings = ["legacy config detected; migrate to canonical task/profile configuration"]
-    warnings.extend(f"unused legacy field: {field}" for field in LEGACY_UNUSED_FIELDS if _has_dotted(raw, field))
-    resolved["_meta"] = {"schema_version": 0, "source_files": {"task": str(config_path)}, "warnings": warnings, "resolution": {"legacy": "preserved"}}
-    resolved.setdefault("contracts", _legacy_contracts(resolved))
-    return resolved
-
-
-def _legacy_contracts(config: dict[str, Any]) -> dict[str, Any]:
-    task = config.get("task") or {}
-    policy = config.get("candidate_policy") or {}
-    runtime = config.get("runtime") or {}
-    validation_commands = list(task.get("validation_commands") or [])
-    metric_command = next(iter(task.get("benchmark_commands") or []), None)
-    return {
-        "objective": {"name": task.get("name", ""), "goal": task.get("goal", "")},
-        "metric": {"name": "primary", "direction": "minimize" if "minimiz" in str(task.get("goal", "")).lower() else "maximize", "command": metric_command, "description": task.get("goal", "")},
-        "validation": {"checks": [{"name": f"legacy_check_{index + 1}", "command": command, "success_criteria": "command succeeds"} for index, command in enumerate(validation_commands)]},
-        "resources": {"data_files": list(task.get("data_files") or []), "repo_path": next(iter(task.get("repo_paths") or []), None), "context_paths": list((config.get("context") or {}).get("paths") or []), "skills": list((config.get("context") or {}).get("skills") or [])},
-        "safety": {"editable_paths": list(policy.get("allowed_target_globs") or []), "frozen_paths": list(policy.get("frozen_globs") or []), "max_files_per_candidate": policy.get("max_target_files"), "max_commits_per_candidate": policy.get("max_commits")},
-        "runtime": {"description": runtime.get("environment", ""), "setup_commands": [], "python_command": runtime.get("python_command", ""), "dependency_policy": runtime.get("dependency_policy", "")},
-    }
 
 
 def _resolve_git_ref(repo: Path, ref: str) -> str:
@@ -682,12 +581,3 @@ def _path(value: Any, base: Path) -> Path:
 
 def _optional_path(value: Any, base: Path) -> Path | None:
     return _path(value, base) if value else None
-
-
-def _has_dotted(data: dict[str, Any], dotted: str) -> bool:
-    current: Any = data
-    for part in dotted.split("."):
-        if not isinstance(current, dict) or part not in current:
-            return False
-        current = current[part]
-    return True

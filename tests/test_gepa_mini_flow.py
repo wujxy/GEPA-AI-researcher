@@ -67,30 +67,6 @@ class GEPAMiniFlowTest(unittest.TestCase):
             created_at="now",
         )
 
-    def test_executor_adapter_isolates_workspaces_and_records_failures(self):
-        from gepa_researcher.agents.adapters import ExecutorAdapter
-
-        candidates = [self._candidate(f"cand_000_{index:03d}") for index in range(4)]
-        inner = RecordingExecutor()
-
-        with tempfile.TemporaryDirectory() as tmp:
-            run_dir = Path(tmp)
-            trace_batch = ExecutorAdapter(inner, run_dir).run_many(
-                candidates,
-                0,
-                {"executor": {"max_workers": 3, "executor_timeout_seconds": 5, "fail_fast": False}},
-            )
-
-            self.assertEqual(len(trace_batch.traces), 4)
-            self.assertEqual(trace_batch.failed_candidate_ids, ["cand_000_001"])
-            self.assertTrue((run_dir / "agent_work" / "round_000" / "cand_000_000").exists())
-            self.assertTrue((run_dir / "traces" / "round_000" / "cand_000_001" / "trace.json").exists())
-            self.assertTrue((run_dir / "traces.jsonl").exists())
-
-            failed_trace = next(trace for trace in trace_batch.traces if trace.candidate_id == "cand_000_001")
-            self.assertIn("candidate failed intentionally", failed_trace.samples[0].error)
-            self.assertEqual(len((run_dir / "traces.jsonl").read_text(encoding="utf-8").splitlines()), 4)
-
     def test_judger_adapter_emits_per_candidate_judgments(self):
         from gepa_researcher.agents.adapters import JudgerAdapter
         from gepa_researcher.models.schemas import TraceBatch
@@ -326,7 +302,7 @@ class GEPAMiniFlowTest(unittest.TestCase):
             ]
             second_round = [row for row in candidate_lines if row["round_id"] == 1]
             self.assertTrue(second_round)
-            self.assertTrue(any(row["parent_ids"] for row in second_round))
+            self.assertTrue(any(row["parent_candidate_ids"] for row in second_round))
 
 
 if __name__ == "__main__":

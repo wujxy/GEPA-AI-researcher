@@ -10,19 +10,24 @@ from unittest.mock import patch
 
 from gepa_researcher.loop.admission import CandidateAdmissionGate
 from gepa_researcher.agents.agent_client import AgentError, ClaudeCodeClient
-from gepa_researcher.agents.adapters import ExecutorAdapter, JudgerAdapter
+from gepa_researcher.agents.adapters import JudgerAdapter
+from gepa_researcher.domain.candidate import CandidateCard, CandidateStatus, ProposalIdea
+from gepa_researcher.domain.execution import CapabilityPolicy, ExecutionBudget, ExecutionPhase, ExecutionSpec
+from gepa_researcher.execution.git_result import GitResultService
+from gepa_researcher.execution.materializer import RepositoryMaterializer
 from gepa_researcher.storage.provenance import audit_commit
-from gepa_researcher.storage.registry import ExecutionRegistry
 from gepa_researcher.models.schemas import (
     AgentCallContext,
     AgentCallRecord,
     Candidate,
-    ExecutionRecord,
     Judgment,
     TokenUsage,
     SampleTrace,
     Trace,
+    TraceBatch,
 )
+from gepa_researcher.services.execution_service import ExecutionService
+from gepa_researcher.storage.execution_store import ExecutionStore
 from gepa_researcher.storage.usage import UsageTracker, normalize_usage
 from gepa_researcher.execution.workspace import WorkspaceManager
 
@@ -69,6 +74,56 @@ def _candidate(candidate_id: str = "cand_000_000", parent_id: str | None = None)
         target_files=["src/hot.cc"],
         safety_class="safe",
         strategy="safe-pattern #1",
+    )
+
+
+def _card(candidate_id: str, baseline: str) -> CandidateCard:
+    candidate = _candidate(candidate_id)
+    proposal = ProposalIdea.from_candidate(candidate)
+    return CandidateCard(
+        candidate_id=candidate_id,
+        round_id=0,
+        parent_candidate_ids=(),
+        proposal_id=proposal.proposal_id,
+        proposal=proposal,
+        base_revision=baseline,
+        status=CandidateStatus.ADMITTED,
+    )
+
+
+def _spec(card: CandidateCard, baseline: str) -> ExecutionSpec:
+    return ExecutionSpec(
+        execution_id=f"exec-{card.candidate_id}",
+        run_id="run",
+        round_id=card.round_id,
+        candidate_id=card.candidate_id,
+        phase=ExecutionPhase.IMPLEMENTATION,
+        input_revision=baseline,
+        dataset_ref=None,
+        evaluator_version=None,
+        budget=ExecutionBudget(wall_seconds=600),
+        capability_policy=CapabilityPolicy(repo_writable=True, network_allowed=False),
+    )
+
+
+def _execution_service(root: Path, repo: Path, baseline: str, runner, frozen_globs: list[str] | None = None) -> ExecutionService:
+    run_dir = root / "run"
+    return ExecutionService(
+        run_dir=run_dir,
+        config={"executor": {"runtime_backend": "local"}},
+        materializer=RepositoryMaterializer(
+            run_dir=run_dir,
+            workspace_config={
+                "mode": "git_worktree",
+                "repo_path": str(repo),
+                "root": str(run_dir / "sandboxes"),
+                "baseline_ref": baseline,
+                "branch_prefix": "gepa/test",
+            },
+        ),
+        execution_store=ExecutionStore(run_dir),
+        git_result_service=GitResultService({"frozen_globs": list(frozen_globs or [])}),
+        runner=runner,
     )
 
 
@@ -173,137 +228,6 @@ class AdmissionGateTest(unittest.TestCase):
 
 
 class WorkspaceAndProvenanceTest(unittest.TestCase):
-    def test_parallel_candidates_get_independent_worktrees_and_main_is_unchanged(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            repo, baseline = _make_repo(root)
-            before_head = _git(repo, "rev-parse", "HEAD")
-            before_status = _git(repo, "status", "--porcelain")
-            run_dir = root / "run"
-            config = {
-                "workspace": {
-                    "mode": "git_worktree",
-                    "repo_path": str(repo),
-                    "root": str(run_dir / "worktrees"),
-                    "baseline_ref": baseline,
-                    "branch_prefix": "gepa/test",
-                },
-                "candidate_policy": {"max_commits": 1},
-            }
-            manager = WorkspaceManager(run_dir, config)
-            a = manager.prepare(_candidate("cand_a"))
-            b = manager.prepare(_candidate("cand_b"))
-
-            self.assertNotEqual(a.worktree_path, b.worktree_path)
-            self.assertNotEqual(a.branch_name, b.branch_name)
-            (Path(a.worktree_path) / "src" / "hot.cc").write_text("int hot() { return 2; }\n", encoding="utf-8")
-            self.assertIn("return 1", (Path(b.worktree_path) / "src" / "hot.cc").read_text(encoding="utf-8"))
-            self.assertEqual(_git(repo, "rev-parse", "HEAD"), before_head)
-            self.assertEqual(_git(repo, "status", "--porcelain"), before_status)
-
-    def test_worktree_add_skips_lfs_smudge(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            repo, baseline = _make_repo(root)
-            run_dir = root / "run"
-            config = {
-                "workspace": {
-                    "mode": "git_worktree",
-                    "repo_path": str(repo),
-                    "root": str(run_dir / "worktrees"),
-                    "baseline_ref": baseline,
-                    "branch_prefix": "gepa/test",
-                },
-            }
-            captured_env = {}
-
-            def fake_run(argv, **kwargs):
-                if argv[1:3] == ["-C", str(repo)] and argv[3:6] == ["rev-parse", "--verify", f"{baseline}^{{commit}}"]:
-                    return subprocess.CompletedProcess(argv, 0, stdout=baseline + "\n", stderr="")
-                if "worktree" in argv and "add" in argv:
-                    captured_env.update(kwargs.get("env") or {})
-                    self.assertIn("filter.lfs.required=false", argv)
-                    self.assertIn("filter.lfs.smudge=", argv)
-                    self.assertIn("filter.lfs.process=", argv)
-                    return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
-                if argv[3:5] == ["rev-parse", "HEAD"]:
-                    return subprocess.CompletedProcess(argv, 0, stdout=baseline + "\n", stderr="")
-                return subprocess.run(argv, **kwargs)
-
-            with patch("gepa_researcher.execution.workspace.subprocess.run", side_effect=fake_run):
-                lease = WorkspaceManager(run_dir, config).prepare(_candidate())
-
-            self.assertEqual(lease.actual_start_sha, baseline)
-            self.assertEqual(captured_env.get("GIT_LFS_SKIP_SMUDGE"), "1")
-            self.assertEqual(captured_env.get("GIT_TERMINAL_PROMPT"), "0")
-
-    def test_worktree_materializes_pre_materialized_lfs_paths(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            repo, baseline = _make_repo(root)
-            fixture_dir = repo / "tests" / "fixtures" / "v107_rev1"
-            fixture_dir.mkdir(parents=True)
-            (fixture_dir / "charge_pdf.bin").write_bytes(b"real-binary-fixture")
-            (fixture_dir / "time_pdf.bin").write_bytes(b"another-real-fixture")
-            _git(repo, "add", ".")
-            _git(repo, "commit", "-m", "fixtures")
-            baseline = _git(repo, "rev-parse", "HEAD")
-            run_dir = root / "run"
-            config = {
-                "workspace": {
-                    "mode": "git_worktree",
-                    "repo_path": str(repo),
-                    "root": str(run_dir / "worktrees"),
-                    "baseline_ref": baseline,
-                    "branch_prefix": "gepa/test",
-                    "pre_materialized_lfs_paths": ["tests/fixtures/v107_rev1/*.bin"],
-                },
-            }
-
-            lease = WorkspaceManager(run_dir, config).prepare(_candidate())
-
-            materialized = Path(lease.worktree_path) / "tests" / "fixtures" / "v107_rev1"
-            self.assertEqual((materialized / "charge_pdf.bin").read_bytes(), b"real-binary-fixture")
-            self.assertEqual((materialized / "time_pdf.bin").read_bytes(), b"another-real-fixture")
-
-    def test_worktree_rejects_non_relative_materialized_paths(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            repo, baseline = _make_repo(root)
-            run_dir = root / "run"
-            config = {
-                "workspace": {
-                    "mode": "git_worktree",
-                    "repo_path": str(repo),
-                    "root": str(run_dir / "worktrees"),
-                    "baseline_ref": baseline,
-                    "branch_prefix": "gepa/test",
-                    "pre_materialized_lfs_paths": ["../outside.bin"],
-                },
-            }
-
-            with self.assertRaisesRegex(Exception, "repo-relative"):
-                WorkspaceManager(run_dir, config).prepare(_candidate())
-
-    def test_worktree_rejects_unmatched_materialized_paths(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            repo, baseline = _make_repo(root)
-            run_dir = root / "run"
-            config = {
-                "workspace": {
-                    "mode": "git_worktree",
-                    "repo_path": str(repo),
-                    "root": str(run_dir / "worktrees"),
-                    "baseline_ref": baseline,
-                    "branch_prefix": "gepa/test",
-                    "pre_materialized_lfs_paths": ["tests/fixtures/v107_rev1/*.bin"],
-                },
-            }
-
-            with self.assertRaisesRegex(Exception, "matched no files"):
-                WorkspaceManager(run_dir, config).prepare(_candidate())
-
     def test_controller_snapshot_ignores_editor_debris_but_not_source_changes(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -402,14 +326,14 @@ class WorkspaceAndProvenanceTest(unittest.TestCase):
                 "workspace": {
                     "mode": "git_worktree",
                     "repo_path": str(repo),
-                    "root": str(run_dir / "worktrees"),
+                    "root": str(run_dir / "sandboxes"),
                     "baseline_ref": baseline,
                     "branch_prefix": "gepa/test",
                 },
             }
-            candidate = _candidate()
-            lease = WorkspaceManager(run_dir, config).prepare(candidate)
-            worktree = Path(lease.worktree_path)
+            card = _card("cand_000_000", baseline)
+            session = RepositoryMaterializer(run_dir, config["workspace"]).materialize(_spec(card, baseline))
+            worktree = session.repo_path
             _git(worktree, "config", "user.email", "test@example.invalid")
             _git(worktree, "config", "user.name", "GEPA Test")
             (worktree / "src" / "hot.cc").write_text("int hot() { return 2; }\n", encoding="utf-8")
@@ -438,14 +362,14 @@ class WorkspaceAndProvenanceTest(unittest.TestCase):
                 "workspace": {
                     "mode": "git_worktree",
                     "repo_path": str(repo),
-                    "root": str(run_dir / "worktrees"),
+                    "root": str(run_dir / "sandboxes"),
                     "baseline_ref": baseline,
                     "branch_prefix": "gepa/test",
                 },
             }
-            candidate = _candidate()
-            lease = WorkspaceManager(run_dir, config).prepare(candidate)
-            worktree = Path(lease.worktree_path)
+            card = _card("cand_000_000", baseline)
+            session = RepositoryMaterializer(run_dir, config["workspace"]).materialize(_spec(card, baseline))
+            worktree = session.repo_path
             _git(worktree, "config", "user.email", "test@example.invalid")
             _git(worktree, "config", "user.name", "GEPA Test")
             (worktree / "src" / "hot.cc").write_text("int hot() { return 2; }\n", encoding="utf-8")
@@ -457,137 +381,6 @@ class WorkspaceAndProvenanceTest(unittest.TestCase):
             audit = audit_commit(repo=worktree, parent_sha=baseline, frozen_globs=["tests/**"])
             self.assertIn("tests/fixture.root", audit.frozen_violations)
 
-    def test_registry_only_resolves_accepted_result_sha(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            registry = ExecutionRegistry(Path(tmp))
-            record = ExecutionRecord(
-                execution_id="exec",
-                candidate_id="parent",
-                round_id=0,
-                parent_candidate_id=None,
-                requested_parent_sha="a",
-                actual_start_sha="a",
-                result_sha="b",
-                branch_name="branch",
-                worktree_path="/tmp/worktree",
-            )
-            registry.record_execution(record)
-            # Not accepted yet -> no stackable SHA.
-            self.assertIsNone(registry.accepted_result_sha("parent"))
-            registry.mark_candidate_status("parent", "accepted")
-            self.assertEqual(registry.accepted_result_sha("parent"), "b")
-
-    def test_materializes_once_then_uses_evaluate_only(self):
-        class CommittingExecutor:
-            def __init__(self):
-                self.modes = []
-
-            def execute(self, candidate, config):
-                mode = config["_execution_mode"]
-                self.modes.append(mode)
-                repo = Path(config["_candidate_repo"])
-                if mode == "implement_and_validate":
-                    _git(repo, "config", "user.email", "test@example.invalid")
-                    _git(repo, "config", "user.name", "GEPA Test")
-                    (repo / "src" / "hot.cc").write_text("int hot() { return 2; }\n", encoding="utf-8")
-                    _git(repo, "add", "src/hot.cc")
-                    _git(repo, "commit", "-m", "candidate")
-                return Trace(
-                    candidate.candidate_id,
-                    candidate.round_id,
-                    [SampleTrace("task", "in", "out", "expected", "ok")],
-                )
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            repo, baseline = _make_repo(root)
-            run_dir = root / "run"
-            config = {
-                "workspace": {
-                    "mode": "git_worktree",
-                    "repo_path": str(repo),
-                    "root": str(run_dir / "worktrees"),
-                    "baseline_ref": baseline,
-                    "branch_prefix": "gepa/test",
-                },
-                "candidate_policy": {"max_commits": 1},
-                "execution": {"lifecycle": "materialize_once"},
-                "executor": {"max_workers": 1},
-            }
-            candidate = _candidate()
-            executor = CommittingExecutor()
-            registry = ExecutionRegistry(run_dir)
-            adapter = ExecutorAdapter(
-                executor,
-                run_dir,
-                WorkspaceManager(run_dir, config),
-                registry,
-            )
-
-            first = adapter.run_many([candidate], 0, config)
-            self.assertFalse(first.failed_candidate_ids)
-            registry.mark_candidate_status(candidate.candidate_id, "accepted")
-            first_sha = registry.accepted_result_sha(candidate.candidate_id)
-            second = adapter.run_many([candidate], 0, config)
-
-            self.assertFalse(second.failed_candidate_ids)
-            self.assertEqual(executor.modes, ["implement_and_validate", "evaluate_only"])
-            self.assertEqual(registry.accepted_result_sha(candidate.candidate_id), first_sha)
-
-    def test_existing_worktree_must_be_clean_before_evaluate_only(self):
-        class CommittingExecutor:
-            def __init__(self):
-                self.calls = 0
-
-            def execute(self, candidate, config):
-                self.calls += 1
-                repo = Path(config["_candidate_repo"])
-                _git(repo, "config", "user.email", "test@example.invalid")
-                _git(repo, "config", "user.name", "GEPA Test")
-                (repo / "src" / "hot.cc").write_text("int hot() { return 2; }\n", encoding="utf-8")
-                _git(repo, "add", "src/hot.cc")
-                _git(repo, "commit", "-m", "candidate")
-                return Trace(
-                    candidate.candidate_id,
-                    candidate.round_id,
-                    [SampleTrace("task", "in", "out", "expected", "ok")],
-                )
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            repo, baseline = _make_repo(root)
-            run_dir = root / "run"
-            config = {
-                "workspace": {
-                    "mode": "git_worktree",
-                    "repo_path": str(repo),
-                    "root": str(run_dir / "worktrees"),
-                    "baseline_ref": baseline,
-                    "branch_prefix": "gepa/test",
-                },
-                "candidate_policy": {"max_commits": 1},
-                "execution": {"lifecycle": "materialize_once"},
-                "executor": {"max_workers": 1},
-            }
-            candidate = _candidate()
-            executor = CommittingExecutor()
-            registry = ExecutionRegistry(run_dir)
-            adapter = ExecutorAdapter(executor, run_dir, WorkspaceManager(run_dir, config), registry)
-
-            first = adapter.run_many([candidate], 0, config)
-            self.assertFalse(first.failed_candidate_ids)
-            registry.mark_candidate_status(candidate.candidate_id, "accepted")
-            workspace = registry.workspace(candidate.candidate_id)
-            self.assertIsNotNone(workspace)
-            dirty_file = Path(workspace["worktree_path"]) / "pre_applied.txt"
-            dirty_file.write_text("pollution\n", encoding="utf-8")
-
-            second = adapter.run_many([candidate], 0, config)
-
-            self.assertEqual(executor.calls, 1)
-            self.assertEqual(second.failed_candidate_ids, [candidate.candidate_id])
-            self.assertIn("candidate worktree is not clean before execution", second.traces[0].samples[0].error)
-
     def test_br101_clean_source_with_runtime_debris_is_judged_normally(self):
         # Regression for the br101 incident: a candidate that commits clean
         # in-scope source and passes validation, but leaves untracked runtime
@@ -595,9 +388,9 @@ class WorkspaceAndProvenanceTest(unittest.TestCase):
         # broken benchmark harness) must NOT be force-zeroed or killed. With the
         # provenance layer removed it is simply audited (no frozen violation) and
         # handed to the judger, which scores it on the metric-unknown signal.
-        class DebrisLeavingExecutor:
-            def execute(self, candidate, config):
-                repo = Path(config["_candidate_repo"])
+        class DebrisLeavingRunner:
+            def run(self, card, spec, runtime_lease, session, config):
+                repo = session.repo_path
                 _git(repo, "config", "user.email", "test@example.invalid")
                 _git(repo, "config", "user.name", "GEPA Test")
                 (repo / "src" / "hot.cc").write_text("int hot() { return 2; }\n", encoding="utf-8")
@@ -606,8 +399,8 @@ class WorkspaceAndProvenanceTest(unittest.TestCase):
                 # Runtime debris the executor does NOT commit (the br101 scene).
                 (repo / "benchmarks.csv").write_text("commit,ms_evt\nabc,162.0\n", encoding="utf-8")
                 return Trace(
-                    candidate.candidate_id,
-                    candidate.round_id,
+                    card.candidate_id,
+                    card.round_id,
                     [
                         SampleTrace(
                             "task_execution",
@@ -639,44 +432,29 @@ class WorkspaceAndProvenanceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             repo, baseline = _make_repo(root)
-            run_dir = root / "run"
-            config = {
-                "workspace": {
-                    "mode": "git_worktree",
-                    "repo_path": str(repo),
-                    "root": str(run_dir / "worktrees"),
-                    "baseline_ref": baseline,
-                    "branch_prefix": "gepa/test",
-                },
-                "candidate_policy": {"max_commits": 1},
-                "executor": {"max_workers": 1},
-            }
             candidate = _candidate()
-            adapter = ExecutorAdapter(
-                DebrisLeavingExecutor(),
-                run_dir,
-                WorkspaceManager(run_dir, config),
-                ExecutionRegistry(run_dir),
-            )
-            trace_batch = adapter.run_many([candidate], 0, config)
-            self.assertNotIn(candidate.candidate_id, trace_batch.failed_candidate_ids)
+            card = _card(candidate.candidate_id, baseline)
+            service = _execution_service(root, repo, baseline, DebrisLeavingRunner())
+            record, trace = service.execute(_spec(card, baseline), card)
+            trace_batch = TraceBatch(round_id=0, traces=[trace], failed_candidate_ids=[])
+            self.assertIsNotNone(record.result_revision)
 
-            sample = trace_batch.traces[0].samples[0]
+            sample = trace.samples[0]
             # Core regression: clean source + debris is not a frozen violation,
             # so no failure is stamped and the judger is called normally.
             self.assertEqual(sample.artifacts["commit_audit"]["frozen_violations"], [])
             self.assertNotEqual(sample.artifacts.get("failure_category"), "frozen_violation")
 
-            judgment = JudgerAdapter(_Judger()).evaluate_many([candidate], trace_batch, config).judgments[0]
+            judgment = JudgerAdapter(_Judger()).evaluate_many([candidate], trace_batch, {}).judgments[0]
             self.assertNotIn("frozen_violation", judgment.failure_categories)
             self.assertNotEqual(judgment.score, 0.0)
 
     def test_frozen_path_edit_is_hard_rejected(self):
         # The one retained hard reject: an executor that edits a frozen path is
         # force-zeroed by the JudgerAdapter and never reaches the real judger.
-        class FrozenEditingExecutor:
-            def execute(self, candidate, config):
-                repo = Path(config["_candidate_repo"])
+        class FrozenEditingRunner:
+            def run(self, card, spec, runtime_lease, session, config):
+                repo = session.repo_path
                 _git(repo, "config", "user.email", "test@example.invalid")
                 _git(repo, "config", "user.name", "GEPA Test")
                 (repo / "src" / "hot.cc").write_text("int hot() { return 2; }\n", encoding="utf-8")
@@ -685,8 +463,8 @@ class WorkspaceAndProvenanceTest(unittest.TestCase):
                 _git(repo, "add", "src/hot.cc", "tests/fixture.root")
                 _git(repo, "commit", "-m", "candidate")
                 return Trace(
-                    candidate.candidate_id,
-                    candidate.round_id,
+                    card.candidate_id,
+                    card.round_id,
                     [SampleTrace("task_execution", "in", "out", "expected", "ok")],
                 )
 
@@ -697,32 +475,17 @@ class WorkspaceAndProvenanceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             repo, baseline = _make_repo(root)
-            run_dir = root / "run"
-            config = {
-                "workspace": {
-                    "mode": "git_worktree",
-                    "repo_path": str(repo),
-                    "root": str(run_dir / "worktrees"),
-                    "baseline_ref": baseline,
-                    "branch_prefix": "gepa/test",
-                },
-                "candidate_policy": {"max_commits": 1, "frozen_globs": ["tests/**"]},
-                "executor": {"max_workers": 1},
-            }
             candidate = _candidate()
-            adapter = ExecutorAdapter(
-                FrozenEditingExecutor(),
-                run_dir,
-                WorkspaceManager(run_dir, config),
-                ExecutionRegistry(run_dir),
-            )
-            trace_batch = adapter.run_many([candidate], 0, config)
+            card = _card(candidate.candidate_id, baseline)
+            service = _execution_service(root, repo, baseline, FrozenEditingRunner(), frozen_globs=["tests/**"])
+            _, trace = service.execute(_spec(card, baseline), card)
+            trace_batch = TraceBatch(round_id=0, traces=[trace], failed_candidate_ids=[])
 
-            sample = trace_batch.traces[0].samples[0]
+            sample = trace.samples[0]
             self.assertEqual(sample.artifacts["failure_category"], "frozen_violation")
             self.assertIn("tests/fixture.root", sample.artifacts["commit_audit"]["frozen_violations"])
 
-            judgment = JudgerAdapter(_ExplodingJudger()).evaluate_many([candidate], trace_batch, config).judgments[0]
+            judgment = JudgerAdapter(_ExplodingJudger()).evaluate_many([candidate], trace_batch, {}).judgments[0]
             self.assertEqual(judgment.score, 0.0)
             self.assertFalse(judgment.passed)
             self.assertIn("frozen_violation", judgment.failure_categories)

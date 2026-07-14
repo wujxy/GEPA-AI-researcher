@@ -44,42 +44,44 @@ class ConfigSystemTest(unittest.TestCase):
 
     def _profile(self, repo: Path) -> dict:
         return {
-            "schema_version": 2,
             "kind": "project_profile",
             "name": "fixture-project",
             "source": {
-                "repo_path": str(repo),
+                "path": str(repo),
                 "default_ref": "HEAD",
                 "workspace_mode": "git_worktree",
             },
-            "runtime": {
+            "isolation": {
                 "backend": "apptainer",
                 "image": "docker://almalinux:9",
                 "workdir": "/workspace/repo",
                 "command": "claude",
-                "tools": ["bash", "which"],
-            },
-            "filesystem": {"readable": ["/cvmfs/example"], "writable": ["scratch"]},
-            "environment": {
-                "shell": "bash",
                 "env": {"pass": ["PATH"], "set": {"FIXTURE_ENV": "1"}},
-                "setup": ["source /opt/setup.sh", "?source InstallArea/setup.sh"],
-                "check": ["command -v python3"],
             },
-            "resources": {
-                "data_files": ["input.csv"],
-                "context_paths": ["context.md"],
-                "skills": ["fixture-skill"],
-                "repo_overlays": [
-                    {
-                        "source": "assets/fixtures/time_pdf.bin",
-                        "target": "TEMP/fixtures/time_pdf.bin",
-                        "mode": "ro",
-                        "purpose": "fixture",
-                    }
+            "docs": ["context.md"],
+            "provided_paths": [
+                {"path": "/cvmfs/example", "mode": "ro", "role": "environment"},
+                {"path": "scratch", "mode": "rw", "role": "scratch"},
+                {"path": "input.csv", "mode": "ro", "role": "data_file"},
+                {"path": "context.md", "mode": "ro", "role": "context"},
+            ],
+            "reference": {
+                "commands": [
+                    "source /opt/setup.sh",
+                    "?source InstallArea/setup.sh",
+                    "command -v python3",
+                    "cmake --build build",
                 ],
             },
-            "build": {"commands": ["cmake --build build"]},
+            "repo_overlays": [
+                {
+                    "source": "assets/fixtures/time_pdf.bin",
+                    "target": "TEMP/fixtures/time_pdf.bin",
+                    "mode": "ro",
+                    "purpose": "fixture",
+                }
+            ],
+            "skills": ["fixture-skill"],
             "agent": {
                 "timeout_seconds": 40,
                 "extra_args": ["--token", "supersecret", "--allowedTools", "Read"],
@@ -94,7 +96,6 @@ class ConfigSystemTest(unittest.TestCase):
 
     def _task(self, profile_name: str = "profile.yaml") -> dict:
         return {
-            "schema_version": 2,
             "kind": "task",
             "task": {"name": "fixture-task", "goal": "Minimize fixture latency."},
             "project": {"profile": profile_name, "ref": "HEAD"},
@@ -120,7 +121,7 @@ class ConfigSystemTest(unittest.TestCase):
                 "max_files_per_candidate": 2,
                 "max_commits_per_candidate": 1,
             },
-            "budget": {"max_rounds": 1, "patience": 1, "candidates_per_round": 3},
+            "loop": {"max_rounds": 1, "patience": 1, "candidates_per_round": 3},
         }
 
     def _write_fixture(self, root: Path) -> tuple[Path, Path]:
@@ -165,6 +166,7 @@ class ConfigSystemTest(unittest.TestCase):
             self.assertEqual(config["candidate_policy"]["max_commits"], 1)
             self.assertTrue(Path(config["task"]["data_files"][0]).is_absolute())
             self.assertTrue(Path(config["context"]["paths"][0]).is_absolute())
+            self.assertNotIn("lifecycle", config.get("execution", {}))
 
     def test_max_parallel_candidates_is_not_capped_by_candidates_per_round(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -196,10 +198,15 @@ class ConfigSystemTest(unittest.TestCase):
                 {"sample_id": "feedback"},
                 {"sample_id": "pareto"},
             ]
-            task["budget"]["min_rounds"] = 1
-            task["initialization"] = {"seed_count": 2}
-            task["generation"] = {"batch_size": 4, "enable_merge": True}
-            task["gepa"] = {
+            task["loop"] = {
+                "seed_count": 2,
+                "max_rounds": 1,
+                "min_rounds": 1,
+                "patience": 1,
+                "candidates_per_round": 4,
+                "enable_merge": True,
+            }
+            task["selection"] = {
                 "frontier_policy": "pareto",
                 "acceptance_policy": "minibatch_improves_then_pareto",
                 "minibatch_size": 2,
@@ -276,13 +283,13 @@ class ConfigSystemTest(unittest.TestCase):
             task_path, _ = self._write_fixture(root)
             profile_path = root / "profile.yaml"
             profile = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
-            profile["resources"]["repo_overlays"] = [{"source": "assets/missing.bin", "target": "TEMP/missing.bin"}]
+            profile["repo_overlays"] = [{"source": "assets/missing.bin", "target": "TEMP/missing.bin"}]
             profile_path.write_text(yaml.safe_dump(profile, sort_keys=False), encoding="utf-8")
 
-            with self.assertRaisesRegex(ConfigError, r"resources\.repo_overlays\[0\]\.source: source does not exist: .*resolved relative to profile_dir"):
+            with self.assertRaisesRegex(ConfigError, r"repo_overlays\[0\]\.source: source does not exist: .*resolved relative to profile_dir"):
                 load_and_resolve(task_path)
 
-    def test_runtime_v2_rejects_legacy_runtime_fields(self):
+    def test_profile_rejects_unknown_field(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             task_path, _ = self._write_fixture(root)
@@ -294,13 +301,25 @@ class ConfigSystemTest(unittest.TestCase):
             with self.assertRaisesRegex(ConfigError, r"typo: unknown field"):
                 load_and_resolve(task_path)
 
+    def test_profile_rejects_legacy_runtime_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_path, _ = self._write_fixture(root)
+            profile_path = root / "profile.yaml"
+            profile = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
+            profile["runtime"] = {"backend": "local"}
+            profile_path.write_text(yaml.safe_dump(profile, sort_keys=False), encoding="utf-8")
+
+            with self.assertRaisesRegex(ConfigError, r"runtime: unknown field"):
+                load_and_resolve(task_path)
+
     def test_apptainer_runtime_image_is_optional_and_left_for_materialization(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             task_path, _ = self._write_fixture(root)
             profile_path = root / "profile.yaml"
             profile = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
-            profile["runtime"].pop("image", None)
+            profile["isolation"].pop("image", None)
             profile_path.write_text(yaml.safe_dump(profile, sort_keys=False), encoding="utf-8")
 
             config = load_and_resolve(task_path)
@@ -329,7 +348,7 @@ class ConfigSystemTest(unittest.TestCase):
             with self.assertRaisesRegex(ConfigError, "broaden profile policy"):
                 load_and_resolve(task_path)
 
-    def test_legacy_config_is_preserved_and_warned(self):
+    def test_legacy_config_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "legacy.json"
             legacy = {
@@ -342,12 +361,19 @@ class ConfigSystemTest(unittest.TestCase):
             }
             path.write_text(json.dumps(legacy), encoding="utf-8")
 
-            config = load_and_resolve(path)
+            with self.assertRaisesRegex(ConfigError, r"kind: run configuration must have kind: task"):
+                load_and_resolve(path)
 
-            self.assertTrue(config["resume"])
-            self.assertEqual(config["task"], legacy["task"])
-            self.assertEqual(config["contracts"]["metric"]["direction"], "minimize")
-            self.assertTrue(any("frontier_policy" in item for item in config["_meta"]["warnings"]))
+    def test_schema_version_task_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_path, _ = self._write_fixture(root)
+            task = yaml.safe_load(task_path.read_text(encoding="utf-8"))
+            task["schema_version"] = 2
+            task_path.write_text(yaml.safe_dump(task), encoding="utf-8")
+
+            with self.assertRaisesRegex(ConfigError, r"schema_version: unknown field"):
+                load_and_resolve(task_path)
 
     def test_snapshot_sanitizer_redacts_mapping_and_cli_secret_values(self):
         payload = {
@@ -456,21 +482,17 @@ class ConfigSystemTest(unittest.TestCase):
             task["project"] = {
                 "inline": {
                     "source": {"workspace_mode": "artifact_directory"},
-                    "runtime": {
+                    "isolation": {
                         "backend": "local",
                         "workdir": "/workspace/repo",
                         "command": "claude",
-                        "append_agent_args": True,
                         "env": {"pass": [], "set": {}},
-                        "setup": [],
-                        "check": [],
-                        "mounts": {"repo": {}, "extra": []},
                     },
                     "agent": {"timeout_seconds": 30},
                 }
             }
             task.pop("safety")
-            task["budget"] = {"max_rounds": 1, "patience": 1, "candidates_per_round": 2}
+            task["loop"] = {"max_rounds": 1, "patience": 1, "candidates_per_round": 2}
             task_path = root / "task.yaml"
             task_path.write_text(yaml.safe_dump(task), encoding="utf-8")
             run_dir = root / "run"

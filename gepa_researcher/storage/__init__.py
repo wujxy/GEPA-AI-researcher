@@ -1,1 +1,1 @@
-"""Persistence: JSON io utils, run store, candidate pool, execution registry, provenance, usage tracking."""
+"""Persistence: JSON io utils, run store, candidate/execution stores, provenance, usage tracking."""

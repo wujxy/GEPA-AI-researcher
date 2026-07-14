@@ -15,9 +15,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from gepa_researcher.domain.execution import CapabilityPolicy, ExecutionBudget, ExecutionPhase, ExecutionRecord, ExecutionSpec
 from gepa_researcher.execution.container_image import MaterializationError, _build_sif
 from gepa_researcher.execution.runtime_backend import ApptainerRuntimeBackend
-from gepa_researcher.models.schemas import Candidate, ExecutionRecord, WorkspaceLease
+from gepa_researcher.execution.sandbox import SandboxSession
 
 _REAL = bool(os.environ.get("GEPA_REAL_APPTAINER"))
 _APPTAINER_AVAILABLE = _REAL and (subprocess.run(["which", "apptainer"]).returncode == 0)
@@ -26,32 +27,40 @@ _SKIP = not (_REAL and _APPTAINER_AVAILABLE)
 _BASE = "docker://alpine:3.20"
 
 
-def _candidate() -> Candidate:
-    return Candidate(
-        candidate_id="cand_000", round_id=0, hypothesis="h", scope="s",
-        proposed_change="c", rationale="r", expected_improvement="e", risk="rk",
-        prompt_text="", created_at="now",
+def _spec(execution_id: str) -> ExecutionSpec:
+    return ExecutionSpec(
+        execution_id=execution_id,
+        run_id="run",
+        candidate_id="cand_000",
+        round_id=0,
+        phase=ExecutionPhase.IMPLEMENTATION,
+        input_revision="a" * 40,
+        dataset_ref=None,
+        evaluator_version=None,
+        budget=ExecutionBudget(wall_seconds=600),
+        capability_policy=CapabilityPolicy(repo_writable=True),
     )
 
 
 def _record(execution_id: str) -> ExecutionRecord:
-    return ExecutionRecord(
-        execution_id=execution_id, candidate_id="cand_000", round_id=0,
-        parent_candidate_id=None, requested_parent_sha="p", actual_start_sha="p",
-        result_sha=None, branch_name="b", worktree_path="", execution_mode="implement_and_validate",
-        status="executing",
-    )
+    return ExecutionRecord.from_spec(_spec(execution_id))
 
 
-def _lease(root: Path) -> WorkspaceLease:
+def _session(root: Path, execution_id: str) -> SandboxSession:
     repo = root / "repo"
     artifacts = root / "artifacts"
+    scratch = root / f"scratch-{execution_id}"
     repo.mkdir(parents=True, exist_ok=True)
     artifacts.mkdir(parents=True, exist_ok=True)
-    return WorkspaceLease(
-        candidate_id="cand_000", round_id=0, requested_parent_sha="p",
-        actual_start_sha="p", branch_name="b", worktree_path=str(repo),
-        artifact_path=str(artifacts), mode="git_worktree",
+    scratch.mkdir(parents=True, exist_ok=True)
+    return SandboxSession(
+        execution_id=execution_id,
+        repo_path=repo,
+        artifact_path=artifacts,
+        scratch_path=scratch,
+        input_revision="a" * 40,
+        mode="git_worktree",
+        temporary_paths=(repo, artifacts, scratch),
     )
 
 
@@ -100,7 +109,7 @@ class RealApptainerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             backend = ApptainerRuntimeBackend(root, self._config(root))
-            runtime = backend.prepare(_candidate(), _lease(root), _record("exec-1"))
+            runtime = backend.prepare(_spec("exec-1"), _session(root, "exec-1"), _record("exec-1"))
             self.assertIn("--userns", runtime.command_prefix)
             self.assertIn("--home", runtime.command_prefix)
 
@@ -108,7 +117,7 @@ class RealApptainerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             backend = ApptainerRuntimeBackend(root, self._config(root))
-            runtime = backend.prepare(_candidate(), _lease(root), _record("exec-1"))
+            runtime = backend.prepare(_spec("exec-1"), _session(root, "exec-1"), _record("exec-1"))
             out = self._run_prefix(
                 runtime,
                 "echo HOME=$HOME; "
@@ -128,8 +137,8 @@ class RealApptainerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             backend = ApptainerRuntimeBackend(root, self._config(root))
-            r1 = backend.prepare(_candidate(), _lease(root), _record("exec-1"))
-            r2 = backend.prepare(_candidate(), _lease(root), _record("exec-2"))
+            r1 = backend.prepare(_spec("exec-1"), _session(root, "exec-1"), _record("exec-1"))
+            r2 = backend.prepare(_spec("exec-2"), _session(root, "exec-2"), _record("exec-2"))
             self.assertNotEqual(r1.artifacts["host_scratch"], r2.artifacts["host_scratch"])
             self.assertNotEqual(r1.artifacts["host_home"], r2.artifacts["host_home"])
             self.assertTrue((Path(r1.artifacts["host_scratch"]) / "tmp").is_dir())

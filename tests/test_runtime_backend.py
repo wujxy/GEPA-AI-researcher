@@ -4,53 +4,56 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from gepa_researcher.domain.execution import (
+    CapabilityPolicy,
+    ExecutionBudget,
+    ExecutionPhase,
+    ExecutionRecord,
+    ExecutionSpec,
+)
 from gepa_researcher.execution.runtime_backend import ApptainerRuntimeBackend, RuntimeBackendError, RuntimeLease, runtime_backend_for
-from gepa_researcher.models.schemas import Candidate, ExecutionRecord, WorkspaceLease
+from gepa_researcher.execution.sandbox import SandboxSession
 
 
-def _candidate():
-    return Candidate(
-        candidate_id="cand_000",
+def _spec():
+    return ExecutionSpec(
+        execution_id="exec-1",
+        run_id="run-001",
         round_id=0,
-        hypothesis="h",
-        scope="s",
-        proposed_change="c",
-        rationale="r",
-        expected_improvement="e",
-        risk="risk",
-        prompt_text="",
-        created_at="now",
+        candidate_id="cand_000",
+        phase=ExecutionPhase.IMPLEMENTATION,
+        input_revision="a" * 40,
+        dataset_ref=None,
+        evaluator_version=None,
+        budget=ExecutionBudget(wall_seconds=600),
+        capability_policy=CapabilityPolicy(
+            repo_writable=True,
+            network_allowed=False,
+            allowed_tools=("bash", "git"),
+            forbidden_paths=(),
+        ),
     )
 
 
 def _record():
-    return ExecutionRecord(
-        execution_id="exec-1",
-        candidate_id="cand_000",
-        round_id=0,
-        parent_candidate_id=None,
-        requested_parent_sha="parent-sha",
-        actual_start_sha="parent-sha",
-        result_sha=None,
-        branch_name="branch",
-        worktree_path="",
-    )
+    return ExecutionRecord.from_spec(_spec())
 
 
-def _lease(root: Path):
+def _session(root: Path):
     repo = root / "repo"
     artifacts = root / "artifacts"
+    scratch = root / "scratch"
     repo.mkdir()
     artifacts.mkdir()
-    return WorkspaceLease(
-        candidate_id="cand_000",
-        round_id=0,
-        requested_parent_sha="parent-sha",
-        actual_start_sha="parent-sha",
-        branch_name="branch",
-        worktree_path=str(repo),
-        artifact_path=str(artifacts),
+    scratch.mkdir()
+    return SandboxSession(
+        execution_id="exec-1",
+        repo_path=repo,
+        artifact_path=artifacts,
+        scratch_path=scratch,
+        input_revision="a" * 40,
         mode="git_worktree",
+        temporary_paths=(repo, artifacts, scratch),
     )
 
 
@@ -100,14 +103,15 @@ class RuntimeBackendTest(unittest.TestCase):
     def test_local_backend_preserves_host_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            lease = _lease(root)
-            runtime = runtime_backend_for({"executor": {}}, root).prepare(_candidate(), lease, _record())
+            session = _session(root)
+            runtime = runtime_backend_for({"executor": {}}, root).prepare(_spec(), session, _record())
 
             self.assertEqual(runtime.backend, "local")
-            self.assertEqual(runtime.repo_path, lease.worktree_path)
-            self.assertEqual(runtime.artifact_path, lease.artifact_path)
+            self.assertEqual(runtime.repo_path, str(session.repo_path))
+            self.assertEqual(runtime.artifact_path, str(session.artifact_path))
             self.assertTrue(runtime.inherit_host_env)
-            self.assertEqual(runtime.env["GEPA_WORKTREE"], lease.worktree_path)
+            self.assertEqual(runtime.env["GEPA_WORKTREE"], str(session.repo_path))
+            self.assertEqual(runtime.env["GEPA_INPUT_REVISION"], "a" * 40)
 
     def test_apptainer_backend_builds_isolated_runtime_lease(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -122,7 +126,7 @@ class RuntimeBackendTest(unittest.TestCase):
             (home_template / "auth.json").write_text("{}", encoding="utf-8")
             readonly = root / "fixture.bin"
             readonly.write_text("fixture", encoding="utf-8")
-            lease = _lease(root)
+            session = _session(root)
             config = _apptainer_config(
                 root, image, apptainer, readonly,
                 claude_home_template=str(home_template),
@@ -131,7 +135,7 @@ class RuntimeBackendTest(unittest.TestCase):
             )
 
             with patch.dict(os.environ, {"GEPA_ALLOW_TEST": "allowed", "SECRET_TEST": "hidden"}, clear=False):
-                runtime = ApptainerRuntimeBackend(root, config).prepare(_candidate(), lease, _record())
+                runtime = ApptainerRuntimeBackend(root, config).prepare(_spec(), session, _record())
 
             self.assertEqual(runtime.backend, "apptainer")
             self.assertEqual(runtime.repo_path, "/workspace/repo")
@@ -148,6 +152,7 @@ class RuntimeBackendTest(unittest.TestCase):
             self.assertIn("--env", runtime.command_prefix)
             self.assertIn("GEPA_WORKTREE=/workspace/repo", runtime.command_prefix)
             self.assertIn("GEPA_ARTIFACTS=/workspace/artifacts", runtime.command_prefix)
+            self.assertIn(f"GEPA_INPUT_REVISION={'a' * 40}", runtime.command_prefix)
             self.assertIn("STATIC_ENV=1", runtime.command_prefix)
             self.assertIn("GEPA_ALLOW_TEST=allowed", runtime.command_prefix)
             self.assertNotIn("SECRET_TEST", joined)
@@ -158,7 +163,7 @@ class RuntimeBackendTest(unittest.TestCase):
                 runtime.command_prefix[home_idx + 1],
             )
             self.assertNotIn("HOME=/workspace/artifacts/home_exec-1", runtime.command_prefix)
-            self.assertIn("TMPDIR=/workspace/artifacts/scratch_exec-1/tmp", runtime.command_prefix)
+            self.assertIn("TMPDIR=/workspace/scratch/tmp", runtime.command_prefix)
             self.assertIn(f"{readonly}:/workspace/repo/TEMP/fixtures/time_pdf.bin:ro", joined)
             self.assertIn(f"{readonly}:/readonly/fixture.bin:ro", joined)
             self.assertIn(f"{root}:/extra:rw", joined)
@@ -225,75 +230,6 @@ class RuntimeBackendTest(unittest.TestCase):
         self.assertEqual(lease_dict["env"]["_count"], 2)
         self.assertNotIn("my_password", str(lease_dict))
 
-    def test_workspace_manager_worktree_snapshot_and_validation(self):
-        """Test worktree integrity validation methods"""
-        from gepa_researcher.execution.workspace import WorkspaceManager, WorkspaceError
-        import subprocess
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            repo = root / "test_repo"
-            repo.mkdir()
-
-            # Initialize a git repository
-            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
-            subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=repo, check=True, capture_output=True)
-            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True, capture_output=True)
-
-            # Create initial commit
-            (repo / "test.txt").write_text("content", encoding="utf-8")
-            subprocess.run(["git", "add", "test.txt"], cwd=repo, check=True, capture_output=True)
-            subprocess.run(["git", "commit", "-m", "initial"], cwd=repo, check=True, capture_output=True)
-
-            # Create WorkspaceManager in git_worktree mode
-            config = {
-                "workspace": {
-                    "mode": "git_worktree",
-                    "repo_path": str(repo),
-                    "baseline_ref": "HEAD",
-                }
-            }
-            wm = WorkspaceManager(root / "run_dir", config)
-
-            # Test worktree_snapshot
-            snapshot = wm.worktree_snapshot(str(repo))
-            self.assertIn("head", snapshot)
-            self.assertIn("status", snapshot)
-            self.assertNotIn("error", snapshot)
-
-            # Test assert_worktree_unchanged with no changes
-            wm.assert_worktree_unchanged(snapshot, str(repo))  # Should not raise
-
-            # Modify the worktree
-            (repo / "modified.txt").write_text("modified", encoding="utf-8")
-
-            # Get new snapshot
-            modified_snapshot = wm.worktree_snapshot(str(repo))
-
-            # Test assert_worktree_unchanged with changes (should raise)
-            with self.assertRaises(WorkspaceError) as ctx:
-                wm.assert_worktree_unchanged(snapshot, str(repo))
-            self.assertIn("Worktree corrupted during execution", str(ctx.exception))
-
-    def test_workspace_manager_worktree_snapshot_handles_errors_gracefully(self):
-        """Test worktree_snapshot handles non-git directories gracefully"""
-        from gepa_researcher.execution.workspace import WorkspaceManager
-
-        with tempfile.TemporaryDirectory() as tmp:
-            # Test with non-git directory
-            non_git_dir = Path(tmp) / "not_a_repo"
-            non_git_dir.mkdir()
-
-            config = {"workspace": {"mode": "artifact_directory"}}
-            wm = WorkspaceManager(Path(tmp) / "run_dir", config)
-
-            # Should return empty dict for non-git directories
-            snapshot = wm.worktree_snapshot(str(non_git_dir))
-            self.assertEqual(snapshot, {})
-
-            # Should not raise error with empty snapshot
-            wm.assert_worktree_unchanged({}, str(non_git_dir))
-
     def test_apptainer_backend_injects_userns_and_extra_exec_args(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -302,9 +238,9 @@ class RuntimeBackendTest(unittest.TestCase):
             apptainer = root / "apptainer"
             apptainer.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             os.chmod(apptainer, 0o755)
-            lease = _lease(root)
+            session = _session(root)
             config = _apptainer_config(root, image, apptainer, userns=True, extra_exec_args=["--no-mount", "home"])
-            runtime = ApptainerRuntimeBackend(root, config).prepare(_candidate(), lease, _record())
+            runtime = ApptainerRuntimeBackend(root, config).prepare(_spec(), session, _record())
             self.assertIn("--userns", runtime.command_prefix)
             self.assertIn("--no-mount", runtime.command_prefix)
             self.assertIn("home", runtime.command_prefix)
@@ -318,10 +254,10 @@ class RuntimeBackendTest(unittest.TestCase):
             apptainer = root / "apptainer"
             apptainer.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             os.chmod(apptainer, 0o755)
-            lease = _lease(root)
+            session = _session(root)
             config = _apptainer_config(root, image, apptainer)
 
-            runtime = ApptainerRuntimeBackend(root, config).prepare(_candidate(), lease, _record())
+            runtime = ApptainerRuntimeBackend(root, config).prepare(_spec(), session, _record())
 
             self.assertEqual(runtime.command, "claude-in-container")
             self.assertEqual(runtime.command_prefix[-3:], ["/usr/bin/env", "bash", runtime.artifacts["runtime_entrypoint_container"]])
@@ -346,7 +282,7 @@ class RuntimeBackendTest(unittest.TestCase):
             config = _apptainer_config(root, root / "unused.sif", apptainer)
             config["_runtime_spec"]["image"] = "docker://almalinux:9"
 
-            runtime = ApptainerRuntimeBackend(root, config).prepare(_candidate(), _lease(root), _record())
+            runtime = ApptainerRuntimeBackend(root, config).prepare(_spec(), _session(root), _record())
 
             self.assertIn("docker://almalinux:9", runtime.command_prefix)
 
@@ -358,8 +294,8 @@ class RuntimeBackendTest(unittest.TestCase):
             apptainer = root / "apptainer"
             apptainer.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             os.chmod(apptainer, 0o755)
-            lease = _lease(root)
-            worktree = Path(lease.worktree_path)
+            session = _session(root)
+            worktree = session.repo_path
             common_git = root / "source" / ".git"
             gitdir = common_git / "worktrees" / "repo1"
             gitdir.mkdir(parents=True)
@@ -367,7 +303,7 @@ class RuntimeBackendTest(unittest.TestCase):
             (worktree / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
             config = _apptainer_config(root, image, apptainer)
 
-            runtime = ApptainerRuntimeBackend(root, config).prepare(_candidate(), lease, _record())
+            runtime = ApptainerRuntimeBackend(root, config).prepare(_spec(), session, _record())
 
             self.assertIn(f"{common_git}:{common_git}:rw", runtime.command_prefix)
 
@@ -390,7 +326,7 @@ class RuntimeBackendTest(unittest.TestCase):
                 readonly_binds=[{"source": str(readonly), "target": target, "mode": "ro"}],
             )
 
-            runtime = ApptainerRuntimeBackend(root, config).prepare(_candidate(), _lease(root), _record())
+            runtime = ApptainerRuntimeBackend(root, config).prepare(_spec(), _session(root), _record())
 
             bind_values = [
                 runtime.command_prefix[index + 1]
@@ -408,7 +344,7 @@ class RuntimeBackendTest(unittest.TestCase):
             config = _apptainer_config(root, root / "missing.sif", apptainer)
 
             with self.assertRaisesRegex(RuntimeBackendError, "isolation.image resolved path does not exist"):
-                ApptainerRuntimeBackend(root, config).prepare(_candidate(), _lease(root), _record())
+                ApptainerRuntimeBackend(root, config).prepare(_spec(), _session(root), _record())
 
 
 if __name__ == "__main__":

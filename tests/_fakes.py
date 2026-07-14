@@ -61,7 +61,7 @@ class FakeJudger:
 
     def judge(self, candidate, trace, config):
         high = candidate.candidate_id.endswith("_000") or candidate.candidate_id.startswith("seed")
-        score = 0.8 if high else 0.2
+        score = 0.9 if high else 0.2
         return Judgment(
             candidate_id=candidate.candidate_id,
             round_id=candidate.round_id,

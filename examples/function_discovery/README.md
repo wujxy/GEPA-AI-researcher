@@ -1,7 +1,7 @@
 # Function Discovery Example
 
-This example exercises the schema-version-1 GEPA task/profile configuration and
-the full agent loop:
+This example exercises the canonical GEPA task/profile configuration and the
+full agent loop:
 
 ```text
 AgentProposer -> AgentExecutor -> AgentJudger -> GEPA gate
@@ -10,8 +10,9 @@ AgentProposer -> AgentExecutor -> AgentJudger -> GEPA gate
 The canonical files are:
 
 - `task.yaml`: complete task config with all task-level knobs shown.
-- `project.profile.yaml`: complete project profile with runtime, resources,
-  agent backend, execution, and safety ceilings.
+- `config.claude.json`: the same canonical task shape expressed as JSON.
+- `project.profile.yaml`: complete project profile with isolation,
+  provided paths, reference commands, agent backend, and safety ceilings.
 - `data/observations.csv`: one-column numeric observations file.
 
 Validate without creating artifacts:
@@ -32,5 +33,4 @@ Run after Claude Code is installed and authenticated:
 python -m gepa_researcher.cli run   --config examples/function_discovery/task.yaml   --run-dir examples/function_discovery/runs/<run-id>
 ```
 
-`config.claude.json` is retained as a legacy single-file config for compatibility
-and smoke tests. Prefer `task.yaml` plus `project.profile.yaml` for new runs.
+Both YAML and JSON task examples resolve through the same canonical entrypoint.
