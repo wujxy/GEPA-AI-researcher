@@ -86,7 +86,7 @@ class ContextViewBuilder:
         role = ContextRole.JUDGE
         blocks = [
             *_for_role(self.plane.run_fact_blocks(), role),
-            _candidate_block(candidate, role, blind_to_expected_gain=True),
+            _candidate_block(candidate, role, judge_safe=True),
             _trace_summary_block(trace, role),
             *_execution_summary_blocks(self.plane, candidate.candidate_id, role),
             *_for_role(_artifact_blocks_for_candidate(self.plane, candidate.candidate_id), role),
@@ -144,11 +144,8 @@ def _loop_state_block(state: LoopState, role: ContextRole) -> ContextBlock:
     )
 
 
-def _candidate_block(candidate: Candidate, role: ContextRole, *, blind_to_expected_gain: bool = False) -> ContextBlock:
-    content = candidate.to_dict()
-    if blind_to_expected_gain:
-        content.pop("expected_gain", None)
-        content.pop("expected_improvement", None)
+def _candidate_block(candidate: Candidate, role: ContextRole, *, judge_safe: bool = False) -> ContextBlock:
+    content = _judge_safe_candidate_content(candidate) if judge_safe else candidate.to_dict()
     return ContextBlock(
         block_id=f"candidate:{candidate.candidate_id}",
         kind=ContextBlockKind.CANDIDATE_FACT,
@@ -166,6 +163,26 @@ def _candidate_block(candidate: Candidate, role: ContextRole, *, blind_to_expect
         role_scope=[role],
         visibility=ContextVisibility.AGENT,
     )
+
+
+def _judge_safe_candidate_content(candidate: Candidate) -> dict[str, Any]:
+    """Project only the candidate evidence that legacy judges receive."""
+    artifacts = dict(candidate.artifacts)
+    return {
+        "candidate_id": candidate.candidate_id,
+        "round_id": candidate.round_id,
+        "parent_ids": list(candidate.parent_ids),
+        "generation": candidate.generation,
+        "hypothesis": candidate.hypothesis,
+        "scope": candidate.scope,
+        "proposed_change": candidate.proposed_change,
+        "risk": candidate.risk,
+        "strategy": candidate.strategy or artifacts.get("strategy"),
+        "target_files": list(candidate.target_files),
+        "safety_class": candidate.safety_class,
+        "executor_contract": dict(candidate.executor_contract),
+        "expected_artifacts": list(candidate.expected_artifacts),
+    }
 
 
 def _workspace_block(candidate_id: str, round_dir: Path, repo_dir: Path, role: ContextRole) -> ContextBlock:

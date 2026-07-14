@@ -74,7 +74,7 @@ def test_proposer_view_is_deterministic_and_agent_visible(tmp_path):
     assert any(block["inline_content"].get("score_summary") == {"primary": 0.7} for block in first["blocks"])
 
 
-def test_judge_view_does_not_include_expected_gain_anchor(tmp_path):
+def test_judge_view_excludes_proposer_authored_anchoring_fields(tmp_path):
     builder = ContextViewBuilder(_plane(tmp_path))
     trace = Trace(
         candidate_id="cand_001",
@@ -86,6 +86,9 @@ def test_judge_view_does_not_include_expected_gain_anchor(tmp_path):
 
     assert "999.0" not in view_text
     assert "expected_gain" not in view_text
+    assert "expected_improvement" not in view_text
+    assert "rationale" not in view_text
+    assert "prompt_text" not in view_text
 
 
 def test_proposer_view_accepts_a_pareto_frontier_model(tmp_path):
