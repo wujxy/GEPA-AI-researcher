@@ -229,13 +229,13 @@ def test_git_implementation_without_commit_fails_without_result_revision(tmp_pat
     record, trace = service.execute(spec, card)
 
     assert record.status == ExecutionStatus.FAILED
-    assert record.failure.code == "NO_CANDIDATE_COMMIT"
+    assert record.failure.code == "NO_CANDIDATE_COMMIT_EMPTY"
     assert record.result_revision is None
     assert "no candidate commit produced" in trace.samples[0].error
     assert store.get(spec.execution_id).result_revision is None
 
 
-def test_git_implementation_with_allowed_uncommitted_diff_gets_fallback_commit(tmp_path: Path):
+def test_git_implementation_with_allowed_uncommitted_diff_gets_harness_commit(tmp_path: Path):
     repo, baseline = _make_repo(tmp_path)
     card = _card(baseline)
     spec = _spec(card, ExecutionPhase.IMPLEMENTATION, baseline)
@@ -253,8 +253,9 @@ def test_git_implementation_with_allowed_uncommitted_diff_gets_fallback_commit(t
     assert record.result_revision is not None
     assert record.result_revision != baseline
     audit = trace.samples[0].artifacts["commit_audit"]
-    assert audit["fallback_commit_created"] is True
-    assert audit["fallback_committed_files"] == ["src/hot.cc"]
+    assert audit["harness_commit_created"] is True
+    assert audit["harness_committed_files"] == ["src/hot.cc"]
+    assert audit["commit_failure_reason"] is None
     assert "int hot() { return 3; }" in _git(repo, "show", f"{record.result_revision}:src/hot.cc")
 
 
@@ -274,7 +275,7 @@ def test_fallback_commit_does_not_include_pre_staged_frozen_paths(tmp_path: Path
 
     assert record.status == ExecutionStatus.SUCCEEDED
     audit = trace.samples[0].artifacts["commit_audit"]
-    assert audit["fallback_committed_files"] == ["src/hot.cc"]
+    assert audit["harness_committed_files"] == ["src/hot.cc"]
     assert audit["changed_files"] == ["src/hot.cc"]
     assert "tests/fixture.root" not in _git(repo, "diff", "--name-only", baseline, record.result_revision)
 
@@ -288,7 +289,7 @@ def test_no_candidate_commit_failure_records_claimed_and_actual_commit_diagnosti
     record, _ = service.execute(spec, card)
 
     assert record.status == ExecutionStatus.FAILED
-    assert record.failure.code == "NO_CANDIDATE_COMMIT"
+    assert record.failure.code == "NO_CANDIDATE_COMMIT_EMPTY"
     assert record.failure.details["claimed_commit_sha"] == "f" * 40
     assert record.failure.details["claimed_commit_exists"] is False
     assert record.failure.details["actual_head"] == baseline

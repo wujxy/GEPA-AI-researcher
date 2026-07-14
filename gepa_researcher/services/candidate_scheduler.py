@@ -36,6 +36,7 @@ class CandidateScheduler:
             input_revision=card.base_revision,
             repo_writable=True,
             dataset_ref=None,
+            allowed_target_files=card.proposal.target_files,
         )
 
     def make_feedback_eval(self, card: CandidateCard, dataset_ref: str | None) -> ExecutionSpec:
@@ -68,6 +69,7 @@ class CandidateScheduler:
         input_revision: str,
         repo_writable: bool,
         dataset_ref: str | None,
+        allowed_target_files: tuple[str, ...] = (),
     ) -> ExecutionSpec:
         return ExecutionSpec(
             execution_id=_execution_id(card, phase),
@@ -84,6 +86,7 @@ class CandidateScheduler:
                 network_allowed=self.network_allowed,
                 allowed_tools=self.allowed_tools,
                 forbidden_paths=self.forbidden_paths,
+                allowed_target_files=allowed_target_files,
             ),
         )
 

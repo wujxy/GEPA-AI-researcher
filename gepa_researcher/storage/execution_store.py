@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .io_utils import append_jsonl, read_json, write_json
-from ..domain.execution import ExecutionFailure, ExecutionPhase, ExecutionRecord, ExecutionSpec, ExecutionStatus
+from ..domain.execution import ExecutionFailure, ExecutionFailureCode, ExecutionPhase, ExecutionRecord, ExecutionSpec, ExecutionStatus
 from .event_store import EventStore
 
 
@@ -151,7 +151,7 @@ class ExecutionStore:
                 failed = self.mark_failed(
                     record.execution_id,
                     ExecutionFailure(
-                        code="RUN_INTERRUPTED",
+                        code=ExecutionFailureCode.RUN_INTERRUPTED,
                         message=message,
                         retryable=True,
                         details={"previous_status": record.status.value},

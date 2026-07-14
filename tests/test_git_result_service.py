@@ -52,7 +52,7 @@ def _session(root: Path, repo: Path, baseline: str) -> SandboxSession:
     )
 
 
-def _spec(phase: ExecutionPhase, baseline: str) -> ExecutionSpec:
+def _spec(phase: ExecutionPhase, baseline: str, *, allowed_target_files: tuple[str, ...] = ()) -> ExecutionSpec:
     return ExecutionSpec(
         execution_id="exec-1",
         run_id="run-001",
@@ -68,6 +68,7 @@ def _spec(phase: ExecutionPhase, baseline: str) -> ExecutionSpec:
             network_allowed=False,
             allowed_tools=("bash", "git"),
             forbidden_paths=("tests/**",),
+            allowed_target_files=allowed_target_files,
         ),
     )
 
@@ -149,5 +150,160 @@ def test_fallback_commit_matches_globstar_files_directly_under_package(tmp_path:
     result_sha, audit = service.finalize_implementation(_spec(ExecutionPhase.IMPLEMENTATION, baseline), session)
 
     assert result_sha != baseline
-    assert audit.fallback_commit_created is True
-    assert audit.fallback_committed_files == ["tinyalgo/paircount.py"]
+    assert audit.harness_commit_created is True
+    assert audit.harness_committed_files == ["tinyalgo/paircount.py"]
+    assert audit.commit_failure_reason is None
+
+
+# --- §4.8 harness-owned commit tests (A.7) -------------------------------------
+# The agent no longer commits; the harness stages only allowed target files
+# and commits. These cover the three typed NoCandidateCommit sub-causes, the
+# dirty-commit fix, agent-staged-debris reset, and target_files precedence.
+
+
+def test_harness_commit_stages_only_allowed_target_files(tmp_path: Path):
+    """Agent dirties an allowed source file AND a disallowed build output;
+    the harness commits only the allowed one."""
+    repo, baseline = _make_repo(tmp_path)
+    session = _session(tmp_path, repo, baseline)
+    (repo / "src" / "hot.cc").write_text("int hot() { return 9; }\n", encoding="utf-8")
+    (repo / "build.log").write_text("debris\n", encoding="utf-8")
+    service = GitResultService(
+        candidate_policy={"allowed_target_globs": ["src/**"], "frozen_globs": ["tests/**"]}
+    )
+
+    result_sha, audit = service.finalize_implementation(
+        _spec(ExecutionPhase.IMPLEMENTATION, baseline), session
+    )
+
+    assert result_sha != baseline
+    assert audit.harness_commit_created is True
+    assert audit.harness_committed_files == ["src/hot.cc"]
+    changed = _git(repo, "diff", "--name-only", baseline, result_sha).splitlines()
+    assert "src/hot.cc" in changed
+    assert "build.log" not in changed
+
+
+def test_harness_commit_drops_dirty_benchmark_output(tmp_path: Path):
+    """Reproduces test5.log seed_001: agent committed a benchmark output
+    alongside the source. The harness must stage only the source."""
+    repo, baseline = _make_repo(tmp_path)
+    (repo / "benchmarks").mkdir()
+    (repo / "benchmarks" / "speed.csv").write_text("base\n", encoding="utf-8")
+    _git(repo, "add", "benchmarks/speed.csv")
+    _git(repo, "commit", "-m", "track benchmark")
+    baseline = _git(repo, "rev-parse", "HEAD")
+    session = _session(tmp_path, repo, baseline)
+    (repo / "src" / "hot.cc").write_text("int hot() { return 2; }\n", encoding="utf-8")
+    (repo / "benchmarks" / "speed.csv").write_text("faster\n", encoding="utf-8")
+    service = GitResultService(
+        candidate_policy={
+            "allowed_target_globs": ["src/**"],
+            "frozen_globs": ["tests/**"],
+            "readonly_allowed_dirty_globs": ["benchmarks/speed.csv"],
+        }
+    )
+
+    result_sha, audit = service.finalize_implementation(
+        _spec(ExecutionPhase.IMPLEMENTATION, baseline), session
+    )
+
+    assert audit.harness_committed_files == ["src/hot.cc"]
+    changed = _git(repo, "diff", "--name-only", baseline, result_sha).splitlines()
+    assert "benchmarks/speed.csv" not in changed
+    assert "src/hot.cc" in changed
+
+
+def test_harness_commit_resets_agent_staged_debris(tmp_path: Path):
+    """Agent ran `git add build.log`; the harness resets the index and commits
+    only the allowed source change."""
+    repo, baseline = _make_repo(tmp_path)
+    session = _session(tmp_path, repo, baseline)
+    (repo / "src" / "hot.cc").write_text("int hot() { return 7; }\n", encoding="utf-8")
+    (repo / "build.log").write_text("agent staged this\n", encoding="utf-8")
+    _git(repo, "add", "build.log")
+    service = GitResultService(
+        candidate_policy={"allowed_target_globs": ["src/**"], "frozen_globs": ["tests/**"]}
+    )
+
+    result_sha, audit = service.finalize_implementation(
+        _spec(ExecutionPhase.IMPLEMENTATION, baseline), session
+    )
+
+    assert audit.harness_committed_files == ["src/hot.cc"]
+    changed = _git(repo, "diff", "--name-only", baseline, result_sha).splitlines()
+    assert "build.log" not in changed
+
+
+def test_harness_commit_empty_tree_yields_empty_reason(tmp_path: Path):
+    """Agent changed nothing at all -> commit_failure_reason='empty'."""
+    repo, baseline = _make_repo(tmp_path)
+    session = _session(tmp_path, repo, baseline)
+    service = GitResultService(
+        candidate_policy={"allowed_target_globs": ["src/**"], "frozen_globs": ["tests/**"]}
+    )
+
+    result_sha, audit = service.finalize_implementation(
+        _spec(ExecutionPhase.IMPLEMENTATION, baseline), session
+    )
+
+    assert result_sha == baseline
+    assert audit.harness_commit_created is False
+    assert audit.commit_failure_reason == "empty"
+
+
+def test_harness_commit_only_frozen_yields_only_forbidden_reason(tmp_path: Path):
+    """Agent edited only a frozen path -> 'only_forbidden'."""
+    repo, baseline = _make_repo(tmp_path)
+    session = _session(tmp_path, repo, baseline)
+    (repo / "tests" / "fixture.root").write_text("tampered\n", encoding="utf-8")
+    service = GitResultService(
+        candidate_policy={"allowed_target_globs": ["src/**"], "frozen_globs": ["tests/**"]}
+    )
+
+    result_sha, audit = service.finalize_implementation(
+        _spec(ExecutionPhase.IMPLEMENTATION, baseline), session
+    )
+
+    assert result_sha == baseline
+    assert audit.commit_failure_reason == "only_forbidden"
+
+
+def test_harness_commit_none_allowed_yields_none_allowed_reason(tmp_path: Path):
+    """Agent edited a file that matches no allowed glob and is not frozen ->
+    'none_allowed'."""
+    repo, baseline = _make_repo(tmp_path)
+    session = _session(tmp_path, repo, baseline)
+    (repo / "docs").mkdir()
+    (repo / "docs" / "notes.md").write_text("out of scope\n", encoding="utf-8")
+    service = GitResultService(
+        candidate_policy={"allowed_target_globs": ["src/**"], "frozen_globs": ["tests/**"]}
+    )
+
+    result_sha, audit = service.finalize_implementation(
+        _spec(ExecutionPhase.IMPLEMENTATION, baseline), session
+    )
+
+    assert result_sha == baseline
+    assert audit.commit_failure_reason == "none_allowed"
+
+
+def test_harness_commit_uses_target_files_when_globs_empty(tmp_path: Path):
+    """When allowed_target_globs is empty but the spec carries per-candidate
+    allowed_target_files, the harness stages exactly those files."""
+    repo, baseline = _make_repo(tmp_path)
+    session = _session(tmp_path, repo, baseline)
+    (repo / "src" / "hot.cc").write_text("int hot() { return 5; }\n", encoding="utf-8")
+    (repo / "src" / "other.cc").write_text("int other() {}\n", encoding="utf-8")
+    # no globs configured; rely on per-candidate target_files
+    service = GitResultService(candidate_policy={})
+
+    result_sha, audit = service.finalize_implementation(
+        _spec(ExecutionPhase.IMPLEMENTATION, baseline, allowed_target_files=("src/hot.cc",)),
+        session,
+    )
+
+    assert result_sha != baseline
+    assert audit.harness_committed_files == ["src/hot.cc"]
+    changed = _git(repo, "diff", "--name-only", baseline, result_sha).splitlines()
+    assert changed == ["src/hot.cc"]

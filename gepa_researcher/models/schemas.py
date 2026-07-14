@@ -71,8 +71,17 @@ class CommitAudit:
     commit_count: int = 0
     frozen_violations: list[str] = field(default_factory=list)
     worktree_status: str = ""
-    fallback_commit_created: bool = False
-    fallback_committed_files: list[str] = field(default_factory=list)
+    # §4.8: the harness (not the agent) owns commit creation. These fields
+    # record whether the harness commit step created a commit and which files
+    # it staged. (Renamed from fallback_* when commit creation was inverted
+    # from a rescue path to the primary path.)
+    harness_commit_created: bool = False
+    harness_committed_files: list[str] = field(default_factory=list)
+    # When the harness could stage nothing, this carries the typed reason:
+    # "empty" (no dirty paths), "only_forbidden" (all dirty paths are frozen/
+    # ignored), "none_allowed" (dirty paths exist but none match allowed
+    # targets/globs). None when a commit WAS created.
+    commit_failure_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

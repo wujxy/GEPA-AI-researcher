@@ -570,68 +570,6 @@ class AgentExecutor:
         host_cwd = Path(host_cwd_value) if host_cwd_value else visible_repo_dir
         execution_mode = str(config.get("_execution_mode", "implement_and_validate"))
         executor_context = _context_view_from_config(config) or build_executor_context(candidate, config, self.run_dir, visible_round_dir, visible_repo_dir, execution_mode)
-        legacy_executor_context = {} if isinstance(executor_context, ContextView) else executor_context
-        prompt = f"""
-You are the EXECUTOR agent in a bounded GEPA-style research loop.
-
-You may inspect files and run commands inside the repository. Your job is to
-execute the proposed candidate under the configured task resources and return
-structured evidence about what happened.
-
-Task goal:
-{config["task"]["goal"]}
-
-{format_config_for_role(config, "executor")}
-
-{format_evidence_policy(config)}
-
-{format_executor_context(legacy_executor_context)}
-
-{evidence_access_policy()}
-
-Constraints:
-- Do not ask the user for help.
-- Do not assume hidden task facts that are not present in resources, prior context, or loop feedback.
-- Runnable envelope guidance:
-  - The user guarantees the declared source path, docs, provided paths, and reference commands are sufficient to run the project.
-  - Prefer the task metric, validation, and reference commands as the known-good build/test/benchmark path before inventing alternatives.
-  - Reference commands are hints/context, not GEPA-enforced steps; adapt them when the repository or candidate requires it.
-  - In Apptainer runs, the project runtime comes from host-runtime passthrough plus provided paths; the image is only a startup shell/agent boundary.
-  - Preserve task-provided environment variables and data/resource paths when measuring or validating; do not silently fall back to older paths from historical docs.
-  - Use the project build system before ad hoc compiler commands. If you must deviate, explain why and mark any affected validation as incomplete.
-  - If a Python test entrypoint fails after sourcing a project environment, try the project/host pytest executable before declaring pytest unavailable.
-  - If a required validation gate is skipped, report the candidate as incomplete rather than fully validated.
-- When a command fails, distinguish infrastructure failure from command-selection failure; report the exact command, cwd, relevant env vars, and stderr excerpt.
-- Keep this execution compact and scoped to the candidate contract.
-- Avoid broad repository exploration unless the candidate contract requires it.
-- You may inspect files, make bounded changes, run validation or benchmark commands,
-  and compare against available baselines when useful for this candidate.
-- Save any scripts or generated artifacts under the working directory above.
-- In implement_and_validate mode, edit only admitted target_files.
-- In implement_and_validate mode, you MUST create a Git commit for the candidate source changes before your final JSON response. The orchestrator reads HEAD as the candidate result revision; uncommitted edits are treated as no implementation.
-- Before committing, run git status --porcelain and git diff --name-only. Stage only admitted target_files with git add -- <target_files>; do not stage build outputs, benchmark logs, fixtures, caches, or other runtime artifacts.
-- Run git commit with a concise candidate-scoped message, then run git rev-parse HEAD and put that SHA in implementation.commit_sha. Also report implementation.committed_files and implementation.git_status_after_commit.
-- If you cannot create the commit, set validation.passed=false, leave implementation.commit_sha=null, and explain the exact git/status failure in errors and diagnostics.
-- In evaluate_only mode, do not edit source files, create commits, switch branches, or change HEAD.
-- Never run git checkout, git switch, or git worktree; the orchestrator owns Git lifecycle.
-- When visual evidence is feasible, follow the candidate's visual evidence plan.
-  Save plot file(s) under the working directory and list them in artifact_paths.
-
-Final delivery contract (mandatory):
-- Your final response MUST be exactly one parseable JSON object matching the schema below.
-- Wrapping the JSON in a ```json code fence is acceptable; any prose, status updates, apologies, commentary, or natural-language wrap-up outside the JSON is forbidden.
-- NEVER finish with natural-language status such as "waiting for results", "still running", "will continue", or "need more time".
-- Do NOT run benchmark/validation/test/build commands in the background. Run them in the foreground and block until they exit, then parse their output before responding.
-- If a command is still running, wait for it to finish unless the configured timeout forces you to stop.
-- If execution is incomplete, blocked, interrupted, or a command produced no metric, you MUST still return the JSON object with validation.passed=false, null metrics, the reason in errors, and the partial state in diagnostics/artifact_paths.
-- Metric evidence must come from fresh foreground execution for this candidate and this phase. If the task metric specifies repeats, run the metric command for the configured repeat count unless the timeout or an explicit command failure prevents it. Do not use historical logs, pre-existing TEMP files, old benchmark outputs, or accumulated prior-candidate results as the primary metric.
-- If you cannot freshly run the required metric repeats, set validation.passed=false, set missing metrics to null, and explain the partial evidence in diagnostics/errors.
-- A partial or failed run is acceptable ONLY if it is reported as JSON.
-- Set validation.passed=true only when all required validation and metric gates actually passed with fresh evidence for this candidate.
-
-Required JSON schema:
-{_EXECUTOR_RESULT_SCHEMA}
-"""
         prompt = PromptAssembler().build_executor_prompt(candidate, config, executor_context)
         client = self._client_for_config(config)
         call_context = AgentCallContext(

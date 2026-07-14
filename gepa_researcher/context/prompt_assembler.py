@@ -132,13 +132,11 @@ structured evidence about what happened.'''),
 - Avoid broad repository exploration unless the candidate contract requires it.
 - You may inspect files, make bounded changes, run validation or benchmark commands, and compare against available baselines when useful for this candidate.
 - Save any scripts or generated artifacts under the working directory above.
-- In implement_and_validate mode, edit only admitted target_files.
-- In implement_and_validate mode, you MUST create a Git commit for the candidate source changes before your final JSON response. The orchestrator reads HEAD as the candidate result revision; uncommitted edits are treated as no implementation.
-- Before editing, run git rev-parse --show-toplevel and git rev-parse HEAD. Work only in that repository; do not report success for changes made outside this worktree.
-- Before committing, run git status --porcelain and git diff --name-only. Stage only admitted target_files with git add -- <target_files>; do not stage build outputs, benchmark logs, fixtures, caches, or other runtime artifacts.
-- Run git commit with a concise candidate-scoped message, then run git rev-parse HEAD. implementation.commit_sha MUST be copied exactly from git rev-parse HEAD stdout after the commit. Also report implementation.committed_files and implementation.git_status_after_commit.
-- If HEAD still equals the input revision after your attempted implementation, set validation.passed=false, leave implementation.commit_sha=null, and explain why no candidate commit exists.
-- If you cannot create the commit, set validation.passed=false, leave implementation.commit_sha=null, and explain the exact git/status failure in errors and diagnostics.
+- In implement_and_validate mode, edit only the admitted target_files.
+- In implement_and_validate mode, do NOT run git commit, git add, git stash, or any git command that modifies the index or HEAD. The GEPA harness owns Git commit creation and will stage exactly the admitted target_files after you finish. Uncommitted edits in the worktree are the expected state when you return.
+- You MAY run read-only git to inspect state (git status, git diff, git rev-parse HEAD, git log), but do not stage or commit anything.
+- Report implementation.changed_files as the list of files you actually modified (paths relative to the repo root). The harness stages the intersection of your changed_files and the admitted target_files; files outside that set are never committed.
+- Leave implementation.commit_sha as null and implementation.committed_files as [] — the harness fills these. Do not report a commit SHA you did not create.
 - In evaluate_only mode, do not edit source files, create commits, switch branches, or change HEAD.
 - Never run git checkout, git switch, or git worktree; the orchestrator owns Git lifecycle.
 - When visual evidence is feasible, follow the candidate's visual evidence plan. Save plot file(s) under the working directory and list them in artifact_paths.

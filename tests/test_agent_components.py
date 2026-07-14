@@ -711,16 +711,18 @@ class AgentComponentsTest(unittest.TestCase):
         self.assertIn("waiting for results", prompt)
         self.assertIn("validation.passed=false", prompt)
         self.assertIn("block until they exit", prompt)
-        self.assertIn("In implement_and_validate mode, you MUST create a Git commit", prompt)
-        self.assertNotIn("commit budget", prompt)
-        self.assertIn("git add --", prompt)
-        self.assertIn("git commit", prompt)
-        self.assertIn("git rev-parse --show-toplevel", prompt)
+        # §4.8: the harness owns commit creation; the agent must NOT commit.
+        self.assertIn("do NOT run git commit, git add, git stash", prompt)
+        self.assertIn("The GEPA harness owns Git commit creation", prompt)
+        self.assertIn("Report implementation.changed_files", prompt)
+        self.assertIn("Leave implementation.commit_sha as null", prompt)
+        # the agent may still run read-only git to inspect state
         self.assertIn("git rev-parse HEAD", prompt)
+        self.assertNotIn("you MUST create a Git commit", prompt)
+        self.assertNotIn("copied exactly from git rev-parse HEAD stdout", prompt)
+        self.assertNotIn("If HEAD still equals the input revision", prompt)
+        self.assertNotIn("If you cannot create the commit", prompt)
         self.assertIn("implementation.commit_sha", prompt)
-        self.assertIn("copied exactly from git rev-parse HEAD stdout", prompt)
-        self.assertIn("If HEAD still equals the input revision", prompt)
-        self.assertIn("If you cannot create the commit", prompt)
         self.assertIn("artifact_paths", prompt)  # schema still present
         self.assertNotIn("Return only a JSON object, no prose outside JSON.", prompt)
 

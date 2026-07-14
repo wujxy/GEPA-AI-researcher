@@ -104,17 +104,16 @@ class SyntheticOmilrecExecutor:
         try:
             time.sleep(0.05)
             if mode == "implement_and_validate":
-                _git(repo, "config", "user.email", "test@example.invalid")
-                _git(repo, "config", "user.name", "GEPA Synthetic")
+                # §4.8: the agent edits files but does NOT commit. The GEPA
+                # harness owns commit creation and will stage exactly the
+                # admitted target_files (OMILRECV2/src/**/*.cc) after the
+                # runner returns. commit_sha is left null (harness-owned).
                 source = repo / "OMILRECV2" / "src" / "hot.cc"
                 source.write_text(
                     source.read_text(encoding="utf-8") + f"// {candidate.candidate_id}\n",
                     encoding="utf-8",
                 )
-                _git(repo, "add", "OMILRECV2/src/hot.cc")
-                _git(repo, "commit", "-m", f"candidate {candidate.candidate_id}")
-                commit_sha = _git(repo, "rev-parse", "HEAD")
-                artifacts = {"commit_sha": commit_sha, "mode": mode}
+                artifacts = {"commit_sha": None, "mode": mode}
             else:
                 assert (repo / "tests" / "fixtures" / "v107_rev1" / "charge_pdf.bin").read_bytes() == b"real fixture bytes\n"
                 (repo / "benchmarks" / "drift.csv").write_text(
@@ -143,6 +142,42 @@ class SyntheticOmilrecExecutor:
         finally:
             with self.lock:
                 self.active -= 1
+
+
+class SyntheticOmilrecDirtyExecutor(SyntheticOmilrecExecutor):
+    """Reproduces test5.log seed_001: the agent edits the right source file
+    AND dirties a tracked benchmark output (benchmarks/speed.csv). Under the
+    old agent-owns-commit design this polluted the candidate revision. Under
+    §4.8 the harness stages only allowed target files, so the committed result
+    must contain only the source change, not the benchmark output."""
+
+    def execute(self, candidate, config):
+        mode = str(config["_execution_mode"])
+        repo = Path(config["_candidate_repo"])
+        if mode == "implement_and_validate":
+            source = repo / "OMILRECV2" / "src" / "hot.cc"
+            source.write_text(
+                source.read_text(encoding="utf-8") + f"// dirty {candidate.candidate_id}\n",
+                encoding="utf-8",
+            )
+            (repo / "benchmarks" / "speed.csv").write_text(
+                f"candidate,ms_per_event\n{candidate.candidate_id},8.0\n", encoding="utf-8"
+            )
+            return Trace(
+                candidate_id=candidate.candidate_id,
+                round_id=candidate.round_id,
+                samples=[
+                    SampleTrace(
+                        sample_id="local_100evt_speed",
+                        input="synthetic input",
+                        output="ok",
+                        expected="no regression",
+                        logs=f"{mode} completed",
+                        artifacts={"commit_sha": None, "mode": mode},
+                    )
+                ],
+            )
+        return super().execute(candidate, config)
 
 
 class SyntheticOmilrecJudger:
@@ -231,3 +266,31 @@ def test_synthetic_omilrec_loop_allows_generated_tracked_eval_outputs(tmp_path: 
     assert '"phase": "feedback_eval"' in execution_rows
     assert '"phase": "pareto_eval"' in execution_rows
     assert "READONLY_EXECUTION_MUTATED_REPO" not in execution_rows
+
+
+def test_synthetic_omilrec_loop_harness_commit_excludes_dirty_benchmark(tmp_path: Path):
+    """§4.8 acceptance at loop scale: when the agent dirties a benchmark output
+    alongside the source (seed_001 reproduction), the harness-owned commit
+    must contain only the source change -- the benchmark output must not leak
+    into the candidate's result revision."""
+    repo, baseline = _make_synthetic_omilrec_repo(tmp_path)
+    run_dir = tmp_path / "run"
+    executor = SyntheticOmilrecDirtyExecutor()
+
+    state = ResearchOrchestrator(
+        _config(run_dir, repo, baseline),
+        tmp_path / "synthetic.task.yaml",
+        components=(SyntheticOmilrecProposer(), executor, SyntheticOmilrecJudger()),
+    ).run()
+
+    assert state.best_candidate_id is not None
+    # The best candidate's result revision must NOT contain benchmarks/speed.csv
+    best_card = None
+    for candidate_id in [state.best_candidate_id]:
+        from gepa_researcher.storage.candidate_store import CandidateStore
+        best_card = CandidateStore(run_dir).get(candidate_id)
+    assert best_card is not None
+    assert best_card.result_revision is not None
+    changed = _git(repo, "diff", "--name-only", baseline, best_card.result_revision).splitlines()
+    assert "OMILRECV2/src/hot.cc" in changed
+    assert "benchmarks/speed.csv" not in changed

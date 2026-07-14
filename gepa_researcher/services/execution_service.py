@@ -5,7 +5,7 @@ from time import perf_counter
 from typing import Any, Protocol
 
 from ..domain.candidate import CandidateCard
-from ..domain.execution import ExecutionFailure, ExecutionPhase, ExecutionRecord, ExecutionSpec
+from ..domain.execution import ExecutionFailure, ExecutionFailureCode, ExecutionPhase, ExecutionRecord, ExecutionSpec
 from ..agents.agent_client import AgentError
 from ..agents.agent_components import AgentProtocolError
 from ..execution.git_result import GitResultService
@@ -75,8 +75,13 @@ class ExecutionService:
                 if session.mode == "git_worktree":
                     result_revision, audit = self.git_result_service.finalize_implementation(spec, session)
                     if audit.commit_count <= 0:
+                        sub_code = _NO_CANDIDATE_COMMIT_SUBCODE.get(
+                            audit.commit_failure_reason,
+                            ExecutionFailureCode.NO_CANDIDATE_COMMIT.value,
+                        )
                         raise NoCandidateCommitError(
                             f"no candidate commit produced: execution_id={spec.execution_id}",
+                            sub_code=sub_code,
                             details=self._no_candidate_commit_details(spec, session, audit, trace),
                         )
                 else:
@@ -106,7 +111,7 @@ class ExecutionService:
                 except Exception as cleanup_exc:
                     if "record" in locals():
                         record.failure = record.failure or ExecutionFailure(
-                            code="SANDBOX_CLEANUP_FAILED",
+                            code=ExecutionFailureCode.SANDBOX_CLEANUP_FAILED,
                             message=str(cleanup_exc),
                             retryable=True,
                         )
@@ -151,7 +156,8 @@ class ExecutionService:
             "commit_count": audit.commit_count,
             "changed_files": list(audit.changed_files),
             "worktree_status": audit.worktree_status,
-            "fallback_commit_created": audit.fallback_commit_created,
+            "harness_commit_created": audit.harness_commit_created,
+            "commit_failure_reason": audit.commit_failure_reason,
         }
         claimed = _claimed_commit_sha(trace)
         if claimed:
@@ -211,8 +217,9 @@ def _metrics_from_trace(trace: Trace) -> dict[str, float]:
 
 
 class NoCandidateCommitError(RuntimeError):
-    def __init__(self, message: str, *, details: dict[str, Any] | None = None):
+    def __init__(self, message: str, *, sub_code: str | None = None, details: dict[str, Any] | None = None):
         super().__init__(message)
+        self.sub_code = sub_code
         self.details = dict(details or {})
 
 
@@ -229,28 +236,39 @@ def _claimed_commit_sha(trace: Trace) -> str | None:
 
 def _failure_from_exception(exc: Exception) -> ExecutionFailure:
     if isinstance(exc, MaterializerError):
-        code = "SANDBOX_PREPARE_FAILED"
+        code = ExecutionFailureCode.SANDBOX_PREPARE_FAILED
         retryable = True
     elif isinstance(exc, RuntimeBackendError):
-        code = "RUNTIME_PREPARE_FAILED"
+        code = ExecutionFailureCode.RUNTIME_PREPARE_FAILED
         retryable = True
     elif isinstance(exc, AgentProtocolError):
-        code = "AGENT_PROTOCOL_INVALID"
+        code = ExecutionFailureCode.AGENT_PROTOCOL_INVALID
         retryable = True
     elif isinstance(exc, AgentError):
-        code = "AGENT_PROCESS_FAILED"
+        code = ExecutionFailureCode.AGENT_PROCESS_FAILED
         retryable = True
     elif isinstance(exc, NoCandidateCommitError):
-        code = "NO_CANDIDATE_COMMIT"
+        # A.4: NoCandidateCommitError carries a sub_code distinguishing the
+        # three failure causes (empty / only_forbidden / none_allowed). Fall
+        # back to the umbrella code if no sub_code was set.
+        sub_code = getattr(exc, "sub_code", None)
+        if sub_code and sub_code in {
+            ExecutionFailureCode.NO_CANDIDATE_COMMIT_EMPTY.value,
+            ExecutionFailureCode.NO_CANDIDATE_COMMIT_ONLY_FORBIDDEN.value,
+            ExecutionFailureCode.NO_CANDIDATE_COMMIT_NONE_ALLOWED.value,
+        }:
+            code = ExecutionFailureCode(sub_code)
+        else:
+            code = ExecutionFailureCode.NO_CANDIDATE_COMMIT
         retryable = False
     elif isinstance(exc, GitResultError) and "read-only execution changed sandbox" in str(exc):
-        code = "READONLY_EXECUTION_MUTATED_REPO"
+        code = ExecutionFailureCode.READONLY_EXECUTION_MUTATED_REPO
         retryable = False
     elif isinstance(exc, GitResultError):
-        code = "COMMIT_FAILED"
+        code = ExecutionFailureCode.COMMIT_FAILED
         retryable = False
     else:
-        code = "AGENT_PROCESS_FAILED"
+        code = ExecutionFailureCode.AGENT_PROCESS_FAILED
         retryable = False
     return ExecutionFailure(
         code=code,
@@ -258,3 +276,14 @@ def _failure_from_exception(exc: Exception) -> ExecutionFailure:
         retryable=retryable,
         details=dict(getattr(exc, "details", {}) or {}),
     )
+
+
+# §4.8 A.4: maps CommitAudit.commit_failure_reason -> typed failure code.
+# `empty`     -> the worktree had no dirty paths at all (agent changed nothing)
+# `only_forbidden` -> all dirty paths were frozen/readonly (nothing allowed)
+# `none_allowed`   -> dirty paths existed but none matched allowed targets/globs
+_NO_CANDIDATE_COMMIT_SUBCODE = {
+    "empty": ExecutionFailureCode.NO_CANDIDATE_COMMIT_EMPTY.value,
+    "only_forbidden": ExecutionFailureCode.NO_CANDIDATE_COMMIT_ONLY_FORBIDDEN.value,
+    "none_allowed": ExecutionFailureCode.NO_CANDIDATE_COMMIT_NONE_ALLOWED.value,
+}

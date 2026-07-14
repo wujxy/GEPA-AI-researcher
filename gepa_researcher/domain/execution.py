@@ -57,6 +57,12 @@ class CapabilityPolicy:
     network_allowed: bool
     allowed_tools: tuple[str, ...] = ()
     forbidden_paths: tuple[str, ...] = ()
+    # §4.8: per-candidate target files (from ProposalIdea.target_files) that
+    # the harness commit step is allowed to stage. Empty means "fall back to
+    # candidate_policy.allowed_target_globs" (global). Admission already
+    # validated these against allowed_target_globs / frozen_globs, so by the
+    # time an ExecutionSpec reaches execution the targets are pre-cleared.
+    allowed_target_files: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -64,6 +70,7 @@ class CapabilityPolicy:
             "network_allowed": self.network_allowed,
             "allowed_tools": list(self.allowed_tools),
             "forbidden_paths": list(self.forbidden_paths),
+            "allowed_target_files": list(self.allowed_target_files),
         }
 
     @classmethod
@@ -73,6 +80,7 @@ class CapabilityPolicy:
             network_allowed=bool(data.get("network_allowed", False)),
             allowed_tools=tuple(map(str, data.get("allowed_tools") or ())),
             forbidden_paths=tuple(map(str, data.get("forbidden_paths") or ())),
+            allowed_target_files=tuple(map(str, data.get("allowed_target_files") or ())),
         )
 
 
@@ -127,22 +135,69 @@ class ExecutionSpec:
         )
 
 
+class ExecutionFailureCode(str, Enum):
+    """Typed execution failure codes.
+
+    ``str, Enum`` so existing ``record.failure.code == "COMMIT_FAILED"``
+    string comparisons keep working unchanged -- the enum member compares
+    equal to its string value. ``to_dict`` stores ``.value`` (str) for
+    backward-compatible serialization; ``from_dict`` rehydrates via the enum
+    and tolerates unknown strings (old stored records) by falling back to a
+    raw str.
+    """
+
+    # v1.x existing (from _failure_from_exception + execution_store)
+    SANDBOX_PREPARE_FAILED = "SANDBOX_PREPARE_FAILED"
+    RUNTIME_PREPARE_FAILED = "RUNTIME_PREPARE_FAILED"
+    AGENT_PROTOCOL_INVALID = "AGENT_PROTOCOL_INVALID"
+    AGENT_PROCESS_FAILED = "AGENT_PROCESS_FAILED"
+    COMMIT_FAILED = "COMMIT_FAILED"
+    READONLY_EXECUTION_MUTATED_REPO = "READONLY_EXECUTION_MUTATED_REPO"
+    SANDBOX_CLEANUP_FAILED = "SANDBOX_CLEANUP_FAILED"
+    RUN_INTERRUPTED = "RUN_INTERRUPTED"
+    # §4.8 split (Part A.4): NoCandidateCommit decomposed into three causes
+    NO_CANDIDATE_COMMIT = "NO_CANDIDATE_COMMIT"
+    NO_CANDIDATE_COMMIT_EMPTY = "NO_CANDIDATE_COMMIT_EMPTY"
+    NO_CANDIDATE_COMMIT_ONLY_FORBIDDEN = "NO_CANDIDATE_COMMIT_ONLY_FORBIDDEN"
+    NO_CANDIDATE_COMMIT_NONE_ALLOWED = "NO_CANDIDATE_COMMIT_NONE_ALLOWED"
+    # v2.0 executor-loop terminal states (docs §6)
+    BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"
+    ENVIRONMENT_BLOCKED = "ENVIRONMENT_BLOCKED"
+    PROPOSAL_INFEASIBLE = "PROPOSAL_INFEASIBLE"
+    SCOPE_VIOLATION = "SCOPE_VIOLATION"
+    NO_PROGRESS = "NO_PROGRESS"
+    # v2.0 role failures (alpha: PLAN_INVALID, beta: CRITIC_ABORTED)
+    PLAN_INVALID = "PLAN_INVALID"
+    CRITIC_ABORTED = "CRITIC_ABORTED"
+
+
 @dataclass
 class ExecutionFailure:
-    code: str
+    code: ExecutionFailureCode | str
     message: str
     retryable: bool = False
     details: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        code = self.code
+        if isinstance(code, ExecutionFailureCode):
+            code = code.value
+        data = asdict(self)
+        data["code"] = code
+        return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "ExecutionFailure | None":
         if not data:
             return None
+        raw_code = str(data["code"])
+        try:
+            code: ExecutionFailureCode | str = ExecutionFailureCode(raw_code)
+        except ValueError:
+            # Tolerate unknown / legacy code strings without crashing.
+            code = raw_code
         return cls(
-            code=str(data["code"]),
+            code=code,
             message=str(data.get("message", "")),
             retryable=bool(data.get("retryable", False)),
             details=dict(data.get("details") or {}),
