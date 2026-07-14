@@ -41,6 +41,14 @@ class RunnerAdapter:
     ) -> Trace:
         candidate = _candidate_from_card(card)
         candidate_config = dict(config)
+        candidate_config["task"] = dict(candidate_config.get("task") or {})
+        candidate_config["task"]["repo_paths"] = [str(runtime_lease.repo_path)]
+        if isinstance(candidate_config.get("contracts"), dict):
+            contracts = dict(candidate_config["contracts"])
+            resources = dict(contracts.get("resources") or {})
+            resources["repo_path"] = str(runtime_lease.repo_path)
+            contracts["resources"] = resources
+            candidate_config["contracts"] = contracts
         candidate_config["_candidate_workspace"] = runtime_lease.artifact_path
         candidate_config["_candidate_repo"] = runtime_lease.repo_path
         candidate_config["_candidate_workspace_host"] = str(session.artifact_path)

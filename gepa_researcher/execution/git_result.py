@@ -153,6 +153,10 @@ def _status_path(line: str) -> str:
 def _matches_glob(path: str, pattern: str) -> bool:
     if fnmatch(path, pattern):
         return True
+    if "/**/" in pattern and fnmatch(path, pattern.replace("/**/", "/")):
+        return True
+    if pattern.startswith("**/") and fnmatch(path, pattern[3:]):
+        return True
     if pattern.endswith("/**") and (path == pattern[:-3].rstrip("/") or path.startswith(pattern[:-3])):
         return True
     return False

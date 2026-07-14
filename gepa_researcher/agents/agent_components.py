@@ -393,16 +393,17 @@ Required JSON schema:
 {_PROPOSER_CANDIDATE_SCHEMA}
 """
         prompt = PromptAssembler().build_proposer_prompt(state, config, proposer_context)
-        result = _run_agent_json(
-            self.client,
+        call_context = AgentCallContext(
+            role="proposer",
+            round_id=state.round_id,
+            phase=str(config.get("_agent_phase", "mutation")),
+            candidate_ids=[f"cand_{state.round_id:03d}"],
+        )
+        result, repair_meta = self._run_with_repair(
             prompt,
-            "proposer",
-            AgentCallContext(
-                role="proposer",
-                round_id=state.round_id,
-                phase=str(config.get("_agent_phase", "mutation")),
-                candidate_ids=[f"cand_{state.round_id:03d}"],
-            ),
+            call_context,
+            config,
+            repair_schema=_PROPOSER_CANDIDATE_SCHEMA,
         )
         data = validate_proposal_payload(result.data)
         candidate_id = f"cand_{state.round_id:03d}"
@@ -427,7 +428,7 @@ Required JSON schema:
             strategy=str(data.get("strategy", "")),
             candidate_class=str(data.get("candidate_class", "")),
             expected_gain=_expected_gain(data),
-            artifacts={"agent_raw": result.text, "eval_phase": config.get("_eval_phase", "pareto"), "sample_ids": config.get("_selected_sample_ids", []), **_call_artifact(result), **data},
+            artifacts={"agent_raw": result.text, "eval_phase": config.get("_eval_phase", "pareto"), "sample_ids": config.get("_selected_sample_ids", []), **_call_artifact(result), **data, **repair_meta},
         )
 
     def propose_batch(self, state: LoopState, config: dict[str, Any]) -> CandidateBatch:
@@ -469,16 +470,17 @@ Required JSON schema:
 """
         prompt = PromptAssembler().build_proposer_prompt(state, config, proposer_context, batch_size=batch_size)
         planned_ids = [f"cand_{state.round_id:03d}_{index:03d}" for index in range(batch_size)]
-        result = _run_agent_json(
-            self.client,
+        call_context = AgentCallContext(
+            role="proposer",
+            round_id=state.round_id,
+            phase=str(config.get("_agent_phase", "mutation")),
+            candidate_ids=planned_ids,
+        )
+        result, repair_meta = self._run_with_repair(
             prompt,
-            "proposer",
-            AgentCallContext(
-                role="proposer",
-                round_id=state.round_id,
-                phase=str(config.get("_agent_phase", "mutation")),
-                candidate_ids=planned_ids,
-            ),
+            call_context,
+            config,
+            repair_schema='{"candidates": [' + _PROPOSER_CANDIDATE_SCHEMA + ']}',
         )
         batch_payload = _require_mapping(result.data, "proposer batch payload")
         items = _require_list(batch_payload.get("candidates"), "candidates")[:batch_size]
@@ -509,10 +511,46 @@ Required JSON schema:
                     strategy=str(data.get("strategy", "")),
                     candidate_class=str(data.get("candidate_class", "")),
                     expected_gain=_expected_gain(data),
-                    artifacts={"agent_raw": result.text, "eval_phase": config.get("_eval_phase", "pareto"), "sample_ids": config.get("_selected_sample_ids", []), **_call_artifact(result), **data},
+                    artifacts={"agent_raw": result.text, "eval_phase": config.get("_eval_phase", "pareto"), "sample_ids": config.get("_selected_sample_ids", []), **_call_artifact(result), **data, **repair_meta},
                 )
             )
         return CandidateBatch(round_id=state.round_id, candidates=candidates)
+
+    def _run_with_repair(
+        self,
+        prompt: str,
+        call_context: AgentCallContext,
+        config: dict[str, Any],
+        *,
+        repair_schema: str,
+    ):
+        repair_retries = int(config.get("proposer", {}).get("repair_retries", 1))
+        try:
+            return _run_agent_json(self.client, prompt, "proposer", call_context), {}
+        except AgentError as exc:
+            if repair_retries <= 0:
+                raise
+            raw_output = str(getattr(exc, "raw_output", None) or exc)[:6000]
+            repair_prompt = self._repair_prompt(raw_output, repair_schema)
+            result = _run_agent_json(self.client, repair_prompt, "proposer", call_context)
+            return result, {"repair_applied": True, "original_raw_output": raw_output}
+
+    def _repair_prompt(self, raw_output: str, schema: str) -> str:
+        return (
+            "You are the PROPOSER agent in a bounded GEPA-style research loop. "
+            "A PREVIOUS proposer attempt returned malformed JSON. Your ONLY job now is to transcribe "
+            "that prior proposal into valid JSON. DO NOT invent new candidates, new strategies, "
+            "new metrics, or new evidence. Preserve the same meaning and candidate count from the raw output "
+            "as closely as possible.\n\n"
+            "Raw malformed output:\n"
+            f"{raw_output}\n\n"
+            "Mandatory output rules:\n"
+            "- Return exactly one parseable JSON object.\n"
+            "- No prose outside JSON.\n"
+            "- Merge accidentally split instruction strings back into executor_contract.instructions.\n"
+            "- The repaired JSON must match this schema:\n"
+            f"{schema}"
+        )
 
 
 class AgentExecutor:

@@ -8,7 +8,7 @@ from gepa_researcher.context.blocks import (
 )
 from gepa_researcher.context.prompt_assembler import PromptAssembler
 from gepa_researcher.context.views import ContextView
-from gepa_researcher.models.schemas import ContextEnvelope, LoopState
+from gepa_researcher.models.schemas import Candidate, ContextEnvelope, LoopState, SampleTrace, Trace
 
 
 def test_prompt_assembler_renders_stable_proposer_prompt():
@@ -267,3 +267,73 @@ def test_prompt_assembler_renders_actionable_artifact_refs():
     assert "artifact_ref=artifact:plot" in prompt
     assert "path=artifacts/execution/plot.png" in prompt
     assert "plot: artifacts/execution/plot.png" in prompt
+
+
+def test_executor_prompt_defines_metric_baseline_contract():
+    candidate = Candidate(
+        candidate_id="cand_001",
+        round_id=1,
+        hypothesis="h",
+        scope="s",
+        proposed_change="c",
+        rationale="r",
+        expected_improvement="faster primary metric",
+        risk="low",
+        prompt_text="prompt",
+        created_at="now",
+        parent_ids=[],
+        target_files=["src/hot.py"],
+    )
+    view = ContextView(
+        role=ContextRole.EXECUTOR,
+        envelope=ContextEnvelope(role="executor", round_id=1, phase="implementation", candidate_id="cand_001"),
+        blocks=[],
+        metadata={},
+    )
+
+    prompt = PromptAssembler().build_executor_prompt(candidate, {"task": {"goal": "improve"}, "runtime": {}, "evidence": {}}, view)
+
+    assert "metrics.baseline" in prompt
+    assert "original configured baseline" in prompt
+    assert "Do not put implementation-phase or previous evaluate_only measurements in metrics.baseline" in prompt
+
+
+def test_judge_prompt_rejects_candidate_phase_metric_as_baseline_regression():
+    candidate = Candidate(
+        candidate_id="cand_001",
+        round_id=1,
+        hypothesis="h",
+        scope="s",
+        proposed_change="c",
+        rationale="r",
+        expected_improvement="faster primary metric",
+        risk="low",
+        prompt_text="prompt",
+        created_at="now",
+        parent_ids=[],
+    )
+    trace = Trace(
+        candidate_id="cand_001",
+        round_id=1,
+        samples=[
+            SampleTrace(
+                sample_id="speed",
+                input="",
+                output="",
+                expected="",
+                logs="",
+                artifacts={"metrics": {"primary": 0.608, "baseline": 0.603, "delta": 0.005}},
+            )
+        ],
+    )
+    view = ContextView(
+        role=ContextRole.JUDGE,
+        envelope=ContextEnvelope(role="judger", round_id=1, phase="pareto", candidate_id="cand_001"),
+        blocks=[],
+        metadata={},
+    )
+
+    prompt = PromptAssembler().build_judge_prompt(candidate, trace, {"task": {"goal": "improve"}}, view)
+
+    assert "Do not treat implementation-phase metrics or earlier same-candidate measurements as the original baseline" in prompt
+    assert "same-candidate remeasurement variance" in prompt

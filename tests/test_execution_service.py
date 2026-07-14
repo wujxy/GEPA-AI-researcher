@@ -347,10 +347,23 @@ def test_runner_adapter_builds_transient_agent_config_without_mutating_card(tmp_
             return Trace(candidate.candidate_id, candidate.round_id, [SampleTrace("task", "in", "out", "expected", "ok")])
 
     executor = RecordingExecutor()
-    trace = RunnerAdapter(executor, tmp_path / "run").run(card, spec, runtime_lease, session, {"task": {"goal": "test"}})
+    controller_repo = tmp_path / "controller"
+    trace = RunnerAdapter(executor, tmp_path / "run").run(
+        card,
+        spec,
+        runtime_lease,
+        session,
+        {
+            "task": {"goal": "test", "repo_paths": [str(controller_repo)]},
+            "contracts": {"resources": {"repo_path": str(controller_repo), "docs": ["README.md"]}},
+        },
+    )
 
     assert trace.candidate_id == card.candidate_id
     assert executor.config["_candidate_repo"] == str(repo)
+    assert executor.config["task"]["repo_paths"] == [str(repo)]
+    assert executor.config["contracts"]["resources"]["repo_path"] == str(repo)
+    assert executor.config["contracts"]["resources"]["docs"] == ["README.md"]
     assert executor.config["_execution_id"] == spec.execution_id
     assert executor.config["_execution_mode"] == "evaluate_only"
     assert executor.config["_context_view"]["role"] == "executor"

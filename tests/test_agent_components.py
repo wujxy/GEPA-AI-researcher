@@ -724,6 +724,46 @@ class AgentComponentsTest(unittest.TestCase):
         self.assertIn("artifact_paths", prompt)  # schema still present
         self.assertNotIn("Return only a JSON object, no prose outside JSON.", prompt)
 
+    def test_proposer_batch_repair_transcribes_after_invalid_json(self):
+        err = AgentError("Agent did not return a parseable JSON object.")
+        err.raw_output = "```json\n{\n  \"candidates\": [{\n    \"hypothesis\": \"h1\",\n    \"scope\": \"s\",\n    \"proposed_change\": \"c\",\n    \"rationale\": \"r\",\n    \"expected_improvement\": \"e\",\n    \"risk\": \"rk\",\n    \"executor_contract\": {\"instructions\": \"step 1\", \"2. Run\"}\n  }]\n}\n```"
+        repaired = type(
+            "Result",
+            (),
+            {
+                "text": "{}",
+                "data": {
+                    "candidates": [
+                        {
+                            "hypothesis": "h1",
+                            "scope": "s",
+                            "proposed_change": "c",
+                            "rationale": "r",
+                            "expected_improvement": "e",
+                            "risk": "rk",
+                            "executor_contract": {"instructions": "step 1\n2. Run"},
+                            "expected_artifacts": [],
+                        }
+                    ]
+                },
+            },
+        )()
+        client = QueuedClient([err, repaired])
+        config = {"task": {"goal": "g"}, "runtime": {}, "evidence": {}, "generation": {"batch_size": 1}, "proposer": {"repair_retries": 1}}
+
+        batch = AgentProposer(client).propose_batch(LoopState(task_name="task"), config)
+
+        self.assertEqual(len(batch.candidates), 1)
+        self.assertEqual(batch.candidates[0].executor_contract["instructions"], "step 1\n2. Run")
+        self.assertEqual(len(client.prompts), 2)
+        repair_prompt = client.prompts[1][1]
+        self.assertIn("PREVIOUS proposer attempt", repair_prompt)
+        self.assertIn("transcribe", repair_prompt)
+        self.assertIn("step 1", repair_prompt)
+        self.assertTrue(batch.candidates[0].artifacts.get("repair_applied"))
+        self.assertIn("2. Run", batch.candidates[0].artifacts.get("original_raw_output", ""))
+
+
     def test_executor_repair_transcribes_after_non_json(self):
         err = AgentError("Agent did not return a parseable JSON object.")
         err.raw_output = "That's just the run-1 header echoed at start. Waiting for the actual ms/evt results."

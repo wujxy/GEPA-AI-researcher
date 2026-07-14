@@ -151,6 +151,7 @@ Final delivery contract (mandatory):
 - If a command is still running, wait for it to finish unless the configured timeout forces you to stop.
 - If execution is incomplete, blocked, interrupted, or a command produced no metric, you MUST still return the JSON object with validation.passed=false, null metrics, the reason in errors, and the partial state in diagnostics/artifact_paths.
 - Metric evidence must come from fresh foreground execution for this candidate and this phase. If the task metric specifies repeats, run the metric command for the configured repeat count unless the timeout or an explicit command failure prevents it. Do not use historical logs, pre-existing TEMP files, old benchmark outputs, or accumulated prior-candidate results as the primary metric.
+- Metric field semantics are strict: metrics.primary is this phase's fresh candidate metric. metrics.baseline means the original configured baseline measured on the same task/runtime, not a previous measurement of this same candidate. Do not put implementation-phase or previous evaluate_only measurements in metrics.baseline; leave metrics.baseline and metrics.delta null unless you have explicit original configured baseline evidence.
 - If you cannot freshly run the required metric repeats, set validation.passed=false, set missing metrics to null, and explain the partial evidence in diagnostics/errors.
 - A partial or failed run is acceptable ONLY if it is reported as JSON.
 - Set validation.passed=true only when all required validation and metric gates actually passed with fresh evidence for this candidate.
@@ -409,6 +410,7 @@ _JUDGE_RUBRIC = '''Rubric:
 - 0.00-0.20: failed / invalid / unsafe. No implementation, invalid hypothesis, duplicate with no new value, broken build, failed correctness gates, unsafe change, or unusable output.
 - Reward clear execution evidence, relevant metrics, validation checks, diagnostics, and honest uncertainty. Reward artifacts that make the result or failure mode inspectable.
 - Penalize unsupported claims, missing metrics, regressions, overfitting to feedback, duplicate work, or failure to follow the candidate contract.
+- Metric baseline semantics are strict. Do not treat implementation-phase metrics or earlier same-candidate measurements as the original baseline. A small difference between implementation and pareto/evaluate_only measurements for the same candidate is same-candidate remeasurement variance unless the trace provides explicit original configured baseline evidence.
 - Evidence caps are mandatory upper bounds. Apply the lowest applicable cap before choosing the final score:
   - Cap at 0.75 if the primary metric was not freshly measured in this execution phase, uses historical logs/pre-existing files, or did not run the configured repeat count.
   - Cap at 0.70 if validation gates are incomplete, skipped, or only asserted by reasoning instead of command evidence.

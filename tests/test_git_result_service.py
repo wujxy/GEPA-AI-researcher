@@ -133,3 +133,21 @@ def test_readonly_guard_ignores_untracked_runtime_debris(tmp_path: Path):
     (repo / "build.log").write_text("runtime debris\n", encoding="utf-8")
 
     service.assert_readonly_unchanged(_spec(ExecutionPhase.FEEDBACK_EVAL, baseline), session, before)
+
+
+def test_fallback_commit_matches_globstar_files_directly_under_package(tmp_path: Path):
+    repo, baseline = _make_repo(tmp_path)
+    (repo / "tinyalgo").mkdir()
+    (repo / "tinyalgo" / "paircount.py").write_text("def count():\n    return 1\n", encoding="utf-8")
+    _git(repo, "add", "tinyalgo/paircount.py")
+    _git(repo, "commit", "-m", "add tiny package")
+    baseline = _git(repo, "rev-parse", "HEAD")
+    session = _session(tmp_path, repo, baseline)
+    (repo / "tinyalgo" / "paircount.py").write_text("def count():\n    return 2\n", encoding="utf-8")
+    service = GitResultService(candidate_policy={"allowed_target_globs": ["tinyalgo/**/*.py"]})
+
+    result_sha, audit = service.finalize_implementation(_spec(ExecutionPhase.IMPLEMENTATION, baseline), session)
+
+    assert result_sha != baseline
+    assert audit.fallback_commit_created is True
+    assert audit.fallback_committed_files == ["tinyalgo/paircount.py"]
