@@ -294,7 +294,7 @@ def validate_judgment_payload(data: Any) -> dict[str, Any]:
 # Shared by the executor's normal and repair prompts so the two cannot drift.
 _EXECUTOR_RESULT_SCHEMA = """{
   "summary": "what you executed",
-  "implementation": {"changed_files": [], "commands_run": [], "notes": ""},
+  "implementation": {"changed_files": [], "commands_run": [], "commit_sha": null, "committed_files": [], "git_status_after_commit": "", "notes": ""},
   "metrics": {"primary": null, "baseline": null, "delta": null},
   "validation": {"passed": false, "checks": [], "regressions": []},
   "diagnostics": ["diagnostic or failure finding"],
@@ -538,7 +538,11 @@ Constraints:
 - You may inspect files, make bounded changes, run validation or benchmark commands,
   and compare against available baselines when useful for this candidate.
 - Save any scripts or generated artifacts under the working directory above.
-- In implement_and_validate mode, edit only admitted target_files and create no more than the configured commit budget.
+- In implement_and_validate mode, edit only admitted target_files.
+- In implement_and_validate mode, you MUST create a Git commit for the candidate source changes before your final JSON response. The orchestrator reads HEAD as the candidate result revision; uncommitted edits are treated as no implementation.
+- Before committing, run git status --porcelain and git diff --name-only. Stage only admitted target_files with git add -- <target_files>; do not stage build outputs, benchmark logs, fixtures, caches, or other runtime artifacts.
+- Run git commit with a concise candidate-scoped message, then run git rev-parse HEAD and put that SHA in implementation.commit_sha. Also report implementation.committed_files and implementation.git_status_after_commit.
+- If you cannot create the commit, set validation.passed=false, leave implementation.commit_sha=null, and explain the exact git/status failure in errors and diagnostics.
 - In evaluate_only mode, do not edit source files, create commits, switch branches, or change HEAD.
 - Never run git checkout, git switch, or git worktree; the orchestrator owns Git lifecycle.
 - When visual evidence is feasible, follow the candidate's visual evidence plan.

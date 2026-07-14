@@ -49,7 +49,6 @@ safety:
     - gepa_researcher/**
     - tests/**
   max_files_per_candidate: 3
-  max_commits_per_candidate: 1
 
 loop:
   max_rounds: 4

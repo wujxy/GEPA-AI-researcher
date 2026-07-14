@@ -78,7 +78,7 @@ def test_finalize_records_result_revision_and_frozen_violation(tmp_path: Path):
     (repo / "tests" / "fixture.root").write_text("tampered\n", encoding="utf-8")
     _git(repo, "add", "tests/fixture.root")
     _git(repo, "commit", "-m", "candidate")
-    service = GitResultService(candidate_policy={"frozen_globs": ["tests/**"], "max_commits": 1})
+    service = GitResultService(candidate_policy={"frozen_globs": ["tests/**"]})
 
     result_sha, audit = service.finalize_implementation(_spec(ExecutionPhase.IMPLEMENTATION, baseline), session)
 

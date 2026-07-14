@@ -518,6 +518,13 @@ class AgentComponentsTest(unittest.TestCase):
         self.assertIn("waiting for results", prompt)
         self.assertIn("validation.passed=false", prompt)
         self.assertIn("block until they exit", prompt)
+        self.assertIn("In implement_and_validate mode, you MUST create a Git commit", prompt)
+        self.assertNotIn("commit budget", prompt)
+        self.assertIn("git add --", prompt)
+        self.assertIn("git commit", prompt)
+        self.assertIn("git rev-parse HEAD", prompt)
+        self.assertIn("implementation.commit_sha", prompt)
+        self.assertIn("If you cannot create the commit", prompt)
         self.assertIn("artifact_paths", prompt)  # schema still present
         self.assertNotIn("Return only a JSON object, no prose outside JSON.", prompt)
 

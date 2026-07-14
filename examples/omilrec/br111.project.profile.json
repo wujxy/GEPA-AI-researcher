@@ -96,7 +96,6 @@
       ".gitattributes",
       "benchmarks/*.md"
     ],
-    "max_files_per_candidate": 3,
-    "max_commits_per_candidate": 1
+    "max_files_per_candidate": 3
   }
 }

@@ -90,7 +90,6 @@ class ConfigSystemTest(unittest.TestCase):
                 "editable_paths": ["src/**"],
                 "frozen_paths": ["tests/**"],
                 "max_files_per_candidate": 4,
-                "max_commits_per_candidate": 2,
             },
         }
 
@@ -119,7 +118,6 @@ class ConfigSystemTest(unittest.TestCase):
                 "editable_paths": ["src/example.py"],
                 "frozen_paths": ["docs/**"],
                 "max_files_per_candidate": 2,
-                "max_commits_per_candidate": 1,
             },
             "loop": {"max_rounds": 1, "patience": 1, "candidates_per_round": 3},
         }
@@ -163,10 +161,21 @@ class ConfigSystemTest(unittest.TestCase):
             self.assertEqual(config["executor"]["max_workers"], 3)
             self.assertEqual(config["candidate_policy"]["allowed_target_globs"], ["src/example.py"])
             self.assertEqual(config["candidate_policy"]["frozen_globs"], ["tests/**", "docs/**"])
-            self.assertEqual(config["candidate_policy"]["max_commits"], 1)
+            self.assertNotIn("max_commits", config["candidate_policy"])
             self.assertTrue(Path(config["task"]["data_files"][0]).is_absolute())
             self.assertTrue(Path(config["context"]["paths"][0]).is_absolute())
             self.assertNotIn("lifecycle", config.get("execution", {}))
+
+    def test_max_commits_per_candidate_is_not_a_canonical_safety_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_path, _ = self._write_fixture(root)
+            task = yaml.safe_load(task_path.read_text(encoding="utf-8"))
+            task.setdefault("safety", {})["max_commits_per_candidate"] = 1
+            task_path.write_text(yaml.safe_dump(task, sort_keys=False), encoding="utf-8")
+
+            with self.assertRaisesRegex(ConfigError, "safety.max_commits_per_candidate"):
+                load_and_resolve(task_path)
 
     def test_max_parallel_candidates_is_not_capped_by_candidates_per_round(self):
         with tempfile.TemporaryDirectory() as tmp:

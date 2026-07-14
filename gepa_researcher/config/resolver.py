@@ -230,7 +230,6 @@ def _resolve_task(raw_task: dict[str, Any], task_path: Path) -> dict[str, Any]:
             "allowed_target_globs": list(safety.get("editable_paths") or []),
             "frozen_globs": list(safety.get("frozen_paths") or []),
             "max_target_files": int(safety.get("max_files_per_candidate", 1_000_000)),
-            "max_commits": int(safety.get("max_commits_per_candidate", 1)),
         }
     return resolved
 
@@ -448,10 +447,12 @@ def _merge_safety(profile: dict[str, Any], task: dict[str, Any]) -> dict[str, An
         editable = task_editable or profile_editable
     frozen = list(dict.fromkeys(list(profile.get("frozen_paths") or []) + list(task.get("frozen_paths") or [])))
     result: dict[str, Any] = {"editable_paths": editable, "frozen_paths": frozen}
-    for key in ("max_files_per_candidate", "max_commits_per_candidate"):
-        values = [int(section[key]) for section in (profile, task) if section.get(key) is not None]
-        if values:
-            result[key] = min(values)
+    if any(section.get("max_files_per_candidate") is not None for section in (profile, task)):
+        result["max_files_per_candidate"] = min(
+            int(section["max_files_per_candidate"])
+            for section in (profile, task)
+            if section.get("max_files_per_candidate") is not None
+        )
     return {key: value for key, value in result.items() if value not in (None, [], {})}
 
 
@@ -464,11 +465,14 @@ def _within(pattern: str, ceilings: list[str]) -> bool:
 
 
 def _validate_safety(safety: dict[str, Any], path: str) -> None:
+    allowed = {"editable_paths", "frozen_paths", "max_files_per_candidate"}
+    unknown = sorted(set(safety) - allowed)
+    if unknown:
+        raise ConfigError(f"{path}.{unknown[0]}: unknown safety key")
     _string_list(safety.get("editable_paths", []), f"{path}.editable_paths")
     _string_list(safety.get("frozen_paths", []), f"{path}.frozen_paths")
-    for name in ("max_files_per_candidate", "max_commits_per_candidate"):
-        if name in safety:
-            _positive_int(safety[name], f"{path}.{name}")
+    if "max_files_per_candidate" in safety:
+        _positive_int(safety["max_files_per_candidate"], f"{path}.max_files_per_candidate")
 
 
 def _resolve_git_ref(repo: Path, ref: str) -> str:

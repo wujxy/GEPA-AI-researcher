@@ -48,7 +48,7 @@ def _git_config(tmp_path: Path, *, max_rounds: int) -> tuple[dict, Path, str]:
         "baseline_ref": baseline,
         "branch_prefix": "gepa/test",
     }
-    config["candidate_policy"] = {"max_commits": 1, "frozen_globs": ["tests/**"]}
+    config["candidate_policy"] = {"frozen_globs": ["tests/**"]}
     return config, repo, baseline
 
 
