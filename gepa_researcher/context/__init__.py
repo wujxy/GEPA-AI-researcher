@@ -8,6 +8,7 @@ from .blocks import (
     SourceRef,
 )
 from .plane import GlobalContextPlane
+from .prompt_assembler import PromptAssembler, PromptSection
 from .views import ContextView, ContextViewBuilder
 
 __all__ = [
@@ -19,6 +20,8 @@ __all__ = [
     "EntityRef",
     "SourceRef",
     "GlobalContextPlane",
+    "PromptAssembler",
+    "PromptSection",
     "ContextView",
     "ContextViewBuilder",
 ]

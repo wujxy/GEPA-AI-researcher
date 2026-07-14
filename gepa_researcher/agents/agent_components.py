@@ -7,6 +7,8 @@ from typing import Any
 
 from .agent_client import AgentError, ClaudeCodeClient
 from ..config.contracts import format_role_contract
+from ..context.prompt_assembler import PromptAssembler
+from ..context.views import ContextView
 from ..loop.context_views import (
     build_executor_context,
     build_judger_context,
@@ -335,7 +337,8 @@ class AgentProposer:
         self.client = client
 
     def propose(self, state: LoopState, config: dict[str, Any]) -> Candidate:
-        proposer_context = build_proposer_context(state, config)
+        proposer_context = config.get("_context_view") if isinstance(config.get("_context_view"), ContextView) else build_proposer_context(state, config)
+        legacy_proposer_context = {} if isinstance(proposer_context, ContextView) else proposer_context
         prompt = f"""
 You are the PROPOSER agent in a bounded GEPA-style research loop.
 
@@ -346,7 +349,7 @@ Task goal:
 
 {format_evidence_policy(config)}
 
-{format_proposer_context(proposer_context)}
+{format_proposer_context(legacy_proposer_context)}
 
 {evidence_access_policy()}
 
@@ -365,6 +368,7 @@ Important constraints:
 Required JSON schema:
 {_PROPOSER_CANDIDATE_SCHEMA}
 """
+        prompt = PromptAssembler().build_proposer_prompt(state, config, proposer_context)
         result = _run_agent_json(
             self.client,
             prompt,
@@ -404,7 +408,8 @@ Required JSON schema:
 
     def propose_batch(self, state: LoopState, config: dict[str, Any]) -> CandidateBatch:
         batch_size = int(config.get("generation", {}).get("batch_size", 10))
-        proposer_context = build_proposer_context(state, config)
+        proposer_context = config.get("_context_view") if isinstance(config.get("_context_view"), ContextView) else build_proposer_context(state, config)
+        legacy_proposer_context = {} if isinstance(proposer_context, ContextView) else proposer_context
         prompt = f"""
 You are the PROPOSER agent in a bounded GEPA-style research loop.
 
@@ -415,7 +420,7 @@ Task goal:
 
 {format_evidence_policy(config)}
 
-{format_proposer_context(proposer_context)}
+{format_proposer_context(legacy_proposer_context)}
 
 {evidence_access_policy()}
 
@@ -438,6 +443,7 @@ Required JSON schema:
   ]
 }}
 """
+        prompt = PromptAssembler().build_proposer_prompt(state, config, proposer_context, batch_size=batch_size)
         planned_ids = [f"cand_{state.round_id:03d}_{index:03d}" for index in range(batch_size)]
         result = _run_agent_json(
             self.client,
@@ -501,7 +507,8 @@ class AgentExecutor:
         host_cwd_value = config.get("_executor_host_cwd") or config.get("_candidate_repo_host")
         host_cwd = Path(host_cwd_value) if host_cwd_value else visible_repo_dir
         execution_mode = str(config.get("_execution_mode", "implement_and_validate"))
-        executor_context = build_executor_context(candidate, config, self.run_dir, visible_round_dir, visible_repo_dir, execution_mode)
+        executor_context = config.get("_context_view") if isinstance(config.get("_context_view"), ContextView) else build_executor_context(candidate, config, self.run_dir, visible_round_dir, visible_repo_dir, execution_mode)
+        legacy_executor_context = {} if isinstance(executor_context, ContextView) else executor_context
         prompt = f"""
 You are the EXECUTOR agent in a bounded GEPA-style research loop.
 
@@ -516,7 +523,7 @@ Task goal:
 
 {format_evidence_policy(config)}
 
-{format_executor_context(executor_context)}
+{format_executor_context(legacy_executor_context)}
 
 {evidence_access_policy()}
 
@@ -563,6 +570,7 @@ Final delivery contract (mandatory):
 Required JSON schema:
 {_EXECUTOR_RESULT_SCHEMA}
 """
+        prompt = PromptAssembler().build_executor_prompt(candidate, config, executor_context)
         client = self._client_for_config(config)
         call_context = AgentCallContext(
             role="executor",
@@ -713,7 +721,8 @@ class AgentJudger:
         self.client = client
 
     def judge(self, candidate: Candidate, trace: Trace, config: dict[str, Any]) -> Judgment:
-        judger_context = build_judger_context(candidate, trace, config)
+        judger_context = config.get("_context_view") if isinstance(config.get("_context_view"), ContextView) else build_judger_context(candidate, trace, config)
+        legacy_judger_context = {} if isinstance(judger_context, ContextView) else judger_context
         call_context = AgentCallContext(
             role="judger",
             round_id=candidate.round_id,
@@ -733,7 +742,7 @@ Task goal:
 
 {format_config_for_role(config, "judger")}
 
-{format_judger_context(judger_context)}
+{format_judger_context(legacy_judger_context)}
 
 {evidence_access_policy()}
 
@@ -777,6 +786,7 @@ Required JSON schema:
   "confidence": "low|medium|high"
 }}
 """
+        prompt = PromptAssembler().build_judge_prompt(candidate, trace, config, judger_context)
         repair_meta: dict[str, Any] = {}
         try:
             result = _run_agent_json(self.client, prompt, "judger", call_context)
@@ -923,4 +933,3 @@ JSON object.
             confidence="low",
             artifacts=artifacts,
         )
-

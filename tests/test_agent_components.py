@@ -7,8 +7,10 @@ from pathlib import Path
 
 from gepa_researcher.agents.agent_client import AgentError, ClaudeCodeClient
 from gepa_researcher.agents.agent_components import AgentExecutor, AgentJudger, AgentProposer, AgentProtocolError
+from gepa_researcher.context.blocks import ContextBlock, ContextBlockKind, ContextRole, ContextVisibility, SourceRef
+from gepa_researcher.context.views import ContextView
 from gepa_researcher.loop.context_views import build_executor_context, build_judger_context, build_proposer_context
-from gepa_researcher.models.schemas import Candidate, LoopState, SampleTrace, Trace
+from gepa_researcher.models.schemas import Candidate, ContextEnvelope, LoopState, SampleTrace, Trace
 
 
 class CapturingClient:
@@ -69,6 +71,42 @@ def _make_candidate(candidate_id: str = "cand_000") -> Candidate:
 
 
 class AgentComponentsTest(unittest.TestCase):
+    def test_proposer_uses_context_view_prompt_assembler(self):
+        client = CapturingClient(
+            {
+                "hypothesis": "h",
+                "scope": "task_system",
+                "proposed_change": "c",
+                "rationale": "r",
+                "expected_improvement": "e",
+                "risk": "rk",
+            }
+        )
+        view = ContextView(
+            role=ContextRole.PROPOSER,
+            envelope=ContextEnvelope(role="proposer", round_id=0, phase="mutation", run_id="run-1"),
+            blocks=[
+                ContextBlock(
+                    block_id="candidate:cand_001",
+                    kind=ContextBlockKind.CANDIDATE_FACT,
+                    title="Parent",
+                    summary="parent summary",
+                    inline_content={"candidate_id": "cand_001"},
+                    source_refs=[SourceRef(source_type="candidate", source_id="cand_001")],
+                    entity_refs=[],
+                    visibility=ContextVisibility.AGENT,
+                    role_scope=[ContextRole.PROPOSER],
+                )
+            ],
+            metadata={},
+        )
+
+        AgentProposer(client).propose(LoopState(task_name="task"), {"task": {"goal": "g"}, "runtime": {}, "evidence": {}, "_context_view": view})
+
+        prompt = client.prompts[0][1]
+        self.assertIn("Context envelope", prompt)
+        self.assertIn("sources=[candidate:cand_001]", prompt)
+
     def test_role_contexts_include_hard_context_envelope(self):
         candidate = _make_candidate("cand_env")
         state = LoopState(task_name="task", round_id=2)
