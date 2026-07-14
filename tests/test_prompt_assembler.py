@@ -57,3 +57,33 @@ def test_prompt_assembler_renders_stable_proposer_prompt():
         view,
         batch_size=1,
     )
+
+
+def test_prompt_trimming_keeps_mandatory_blocks_and_uses_refs_for_overflow():
+    blocks = [
+        ContextBlock(
+            block_id=f"candidate:cand_{i:03d}",
+            kind=ContextBlockKind.CANDIDATE_FACT,
+            title=f"Candidate {i}",
+            summary=f"summary {i}",
+            inline_content={"candidate_id": f"cand_{i:03d}", "details": "x" * 200},
+            source_refs=[SourceRef(source_type="candidate", source_id=f"cand_{i:03d}")],
+            entity_refs=[],
+            visibility=ContextVisibility.AGENT,
+            role_scope=[ContextRole.PROPOSER],
+        )
+        for i in range(5)
+    ]
+    view = ContextView(
+        role=ContextRole.PROPOSER,
+        envelope=ContextEnvelope(role="proposer", round_id=1, phase="mutation"),
+        blocks=blocks,
+        metadata={},
+    )
+
+    prompt = PromptAssembler(max_prompt_blocks=2).render_context_blocks(view)
+
+    assert "summary 0" in prompt
+    assert "summary 1" in prompt
+    assert "candidate:cand_004" in prompt
+    assert "omitted_context_refs" in prompt
