@@ -107,6 +107,43 @@ class AgentComponentsTest(unittest.TestCase):
         self.assertIn("Context envelope", prompt)
         self.assertIn("sources=[candidate:cand_001]", prompt)
 
+    def test_proposer_batch_uses_serialized_context_view_parent_ids(self):
+        client = CapturingClient(
+            {
+                "candidates": [
+                    {
+                        "hypothesis": "h",
+                        "scope": "task_system",
+                        "proposed_change": "c",
+                        "rationale": "r",
+                        "expected_improvement": "e",
+                        "risk": "rk",
+                    }
+                ]
+            }
+        )
+        view = ContextView(
+            role=ContextRole.PROPOSER,
+            envelope=ContextEnvelope(role="proposer", round_id=1, phase="mutation"),
+            blocks=[],
+            metadata={"parent_ids": ["context-parent"]},
+        ).to_dict()
+
+        batch = AgentProposer(client).propose_batch(
+            LoopState(task_name="task", round_id=1),
+            {
+                "generation": {"batch_size": 1},
+                "task": {"goal": "g"},
+                "runtime": {},
+                "evidence": {},
+                "_context_view": view,
+                "_gepa_context": {"pareto_frontier": {"parent_ids": ["legacy-parent"]}},
+            },
+        )
+
+        self.assertEqual(batch.candidates[0].parent_ids, ["context-parent"])
+        self.assertIn("Context envelope", client.prompts[0][1])
+
     def test_role_contexts_include_hard_context_envelope(self):
         candidate = _make_candidate("cand_env")
         state = LoopState(task_name="task", round_id=2)

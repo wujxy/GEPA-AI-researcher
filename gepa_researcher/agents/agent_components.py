@@ -8,6 +8,7 @@ from typing import Any
 from .agent_client import AgentError, ClaudeCodeClient
 from ..config.contracts import format_role_contract
 from ..context.prompt_assembler import PromptAssembler
+from ..context.blocks import ContextBlock, ContextRole
 from ..context.views import ContextView
 from ..loop.context_views import (
     build_executor_context,
@@ -16,7 +17,7 @@ from ..loop.context_views import (
     candidate_for_executor,
     evidence_access_policy,
 )
-from ..models.schemas import AgentCallContext, Candidate, CandidateBatch, Judgment, LoopState, SampleTrace, Trace
+from ..models.schemas import AgentCallContext, Candidate, CandidateBatch, ContextEnvelope, Judgment, LoopState, SampleTrace, Trace
 
 
 class AgentProtocolError(ValueError):
@@ -332,12 +333,35 @@ _PROPOSER_FINAL_CONTRACT = """Final delivery contract (mandatory):
 - Do not ask for more data and do not emit a natural-language summary."""
 
 
+def _proposer_context(state: LoopState, config: dict[str, Any]) -> ContextView | dict[str, Any]:
+    context_view = config.get("_context_view")
+    if isinstance(context_view, ContextView):
+        return context_view
+    if isinstance(context_view, dict) and {"role", "envelope", "blocks"} <= context_view.keys():
+        envelope = ContextEnvelope(**dict(context_view["envelope"]))
+        return ContextView(
+            role=ContextRole(str(context_view["role"])),
+            envelope=envelope,
+            blocks=[ContextBlock.from_dict(dict(block)) for block in context_view["blocks"]],
+            metadata=dict(context_view.get("metadata") or {}),
+        )
+    return build_proposer_context(state, config)
+
+
+def _proposer_parent_ids(proposer_context: ContextView | dict[str, Any], config: dict[str, Any]) -> list[str]:
+    metadata = proposer_context.metadata if isinstance(proposer_context, ContextView) else proposer_context.get("metadata") or {}
+    parent_ids = metadata.get("parent_ids")
+    if parent_ids is not None:
+        return list(parent_ids)
+    return list((config.get("_gepa_context") or {}).get("pareto_frontier", {}).get("parent_ids", []))
+
+
 class AgentProposer:
     def __init__(self, client: ClaudeCodeClient):
         self.client = client
 
     def propose(self, state: LoopState, config: dict[str, Any]) -> Candidate:
-        proposer_context = config.get("_context_view") if isinstance(config.get("_context_view"), ContextView) else build_proposer_context(state, config)
+        proposer_context = _proposer_context(state, config)
         legacy_proposer_context = {} if isinstance(proposer_context, ContextView) else proposer_context
         prompt = f"""
 You are the PROPOSER agent in a bounded GEPA-style research loop.
@@ -394,7 +418,7 @@ Required JSON schema:
             risk=str(data.get("risk", "")),
             prompt_text=prompt_text,
             created_at=datetime.now(timezone.utc).isoformat(),
-            parent_ids=list((config.get("_gepa_context") or {}).get("pareto_frontier", {}).get("parent_ids", [])),
+            parent_ids=_proposer_parent_ids(proposer_context, config),
             executor_contract=dict(data.get("executor_contract", {})),
             expected_artifacts=list(data.get("expected_artifacts", [])),
             mutation_note=str(data.get("mutation_note", "")),
@@ -408,7 +432,7 @@ Required JSON schema:
 
     def propose_batch(self, state: LoopState, config: dict[str, Any]) -> CandidateBatch:
         batch_size = int(config.get("generation", {}).get("batch_size", 10))
-        proposer_context = config.get("_context_view") if isinstance(config.get("_context_view"), ContextView) else build_proposer_context(state, config)
+        proposer_context = _proposer_context(state, config)
         legacy_proposer_context = {} if isinstance(proposer_context, ContextView) else proposer_context
         prompt = f"""
 You are the PROPOSER agent in a bounded GEPA-style research loop.
@@ -458,7 +482,7 @@ Required JSON schema:
         )
         batch_payload = _require_mapping(result.data, "proposer batch payload")
         items = _require_list(batch_payload.get("candidates"), "candidates")[:batch_size]
-        parent_ids = list((config.get("_gepa_context") or {}).get("pareto_frontier", {}).get("parent_ids", []))
+        parent_ids = _proposer_parent_ids(proposer_context, config)
         candidates = []
         for index, data in enumerate(items):
             data = validate_proposal_payload(data)

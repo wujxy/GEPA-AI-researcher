@@ -35,7 +35,7 @@ from .loop.gate import GEPAGate
 from .storage.io_utils import append_jsonl, write_json
 from .loop.pareto import ParetoSelector
 from .storage.pool import CandidatePool
-from .loop.runtime import config_for_eval, parent_trace_artifacts, recent_trace_summaries, resolve_dataset_split, select_feedback_minibatch
+from .loop.runtime import config_for_eval, resolve_dataset_split, select_feedback_minibatch
 from .models.schemas import Candidate, CandidateBatch, GateDecision, GenerationDecision, Judgment, JudgmentBatch, LoopState, ParetoFrontier, ScoreMatrix, Trace, TraceBatch
 from .loop.score_matrix import ScoreMatrixBuilder
 from .services.candidate_scheduler import CandidateScheduler
@@ -46,6 +46,7 @@ from .storage.execution_store import ExecutionStore
 from .storage.event_store import EventStore
 from .storage.store import RunStore
 from .context.plane import GlobalContextPlane
+from .context.views import ContextViewBuilder
 from .storage.usage import UsageTracker, format_round_usage, format_run_usage
 from .execution.workspace import WorkspaceManager
 
@@ -429,8 +430,14 @@ class ResearchOrchestrator:
 
         self._log_block(format_phase_header(round_id, int(self.config["budget"]["max_rounds"]), "proposer mutation"))
         self._log("proposer mutation started")
-        proposal_config = self._config_with_gepa_context(state, pool, active_matrix, frontier, parents)
+        proposal_config = deepcopy(self.config)
+        proposal_config["_prior_context"] = self.prior_context
         proposal_config["_agent_phase"] = "mutation"
+        proposal_config["_context_view"] = (
+            ContextViewBuilder(self.context_plane)
+            .for_proposer(state, parent_ids=list(frontier.parent_ids), frontier=frontier)
+            .to_dict()
+        )
         candidate_batch = self.proposer.propose_batch(state, proposal_config)
         self._attach_parent_context(candidate_batch.candidates, parents, round_id)
         admissions, admitted_candidates = self._admit_candidates(candidate_batch.candidates, pool)
@@ -694,41 +701,6 @@ class ResearchOrchestrator:
         clone = deepcopy(candidate)
         clone.round_id = round_id
         return clone
-
-    def _config_with_gepa_context(
-        self,
-        state: LoopState,
-        pool: CandidatePool,
-        matrix: ScoreMatrix,
-        frontier: ParetoFrontier,
-        parents: list[Candidate],
-    ) -> dict[str, Any]:
-        config = deepcopy(self.config)
-        config["_prior_context"] = self.prior_context
-        config["_gepa_context"] = {
-            "state": state.to_dict(),
-            "candidate_pool": pool.snapshot().to_dict(),
-            "score_matrix": matrix.to_dict(),
-            "pareto_frontier": frontier.to_dict(),
-            "parents": [parent.to_dict() for parent in parents],
-            "parent_traces": parent_trace_artifacts(self.run_dir, [parent.candidate_id for parent in parents]),
-            "parent_executions": {
-                parent.candidate_id: [
-                    record.to_dict()
-                    for record in self.execution_store.list_for_candidate(parent.candidate_id)
-                ]
-                for parent in parents
-            },
-            "parent_candidate_cards": {
-                parent.candidate_id: card.to_dict()
-                for parent in parents
-                if (card := self.candidate_store.get(parent.candidate_id)) is not None
-            },
-            "recent_feedback": self._recent_feedback(state),
-            "recent_traces": recent_trace_summaries(self.run_dir),
-            "dataset_split": self.dataset_split.to_dict(),
-        }
-        return config
 
     def _attach_parent_context(self, candidates: list[Candidate], parents: list[Candidate], round_id: int) -> None:
         parent_ids = [parent.candidate_id for parent in parents]

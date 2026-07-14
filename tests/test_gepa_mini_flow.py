@@ -82,6 +82,33 @@ class ScoreByCandidateJudger:
         )
 
 
+class RecordingProposerClient:
+    def __init__(self):
+        self.prompts = []
+
+    def run_json(self, prompt, label="agent"):
+        self.prompts.append((label, prompt))
+        return type(
+            "Result",
+            (),
+            {
+                "text": "{}",
+                "data": {
+                    "candidates": [
+                        {
+                            "hypothesis": "h",
+                            "scope": "task_system",
+                            "proposed_change": "c",
+                            "rationale": "r",
+                            "expected_improvement": "e",
+                            "risk": "rk",
+                        }
+                    ]
+                },
+            },
+        )()
+
+
 class GEPAMiniFlowTest(unittest.TestCase):
     def _candidate(self, candidate_id="cand_000_000", round_id=0, parent_ids=None):
         return Candidate(
@@ -337,6 +364,25 @@ class GEPAMiniFlowTest(unittest.TestCase):
             second_round = [row for row in candidate_lines if row["round_id"] == 1]
             self.assertTrue(second_round)
             self.assertTrue(any(row["parent_candidate_ids"] for row in second_round))
+
+    def test_orchestrator_proposer_prompt_uses_context_view_without_gepa_context(self):
+        from gepa_researcher.agents.agent_components import AgentProposer
+        from gepa_researcher.orchestrator import ResearchOrchestrator
+        from tests._fakes import FakeExecutor, FakeJudger, make_generic_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            proposer_client = RecordingProposerClient()
+            config = make_generic_config(Path(tmp) / "run", max_rounds=1, batch_size=1)
+            with redirect_stdout(StringIO()):
+                ResearchOrchestrator(
+                    config=config,
+                    config_path=Path(tmp) / "config.json",
+                    components=(AgentProposer(proposer_client), FakeExecutor(), FakeJudger()),
+                ).run()
+
+        prompt = proposer_client.prompts[-1][1]
+        self.assertIn("Context envelope", prompt)
+        self.assertNotIn("_gepa_context", prompt)
 
 
     def test_evaluate_candidates_uses_executor_max_workers(self):
