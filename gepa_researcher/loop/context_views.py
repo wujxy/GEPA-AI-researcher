@@ -149,6 +149,8 @@ def state_for_agent(state: LoopState, history_limit: int = 3) -> dict[str, Any]:
 
 
 def build_proposer_context(state: LoopState, config: dict[str, Any]) -> dict[str, Any]:
+    if "_context_view" in config:
+        return dict(config["_context_view"])
     gepa_context = dict(config.get("_gepa_context") or {})
     frontier = _frontier_for_proposer(dict(gepa_context.get("pareto_frontier") or {}))
     parents = list(gepa_context.get("parents") or [])
@@ -180,6 +182,8 @@ def build_executor_context(
     repo_dir: Path,
     execution_mode: str,
 ) -> dict[str, Any]:
+    if "_context_view" in config:
+        return dict(config["_context_view"])
     candidate_ref = str(run_dir / "traces" / f"round_{candidate.round_id:03d}" / candidate.candidate_id / "candidate.json")
     return {
         "envelope": _context_envelope(
@@ -205,6 +209,8 @@ def build_executor_context(
 
 
 def build_judger_context(candidate: Candidate, trace: Trace, config: dict[str, Any]) -> dict[str, Any]:
+    if "_context_view" in config:
+        return dict(config["_context_view"])
     run_dir = Path(config.get("_run_dir", "."))
     candidate_ref = str(run_dir / "traces" / f"round_{candidate.round_id:03d}" / candidate.candidate_id / "candidate.json")
     trace_ref = str(run_dir / "traces" / f"round_{trace.round_id:03d}" / trace.candidate_id / "trace.json")

@@ -8,6 +8,7 @@ from .blocks import (
     SourceRef,
 )
 from .plane import GlobalContextPlane
+from .views import ContextView, ContextViewBuilder
 
 __all__ = [
     "ContextBlock",
@@ -18,4 +19,6 @@ __all__ = [
     "EntityRef",
     "SourceRef",
     "GlobalContextPlane",
+    "ContextView",
+    "ContextViewBuilder",
 ]

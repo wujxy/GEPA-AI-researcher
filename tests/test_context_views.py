@@ -12,7 +12,7 @@ from gepa_researcher.loop.context_views import (
     trace_summary_for_proposer,
 )
 from gepa_researcher.loop.runtime import recent_trace_summaries
-from gepa_researcher.models.schemas import Candidate, SampleTrace, Trace
+from gepa_researcher.models.schemas import Candidate, LoopState, SampleTrace, Trace
 
 
 class ContextViewsTest(unittest.TestCase):
@@ -251,6 +251,19 @@ class ContextViewsTest(unittest.TestCase):
         self.assertNotIn("EXPECTED_IMPROVEMENT_SHOULD_NOT_APPEAR", str(context))
         self.assertNotIn("PRIOR_SHOULD_NOT_APPEAR", str(context))
         self.assertNotIn("SCORE_SHOULD_NOT_APPEAR", str(context))
+
+    def test_prebuilt_context_view_overrides_legacy_context_for_all_roles(self):
+        candidate = self._candidate()
+        trace = self._trace()
+        prebuilt = {"role": "proposer", "blocks": [{"block_id": "run:task"}]}
+        config = {"_context_view": prebuilt, "_gepa_context": {"raw": "ignored"}}
+
+        self.assertEqual(build_proposer_context(LoopState(task_name="task"), config), prebuilt)
+        self.assertEqual(
+            build_executor_context(candidate, config, Path("/tmp/run"), Path("/tmp/round"), Path("/tmp/repo"), "evaluate_only"),
+            prebuilt,
+        )
+        self.assertEqual(build_judger_context(candidate, trace, config), prebuilt)
 
 
 
