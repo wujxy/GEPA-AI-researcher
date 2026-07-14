@@ -41,9 +41,11 @@ from .loop.score_matrix import ScoreMatrixBuilder
 from .services.candidate_scheduler import CandidateScheduler
 from .services.execution_service import ExecutionService
 from .storage.candidate_store import CandidateStore
+from .storage.artifact_store import ArtifactStore
 from .storage.execution_store import ExecutionStore
 from .storage.event_store import EventStore
 from .storage.store import RunStore
+from .context.plane import GlobalContextPlane
 from .storage.usage import UsageTracker, format_round_usage, format_run_usage
 from .execution.workspace import WorkspaceManager
 
@@ -63,6 +65,16 @@ class ResearchOrchestrator:
         self.event_store = EventStore(self.run_dir)
         self.candidate_store = CandidateStore(self.run_dir)
         self.execution_store = ExecutionStore(self.run_dir, event_store=self.event_store)
+        self.artifact_store = ArtifactStore(self.run_dir)
+        self.context_plane = GlobalContextPlane(
+            self.run_dir,
+            self.config,
+            candidate_store=self.candidate_store,
+            execution_store=self.execution_store,
+            event_store=self.event_store,
+            artifact_store=self.artifact_store,
+            store=self.store,
+        )
         self.workspace_manager = WorkspaceManager(self.run_dir, self.config)
         self.admission = CandidateAdmissionGate()
         self.dataset_split = resolve_dataset_split(self.config)
@@ -92,6 +104,7 @@ class ResearchOrchestrator:
             execution_store=self.execution_store,
             git_result_service=GitResultService(self.config.get("candidate_policy", {})),
             runner=RunnerAdapter(self.executor, self.run_dir),
+            artifact_store=self.artifact_store,
         )
         self.gate = GEPAGate()
         self.pareto = ParetoSelector()

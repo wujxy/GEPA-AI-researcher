@@ -7,6 +7,7 @@ from .blocks import (
     EntityRef,
     SourceRef,
 )
+from .plane import GlobalContextPlane
 
 __all__ = [
     "ContextBlock",
@@ -16,4 +17,5 @@ __all__ = [
     "ContextVisibility",
     "EntityRef",
     "SourceRef",
+    "GlobalContextPlane",
 ]
