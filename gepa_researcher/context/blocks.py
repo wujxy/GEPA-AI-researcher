@@ -1,3 +1,4 @@
+from copy import deepcopy
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -97,7 +98,7 @@ class ContextBlock:
             "kind": self.kind.value,
             "title": self.title,
             "summary": self.summary,
-            "inline_content": self.inline_content,
+            "inline_content": deepcopy(self.inline_content),
             "source_refs": [source.to_dict() for source in self.source_refs],
             "entity_refs": [entity.to_dict() for entity in self.entity_refs],
             "role_scope": [role.value for role in self.role_scope] if self.role_scope is not None else None,

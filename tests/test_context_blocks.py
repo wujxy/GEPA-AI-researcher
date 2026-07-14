@@ -1,3 +1,5 @@
+import pytest
+
 from gepa_researcher.context.blocks import (
     ContextBlock,
     ContextBlockKind,
@@ -29,18 +31,40 @@ def test_context_block_round_trips_with_provenance():
     assert restored.entity_refs[0].entity_id == "cand_001"
 
 
-def test_context_block_requires_source_or_explicit_system_kind():
-    try:
+def test_context_block_serialization_detaches_nested_inline_content():
+    block = ContextBlock(
+        block_id="block-serialized",
+        kind=ContextBlockKind.RUN_FACT,
+        title="Run facts",
+        summary=None,
+        inline_content={"nested": {"value": "original"}},
+        source_refs=[],
+        entity_refs=[],
+    )
+
+    serialized = block.to_dict()
+    serialized["inline_content"]["nested"]["value"] = "mutated"
+
+    assert block.inline_content == {"nested": {"value": "original"}}
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        ContextBlockKind.EXECUTION_FACT,
+        ContextBlockKind.USER_EVENT,
+        ContextBlockKind.ARTIFACT_REF,
+        ContextBlockKind.FILE_CONTEXT,
+    ],
+)
+def test_context_block_requires_provenance_for_derived_kinds(kind):
+    with pytest.raises(ValueError, match="source_refs"):
         ContextBlock(
             block_id="block-2",
-            kind=ContextBlockKind.CANDIDATE_FACT,
+            kind=kind,
             title="Bad",
             summary=None,
             inline_content={},
             source_refs=[],
             entity_refs=[],
         )
-    except ValueError as exc:
-        assert "source_refs" in str(exc)
-    else:
-        raise AssertionError("expected missing provenance to fail")
