@@ -9,6 +9,7 @@ from .blocks import (
 )
 from .plane import GlobalContextPlane
 from .prompt_assembler import PromptAssembler, PromptSection
+from .presentation import PresentationEvent, PresentationStream
 from .views import ContextView, ContextViewBuilder
 
 __all__ = [
@@ -22,6 +23,8 @@ __all__ = [
     "GlobalContextPlane",
     "PromptAssembler",
     "PromptSection",
+    "PresentationEvent",
+    "PresentationStream",
     "ContextView",
     "ContextViewBuilder",
 ]

@@ -46,6 +46,8 @@ from .storage.execution_store import ExecutionStore
 from .storage.event_store import EventStore
 from .storage.store import RunStore
 from .context.plane import GlobalContextPlane
+from .context.blocks import SourceRef
+from .context.presentation import PresentationStream
 from .context.views import ContextViewBuilder
 from .storage.usage import UsageTracker, format_round_usage, format_run_usage
 from .execution.workspace import WorkspaceManager
@@ -64,6 +66,7 @@ class ResearchOrchestrator:
         self.usage_tracker = UsageTracker(self.run_dir, self.config.get("usage_tracking", {}))
         self.store = RunStore(self.run_dir)
         self.event_store = EventStore(self.run_dir)
+        self.presentation_stream = PresentationStream(self.run_dir)
         self.candidate_store = CandidateStore(self.run_dir)
         self.execution_store = ExecutionStore(self.run_dir, event_store=self.event_store)
         self.artifact_store = ArtifactStore(self.run_dir)
@@ -409,6 +412,12 @@ class ResearchOrchestrator:
     def run_generation(self, round_id: int, state: LoopState) -> GenerationDecision:
         self.run_dir.mkdir(parents=True, exist_ok=True)
         state.round_id = round_id
+        self.presentation_stream.append(
+            event_type="round_started",
+            message=f"Round {round_id + 1} started",
+            round_id=round_id,
+            source_refs=[SourceRef(source_type="run", source_id=self.run_dir.name)],
+        )
         pool = CandidatePool.load(self.run_dir)
         matrix_path = self.run_dir / "score_matrix.json"
         previous_matrix = ScoreMatrixBuilder.load(matrix_path, round_id=round_id)
@@ -445,6 +454,14 @@ class ResearchOrchestrator:
         self._write_live_artifact(round_id, "admission_decisions", {"decisions": [item.to_dict() for item in admissions]})
         self._persist_candidate_batch(candidate_batch)
         self.store.save_admission_decisions(round_id, admissions)
+        for candidate in candidate_batch.candidates:
+            self.presentation_stream.append(
+                event_type="candidate_proposed",
+                message=f"Candidate {candidate.candidate_id} proposed",
+                round_id=round_id,
+                candidate_id=candidate.candidate_id,
+                source_refs=[SourceRef(source_type="candidate", source_id=candidate.candidate_id)],
+            )
         self._log_block(format_admission_summary(admissions))
         self._log(f"proposer mutation finished: {len(candidate_batch.candidates)} candidate(s)")
         self._log_block(format_candidate_list(candidate_batch.candidates))
@@ -671,6 +688,17 @@ class ResearchOrchestrator:
             else:
                 card.transition("implementation_failed")
                 self.candidate_store.save(card)
+                self.presentation_stream.append(
+                    event_type="candidate_failed",
+                    message=f"Candidate {card.candidate_id} failed implementation",
+                    level="warning",
+                    round_id=card.round_id,
+                    candidate_id=card.candidate_id,
+                    source_refs=[
+                        SourceRef(source_type="candidate", source_id=card.candidate_id),
+                        SourceRef(source_type="execution", source_id=impl_record.execution_id),
+                    ],
+                )
                 return impl_trace
 
         dataset_ref = f"{phase}:{','.join(sample_ids)}"
@@ -688,6 +716,17 @@ class ResearchOrchestrator:
                 card.transition("evaluation_succeeded")
         else:
             card.transition("evaluation_failed")
+            self.presentation_stream.append(
+                event_type="candidate_failed",
+                message=f"Candidate {card.candidate_id} failed {phase} evaluation",
+                level="warning",
+                round_id=card.round_id,
+                candidate_id=card.candidate_id,
+                source_refs=[
+                    SourceRef(source_type="candidate", source_id=card.candidate_id),
+                    SourceRef(source_type="execution", source_id=eval_record.execution_id),
+                ],
+            )
         self.candidate_store.save(card)
         return eval_trace
 
