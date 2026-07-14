@@ -75,7 +75,10 @@ class ExecutionService:
                 if session.mode == "git_worktree":
                     result_revision, audit = self.git_result_service.finalize_implementation(spec, session)
                     if audit.commit_count <= 0:
-                        raise NoCandidateCommitError(f"no candidate commit produced: execution_id={spec.execution_id}")
+                        raise NoCandidateCommitError(
+                            f"no candidate commit produced: execution_id={spec.execution_id}",
+                            details=self._no_candidate_commit_details(spec, session, audit, trace),
+                        )
                 else:
                     result_revision = spec.input_revision
             else:
@@ -132,6 +135,30 @@ class ExecutionService:
                 payload["failure_category"] = "frozen_violation"
         trace.samples[0].artifacts.update(payload)
 
+    def _no_candidate_commit_details(
+        self,
+        spec: ExecutionSpec,
+        session: SandboxSession,
+        audit: Any,
+        trace: Trace,
+    ) -> dict[str, Any]:
+        details: dict[str, Any] = {
+            "execution_id": spec.execution_id,
+            "candidate_id": spec.candidate_id,
+            "phase": spec.phase.value,
+            "input_revision": spec.input_revision,
+            "actual_head": audit.result_sha,
+            "commit_count": audit.commit_count,
+            "changed_files": list(audit.changed_files),
+            "worktree_status": audit.worktree_status,
+            "fallback_commit_created": audit.fallback_commit_created,
+        }
+        claimed = _claimed_commit_sha(trace)
+        if claimed:
+            details["claimed_commit_sha"] = claimed
+            details["claimed_commit_exists"] = self.git_result_service.commit_exists(session, claimed)
+        return details
+
     def _failure_trace(
         self,
         card: CandidateCard,
@@ -184,7 +211,20 @@ def _metrics_from_trace(trace: Trace) -> dict[str, float]:
 
 
 class NoCandidateCommitError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, details: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.details = dict(details or {})
+
+
+def _claimed_commit_sha(trace: Trace) -> str | None:
+    for sample in trace.samples:
+        implementation = sample.artifacts.get("implementation") if sample.artifacts else None
+        if not isinstance(implementation, dict):
+            continue
+        commit_sha = implementation.get("commit_sha")
+        if isinstance(commit_sha, str) and commit_sha:
+            return commit_sha
+    return None
 
 
 def _failure_from_exception(exc: Exception) -> ExecutionFailure:
@@ -212,4 +252,9 @@ def _failure_from_exception(exc: Exception) -> ExecutionFailure:
     else:
         code = "AGENT_PROCESS_FAILED"
         retryable = False
-    return ExecutionFailure(code=code, message=str(exc), retryable=retryable)
+    return ExecutionFailure(
+        code=code,
+        message=str(exc),
+        retryable=retryable,
+        details=dict(getattr(exc, "details", {}) or {}),
+    )

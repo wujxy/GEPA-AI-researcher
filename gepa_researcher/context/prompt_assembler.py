@@ -134,8 +134,10 @@ structured evidence about what happened.'''),
 - Save any scripts or generated artifacts under the working directory above.
 - In implement_and_validate mode, edit only admitted target_files.
 - In implement_and_validate mode, you MUST create a Git commit for the candidate source changes before your final JSON response. The orchestrator reads HEAD as the candidate result revision; uncommitted edits are treated as no implementation.
+- Before editing, run git rev-parse --show-toplevel and git rev-parse HEAD. Work only in that repository; do not report success for changes made outside this worktree.
 - Before committing, run git status --porcelain and git diff --name-only. Stage only admitted target_files with git add -- <target_files>; do not stage build outputs, benchmark logs, fixtures, caches, or other runtime artifacts.
-- Run git commit with a concise candidate-scoped message, then run git rev-parse HEAD and put that SHA in implementation.commit_sha. Also report implementation.committed_files and implementation.git_status_after_commit.
+- Run git commit with a concise candidate-scoped message, then run git rev-parse HEAD. implementation.commit_sha MUST be copied exactly from git rev-parse HEAD stdout after the commit. Also report implementation.committed_files and implementation.git_status_after_commit.
+- If HEAD still equals the input revision after your attempted implementation, set validation.passed=false, leave implementation.commit_sha=null, and explain why no candidate commit exists.
 - If you cannot create the commit, set validation.passed=false, leave implementation.commit_sha=null, and explain the exact git/status failure in errors and diagnostics.
 - In evaluate_only mode, do not edit source files, create commits, switch branches, or change HEAD.
 - Never run git checkout, git switch, or git worktree; the orchestrator owns Git lifecycle.

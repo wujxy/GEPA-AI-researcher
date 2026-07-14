@@ -119,7 +119,55 @@ class NonCommittingRunner:
         )
 
 
-def _service(tmp_path: Path, repo: Path, baseline: str, runner) -> tuple[ExecutionService, ExecutionStore]:
+class DirtyNonCommittingRunner:
+    def run(self, card, spec, runtime_lease, session, config):
+        (session.repo_path / "src" / "hot.cc").write_text("int hot() { return 3; }\n", encoding="utf-8")
+        return Trace(
+            candidate_id=card.candidate_id,
+            round_id=card.round_id,
+            samples=[SampleTrace("task", "in", "out", "expected", "left source diff uncommitted")],
+        )
+
+
+class StagedFrozenAndDirtyAllowedRunner:
+    def run(self, card, spec, runtime_lease, session, config):
+        (session.repo_path / "src" / "hot.cc").write_text("int hot() { return 4; }\n", encoding="utf-8")
+        (session.repo_path / "tests").mkdir(exist_ok=True)
+        (session.repo_path / "tests" / "fixture.root").write_text("tampered staged fixture\n", encoding="utf-8")
+        _git(session.repo_path, "add", "tests/fixture.root")
+        return Trace(
+            candidate_id=card.candidate_id,
+            round_id=card.round_id,
+            samples=[SampleTrace("task", "in", "out", "expected", "staged frozen plus dirty source")],
+        )
+
+
+class ClaimingNoCommitRunner:
+    def run(self, card, spec, runtime_lease, session, config):
+        return Trace(
+            candidate_id=card.candidate_id,
+            round_id=card.round_id,
+            samples=[
+                SampleTrace(
+                    "task",
+                    "in",
+                    "out",
+                    "expected",
+                    "claimed commit without changing HEAD",
+                    artifacts={"implementation": {"commit_sha": "f" * 40}},
+                )
+            ],
+        )
+
+
+def _service(
+    tmp_path: Path,
+    repo: Path,
+    baseline: str,
+    runner,
+    *,
+    candidate_policy: dict | None = None,
+) -> tuple[ExecutionService, ExecutionStore]:
     run_dir = tmp_path / "run"
     store = ExecutionStore(run_dir)
     service = ExecutionService(
@@ -136,7 +184,7 @@ def _service(tmp_path: Path, repo: Path, baseline: str, runner) -> tuple[Executi
             },
         ),
         execution_store=store,
-        git_result_service=GitResultService(candidate_policy={}),
+        git_result_service=GitResultService(candidate_policy=candidate_policy or {}),
         runner=runner,
     )
     return service, store
@@ -185,6 +233,65 @@ def test_git_implementation_without_commit_fails_without_result_revision(tmp_pat
     assert record.result_revision is None
     assert "no candidate commit produced" in trace.samples[0].error
     assert store.get(spec.execution_id).result_revision is None
+
+
+def test_git_implementation_with_allowed_uncommitted_diff_gets_fallback_commit(tmp_path: Path):
+    repo, baseline = _make_repo(tmp_path)
+    card = _card(baseline)
+    spec = _spec(card, ExecutionPhase.IMPLEMENTATION, baseline)
+    service, _ = _service(
+        tmp_path,
+        repo,
+        baseline,
+        DirtyNonCommittingRunner(),
+        candidate_policy={"allowed_target_globs": ["src/**"], "frozen_globs": ["tests/**"]},
+    )
+
+    record, trace = service.execute(spec, card)
+
+    assert record.status == ExecutionStatus.SUCCEEDED
+    assert record.result_revision is not None
+    assert record.result_revision != baseline
+    audit = trace.samples[0].artifacts["commit_audit"]
+    assert audit["fallback_commit_created"] is True
+    assert audit["fallback_committed_files"] == ["src/hot.cc"]
+    assert "int hot() { return 3; }" in _git(repo, "show", f"{record.result_revision}:src/hot.cc")
+
+
+def test_fallback_commit_does_not_include_pre_staged_frozen_paths(tmp_path: Path):
+    repo, baseline = _make_repo(tmp_path)
+    card = _card(baseline)
+    spec = _spec(card, ExecutionPhase.IMPLEMENTATION, baseline)
+    service, _ = _service(
+        tmp_path,
+        repo,
+        baseline,
+        StagedFrozenAndDirtyAllowedRunner(),
+        candidate_policy={"allowed_target_globs": ["src/**"], "frozen_globs": ["tests/**"]},
+    )
+
+    record, trace = service.execute(spec, card)
+
+    assert record.status == ExecutionStatus.SUCCEEDED
+    audit = trace.samples[0].artifacts["commit_audit"]
+    assert audit["fallback_committed_files"] == ["src/hot.cc"]
+    assert audit["changed_files"] == ["src/hot.cc"]
+    assert "tests/fixture.root" not in _git(repo, "diff", "--name-only", baseline, record.result_revision)
+
+
+def test_no_candidate_commit_failure_records_claimed_and_actual_commit_diagnostics(tmp_path: Path):
+    repo, baseline = _make_repo(tmp_path)
+    card = _card(baseline)
+    spec = _spec(card, ExecutionPhase.IMPLEMENTATION, baseline)
+    service, _ = _service(tmp_path, repo, baseline, ClaimingNoCommitRunner())
+
+    record, _ = service.execute(spec, card)
+
+    assert record.status == ExecutionStatus.FAILED
+    assert record.failure.code == "NO_CANDIDATE_COMMIT"
+    assert record.failure.details["claimed_commit_sha"] == "f" * 40
+    assert record.failure.details["claimed_commit_exists"] is False
+    assert record.failure.details["actual_head"] == baseline
 
 
 def test_feedback_execution_uses_result_revision_as_readonly_input(tmp_path: Path):

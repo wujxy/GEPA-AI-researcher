@@ -1,0 +1,91 @@
+kind: task
+
+task:
+  name: tiny-paircount-speed-opt
+  goal: >
+    Optimize the local tinyalgo pair-counting implementation for speed while
+    preserving exact results on the provided deterministic correctness and drift
+    checks. Edit only admitted tinyalgo source files and commit the candidate
+    implementation before reporting results.
+  samples:
+    - sample_id: speed
+      description: Fast local benchmark that writes benchmarks/speed.csv.
+    - sample_id: drift
+      description: Deterministic output drift check that writes benchmarks/drift.csv.
+
+project:
+  profile: project.profile.yaml
+  ref: HEAD
+
+metric:
+  name: ms_per_call
+  direction: minimize
+  description: Median milliseconds per call for the deterministic pair-count benchmark.
+  unit: ms
+  command: PYTHONPATH=. python scripts/bench.py
+  repeats: 1
+  improvement:
+    mode: relative_percent
+    minimum: 1.0
+
+validation:
+  checks:
+    - name: correctness
+      command: PYTHONPATH=. python -m pytest tests/test_correctness.py -q
+      success_criteria: All pair-counting correctness tests pass exactly.
+    - name: drift
+      command: PYTHONPATH=. python scripts/check_drift.py
+      success_criteria: Deterministic fixture outputs match the baseline contract exactly.
+    - name: speed
+      command: PYTHONPATH=. python scripts/bench.py
+      success_criteria: Benchmark completes and records ms_per_call in benchmarks/speed.csv.
+
+safety:
+  editable_paths:
+    - tinyalgo/**/*.py
+  frozen_paths:
+    - tests/**
+    - scripts/**
+    - benchmarks/*.md
+    - README.md
+    - pyproject.toml
+  max_files_per_candidate: 2
+
+loop:
+  seed_count: 2
+  max_rounds: 2
+  min_rounds: 1
+  patience: 1
+  candidates_per_round: 2
+  max_parallel_candidates: 2
+  enable_merge: false
+
+selection:
+  frontier_policy: pareto
+  acceptance_policy: minibatch_improves_then_pareto
+  minibatch_size: 1
+  parent_sampling: pareto_win_weighted
+  feedback_sample_ids:
+    - speed
+  pareto_sample_ids:
+    - speed
+    - drift
+
+executor:
+  timeout_seconds: 900
+  repair_retries: 1
+
+judger:
+  pass_threshold: 0.80
+
+usage_tracking:
+  enabled: true
+  persist_raw_envelope: true
+  print_round_summary: true
+  print_run_summary: true
+
+evidence:
+  visualize_when_applicable: false
+  plot_selection_policy: proposer_selects
+  artifact_formats: []
+  guidance: Prefer correctness output, drift.csv, speed.csv, and Git commit evidence.

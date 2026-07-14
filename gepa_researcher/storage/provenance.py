@@ -43,6 +43,7 @@ def audit_commit(
         changed_files=changed,
         commit_count=commit_count,
         frozen_violations=frozen_violations,
+        worktree_status=_git(repo, "status", "--porcelain=v1"),
     )
 
 

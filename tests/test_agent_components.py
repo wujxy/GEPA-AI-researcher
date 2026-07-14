@@ -715,8 +715,11 @@ class AgentComponentsTest(unittest.TestCase):
         self.assertNotIn("commit budget", prompt)
         self.assertIn("git add --", prompt)
         self.assertIn("git commit", prompt)
+        self.assertIn("git rev-parse --show-toplevel", prompt)
         self.assertIn("git rev-parse HEAD", prompt)
         self.assertIn("implementation.commit_sha", prompt)
+        self.assertIn("copied exactly from git rev-parse HEAD stdout", prompt)
+        self.assertIn("If HEAD still equals the input revision", prompt)
         self.assertIn("If you cannot create the commit", prompt)
         self.assertIn("artifact_paths", prompt)  # schema still present
         self.assertNotIn("Return only a JSON object, no prose outside JSON.", prompt)

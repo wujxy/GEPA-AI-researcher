@@ -5,6 +5,31 @@ human research objective into repeated proposer, executor, and judger agent
 cycles while keeping project resources, runtime contracts, workspaces, safety
 limits, and artifacts explicit.
 
+## Architecture Snapshot
+
+GEPA v1.2 keeps the top-level roles as **proposer**, **executor**, and
+**judger**, but the runtime is now organized around explicit domain records
+rather than ad hoc workspace state:
+
+```text
+CandidateCard + ExecutionRecord + EventStore + ArtifactStore
+        -> GlobalContextPlane
+        -> role-specific ContextView
+        -> PromptAssembler
+        -> proposer / executor / judger
+```
+
+Key properties:
+
+- A candidate is a persistent proposal/result card, not a long-lived workspace.
+- Each implementation, feedback evaluation, and Pareto evaluation is a separate
+  execution with its own sandbox, artifact refs, events, and typed failure.
+- Agent prompts are assembled from `ContextView` objects. `_gepa_context` is
+  compatibility fallback, not the primary context transport.
+- File cache keys include repo id, commit sha, path, and content hash.
+- User-facing presentation events, internal events, artifacts, and agent context
+  are stored separately.
+
 ## Quick Start
 
 Install GEPA as a command-line app from a clone:
@@ -28,7 +53,7 @@ gepa doctor --config task.yaml
 gepa run --config task.yaml
 ```
 
-When `execution.runtime_backend: apptainer` is set, `gepa doctor --config`,
+When `isolation.backend: apptainer` is set, `gepa doctor --config`,
 `gepa setup-apptainer --config`, `gepa run`, and `gepa validate` all use the same
 runtime checks. `run` and `validate` automatically bootstrap the runtime path: detect the host, find
 Apptainer from config/env/PATH/GEPA cache, optionally run a pinned user-mode
@@ -96,6 +121,9 @@ GEPA uses three configuration layers:
 Paths in a task file are relative to the task file. Paths in a profile are
 relative to the profile file. Task safety may tighten profile safety, but cannot
 broaden it.
+
+The canonical task/profile schema is the only user-facing entrypoint. Update old
+packs to this shape instead of adding version-specific compatibility behavior.
 
 ## Start Here
 
@@ -323,6 +351,11 @@ from commands. Provide a prebuilt SIF only when a site needs a pinned boot base.
 already materialized inside the project repository. GEPA preserves this metadata
 in the resolved workspace contract; it does not fetch LFS objects itself.
 
+`resources.generated_tracked_paths` declares tracked files that evaluation
+commands may rewrite as generated outputs, such as benchmark CSVs. GEPA allows
+these paths during read-only evaluation while still rejecting undeclared source
+mutations.
+
 `usage_tracking.persist_raw_envelope` stores raw agent JSON envelopes under
 `usage/raw/`. Sensitive keys such as token, secret, password, credential, and
 api-key are redacted in `config.snapshot.json`.
@@ -330,17 +363,21 @@ api-key are redacted in `config.snapshot.json`.
 ## Role Contracts
 
 The resolved configuration is not sent wholesale to agents. GEPA generates
-role-specific authoritative views:
+role-specific context views and prompt contracts:
 
 - Proposer sees objective, metric, resources, safety, runtime, prior context,
-  and loop feedback.
+  frontier parents, and loop feedback.
 - Executor sees objective, metric, validation, resources, safety, runtime,
   candidate contract, workspace, and selected sample ids.
-- Judger sees objective, metric, validation, candidate facts, and execution
-  evidence.
+- Judger sees objective, metric, validation, judge-safe candidate facts, trace
+  summaries, execution facts, and artifact references.
 
 Backend details such as agent command arguments are kept out of proposer and
 judger contracts.
+
+All three roles receive prompts through `ContextViewBuilder` and
+`PromptAssembler`. Context can be cropped at prompt-render time, but stored
+events, artifacts, candidate cards, and file-cache records remain intact.
 
 ## Apptainer Executor Validation
 
@@ -376,32 +413,32 @@ Prior Context + Human Goal
   -> Candidate Pool + Score Matrix
 ```
 
-Each run stores `config.snapshot.json`, dataset split, prior context, candidates,
-traces, judgments, score matrix, frontier, usage summaries, and `final_report.md`.
+Each run stores `config.snapshot.json`, dataset split, prior context, candidate
+cards, execution records, events, artifacts, entity/file-cache context indexes,
+presentation events, traces, judgments, score matrix, frontier, usage summaries,
+and `final_report.md`.
 
 ## Examples
 
-- `examples/function_discovery/task.yaml`: legacy-compatible task example.
+- `examples/function_discovery/task.yaml`: small local task example.
 - `examples/function_discovery/project.profile.yaml`: complete local profile.
 - `examples/omilrec/task.template.yaml`: complete OMILREC task template.
 - `examples/omilrec/project.profile.template.yaml`: complete OMILREC/JUNO profile.
-- `examples/function_discovery/config.claude.json`: legacy single-file config kept
-  for compatibility and smoke tests.
+- `examples/function_discovery/config.claude.json`: historical single-file
+  fixture used by smoke tests; prefer canonical task/profile configs for new
+  work.
 
-## Legacy Compatibility
+## Canonical Schema
 
-Legacy JSON is preserved mostly as-is. Some historical fields are now reported
-as unused warnings, for example `gepa.frontier_policy`,
-`gepa.acceptance_policy`, `gepa.parent_sampling`, `workspace.retention`,
-`workspace.keep_accepted`, and `executor.per_candidate_workspace`.
-
-New schema configs are strict: unknown fields are errors. This is deliberate so
-misspelled knobs fail during `validate` instead of silently changing a run.
+The task/profile schema is strict and unique: unknown fields are errors. This is
+deliberate so misspelled knobs fail during `validate` instead of silently
+changing a run. Do not keep parallel legacy schemas in new packs; migrate them
+to the canonical task/profile files.
 
 ## Tests
 
 The test suite is offline and uses injected fake agents:
 
 ```bash
-python3 -m unittest discover -s tests -q
+python -m pytest -q
 ```

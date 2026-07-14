@@ -1,17 +1,10 @@
 ---
 name: gepa_start_skill
 description: >-
-  Onboard a new task into the GEPA (GEPA-AI-researcher) autonomous
-  proposer→executor→judger optimization loop. Use when a user wants to run GEPA
-  on a new target project — i.e. asks GEPA to "optimize X", "run GEPA on my
-  repo", "start a gepa task", "prepare a gepa package", "how do I set up gepa
-  for <project>". Covers the two things a new task needs: (1) assembling a clean,
-  self-contained executor resource pack — source, environment, scripts, an
-  executor skill, docs, fixtures, pinned baseline — and dry-running it so the
-  spawned executor agent can complete the task fully unattended; and (2)
-  installing the `gepa` CLI and authoring the task + project-profile config files
-  against GEPA's strict schema. GEPA is a general-purpose framework; this skill
-  teaches the generic pack-and-launch procedure, never a specific target.
+  Use when a user wants to prepare or launch a GEPA task for a target project:
+  optimize a repo, create an executor pack, author canonical task/profile config,
+  validate local or Apptainer runtime, or diagnose candidates failing from missing
+  resources, environment setup, invalid context, or execution packaging.
 ---
 
 # GEPA Start Skill — prepare a task and run the loop
@@ -19,13 +12,18 @@ description: >-
 Print `[skill: gepa_start_skill]` before proceeding.
 
 GEPA is an autonomous agent loop: a **proposer** invents candidate changes, an
-**executor** agent implements+validates each one against the real project, and a
+**executor** implements+validates each one against the real project, and a
 **judger** scores them. The executor is a spawned `claude -p` subprocess that
-must complete the task *with no human in the loop*. That means the user's
-project must be packaged as a **clean, self-contained executor resource pack**
-that the executor agent can drive by itself — or it will fail mid-run, at the
-worst possible moment, for reasons that look like the executor is incompetent
-rather than the pack is missing a fixture.
+must complete the task *with no human in the loop*. Package the user's project
+as a **clean, self-contained executor resource pack** that the executor can
+drive by itself.
+
+As of v1.2, GEPA has a Global Context Plane. Future agents must not rebuild
+large private `_gepa_context` dictionaries or hand-splice prompt history. Facts
+enter stores as candidates, executions, events, artifacts, entities, file cache
+records, and presentation events; agents receive role-scoped `ContextView`s
+rendered by `PromptAssembler`. The project still names the top-level roles
+`proposer`, `executor`, and `judger`; do not rename proposer to optimizer.
 
 This skill has two parts. Do them in order.
 
@@ -33,8 +31,9 @@ This skill has two parts. Do them in order.
   hard part and the one that fails in production. A clean pack is the difference
   between a loop that improves the objective and a loop where every candidate
   dies on `resource_missing` or an environment that doesn't resolve.
-- **Part 2 — Install GEPA and author the config, then launch.** The config is
-  strict: misspelled fields fail at `gepa validate`, not silently.
+- **Part 2 — Install GEPA and author the config, then launch.** The canonical
+  task/profile entry is unique and strict: misspelled fields fail at
+  `gepa validate`, not silently.
 
 GEPA is general-purpose. There is a reference pack at
 `omilrec_opt/omilrec-br111-executor-pack/` (an OMILREC speed-optimization task)
@@ -134,9 +133,11 @@ edits. Keep `build/`, `InstallArea/`, and prior run artifacts OUT of the pack �
 they are regenerable and pollute the clean baseline. If the project needs a
 build directory, the executor creates it inside its own worktree at run time.
 
-**`context/` — the facts.** These are the documents GEPA inlines into the
-proposer and executor prompts (via `docs`, truncated to a
-per-file cap). Write them for an agent that has never seen the project:
+**`context/` — the project facts.** These documents are declared as resources in
+the project profile. GEPA records them in the resolved run facts and exposes
+them through role-specific context views; the prompt renderer may crop prompt
+content, but stored context is not the budgeted object. Write them for an agent
+that has never seen the project:
 
 - The **optimization context** restates the 1.1 contract: objective, metric,
   gates, editable/frozen paths, baseline, and — crucially — *which regions of
@@ -354,16 +355,16 @@ Then ensure the **executor backend** is available:
 
 ### 2.2 Author the two config files
 
-GEPA now has one canonical user-facing model, still split into two files:
+GEPA has one canonical user-facing model, split into two files:
 
 - **Task file** — controls the optimization experiment and loop evolution.
 - **Project profile** — declares the source tree, docs, user-guaranteed runnable
   paths, optional reference commands, safety ceiling, agent command, and
   isolation mode.
 
-`schema_version` is optional for new configs. Old v1/v2/legacy configs remain
-accepted only through migration; after loading, GEPA uses the same canonical
-internal shape for every run. Do not add separate version-specific behavior.
+Do not create parallel schemas or version-specific entrypoints. If an old pack
+needs different fields, update the config to the canonical task/profile shape
+instead of adding compatibility branches.
 
 **User responsibility vs GEPA responsibility:** the user guarantees that the
 provided source/docs/paths are sufficient for an executor agent to run the
@@ -481,7 +482,8 @@ resources:
   pre_materialized_lfs_paths:
     - <tests/fixtures/**/*.bin>
   # Optional tracked outputs the executor may update and GEPA should treat as
-  # generated artifacts rather than source edits, if your task uses them.
+  # generated artifacts rather than read-only source mutations, if your task
+  # legitimately rewrites tracked benchmark/report files during evaluation.
   generated_tracked_paths: []
   hash_artifacts: []
 
@@ -564,14 +566,15 @@ A few non-obvious rules the schema enforces:
 - `loop.seed_count`, rounds, patience, candidate counts, executor timeout,
   repair retries, selection policy, pass threshold, and safety policy are the
   knobs that control system evolution. Keep them in the task file.
-- `reference.commands` replaces old `environment.setup/check`, `runtime.setup/check`,
-  `build.commands`, `allowed_commands`, and old image package inference. Migration
-  maps old command lists into reference commands only; GEPA does not chase
-  project packages.
-- Role contracts: the **proposer** sees objective/metric/resources/safety/runtime
-  + prior context + feedback + reference context; the **executor** adds
-  validation; the **judger** sees objective/metric/validation. `agent.*` is
-  host-side plumbing and never a place for task instructions.
+- `reference.commands` is where old setup/check/build command lists belong when
+  updating an old pack to the canonical schema. They remain executor hints only;
+  GEPA does not chase project packages or auto-execute them.
+- Role context: the **proposer** sees objective/metric/resources/safety/runtime
+  plus frontier parents and feedback; the **executor** sees the current
+  candidate, workspace, selected samples, runtime, and execution evidence; the
+  **judger** sees judge-safe candidate facts, trace summaries, execution facts,
+  and artifact refs. `agent.*` is host-side plumbing and never a place for task
+  instructions.
 - Sensitive keys (token/secret/password/credential/api-key) are redacted in
   `config.snapshot.json`; raw agent envelopes land under `usage/raw/` when
   `persist_raw_envelope` is on.
@@ -673,15 +676,13 @@ Notes:
 
 ### 2.5 What each run produces
 
-Each `--run-dir` stores: `config.snapshot.json` (the resolved, redacted config),
-the dataset split, prior context, candidate pool, execution traces, judger
-judgments, the score matrix, the Pareto frontier, usage summaries, and a
-`final_report.md`. When a candidate fails, read its trace — the failure
-category (`resource_missing`, `environment_failure`, `no_implementation`,
-`no_validation`, `no_metrics`, `no_improvement`) tells you whether the pack
-(Part 1) or the config (Part 2) is at fault. A run where every candidate dies on
-`environment_failure`/`resource_missing` means the dry-run in 1.4 was skipped or
-insufficient — go back and re-dry-run, do not raise the budget.
+Each `--run-dir` stores: `config.snapshot.json`, dataset split, prior context,
+candidate cards, execution records, events, artifacts, entity/file-cache
+context indexes, presentation events, traces, judgments, score matrix, Pareto
+frontier, usage summaries, and `final_report.md`. When a candidate fails, read
+the typed execution failure and trace artifacts first. A run where every
+candidate dies on environment/resource failures means the dry-run in 1.4 was
+skipped or insufficient; go back and re-dry-run, do not raise the budget.
 
 ---
 

@@ -23,12 +23,68 @@ class GitResultService:
     def finalize_implementation(self, spec: ExecutionSpec, session: SandboxSession) -> tuple[str | None, CommitAudit]:
         if spec.phase != ExecutionPhase.IMPLEMENTATION:
             raise GitResultError(f"finalize_implementation requires implementation phase, got {spec.phase.value}")
-        audit = audit_commit(
+        audit = self._audit(spec, session)
+        if audit.commit_count <= 0:
+            fallback_files = self._create_fallback_commit_if_possible(spec, session)
+            if fallback_files:
+                audit = self._audit(spec, session)
+                audit.fallback_commit_created = True
+                audit.fallback_committed_files = fallback_files
+        return audit.result_sha, audit
+
+    def commit_exists(self, session: SandboxSession, commit_sha: str) -> bool:
+        if not commit_sha:
+            return False
+        try:
+            _git(session.repo_path, "rev-parse", "--verify", f"{commit_sha}^{{commit}}")
+        except GitResultError:
+            return False
+        return True
+
+    def _audit(self, spec: ExecutionSpec, session: SandboxSession) -> CommitAudit:
+        return audit_commit(
             repo=session.repo_path,
             parent_sha=spec.input_revision,
             frozen_globs=list(self.candidate_policy.get("frozen_globs") or []),
         )
-        return audit.result_sha, audit
+
+    def _create_fallback_commit_if_possible(self, spec: ExecutionSpec, session: SandboxSession) -> list[str]:
+        allowed_globs = list(self.candidate_policy.get("allowed_target_globs") or [])
+        if not allowed_globs:
+            return []
+        frozen_globs = list(self.candidate_policy.get("frozen_globs") or [])
+        ignored_globs = [*self.readonly_allowed_dirty_globs, *frozen_globs]
+        status = _git(session.repo_path, "status", "--porcelain=v1")
+        candidate_paths: list[str] = []
+        for line in status.splitlines():
+            path = _status_path(line)
+            if not path:
+                continue
+            if any(_matches_glob(path, pattern) for pattern in ignored_globs):
+                continue
+            if any(_matches_glob(path, pattern) for pattern in allowed_globs):
+                candidate_paths.append(path)
+        candidate_paths = sorted(dict.fromkeys(candidate_paths))
+        if not candidate_paths:
+            return []
+        _git(session.repo_path, "restore", "--staged", "--", ".")
+        _git(session.repo_path, "add", "--", *candidate_paths)
+        staged = _git(session.repo_path, "diff", "--cached", "--name-only")
+        staged_paths = sorted(path for path in staged.splitlines() if path)
+        if not staged_paths:
+            return []
+        message = f"GEPA fallback candidate commit for {spec.candidate_id}"
+        _git(
+            session.repo_path,
+            "-c",
+            "user.name=GEPA",
+            "-c",
+            "user.email=gepa@example.invalid",
+            "commit",
+            "-m",
+            message,
+        )
+        return staged_paths
 
     def snapshot(self, session: SandboxSession) -> dict[str, str]:
         return {

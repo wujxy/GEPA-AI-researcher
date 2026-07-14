@@ -70,6 +70,9 @@ class CommitAudit:
     changed_files: list[str] = field(default_factory=list)
     commit_count: int = 0
     frozen_violations: list[str] = field(default_factory=list)
+    worktree_status: str = ""
+    fallback_commit_created: bool = False
+    fallback_committed_files: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

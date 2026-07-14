@@ -1,0 +1,46 @@
+kind: project_profile
+name: tiny-algo-opt
+
+source:
+  path: repo
+  default_ref: HEAD
+  workspace_mode: git_worktree
+
+generated_tracked_paths:
+  - benchmarks/speed.csv
+  - benchmarks/drift.csv
+
+docs:
+  - README.md
+  - repo/README.md
+
+reference:
+  commands:
+    - PYTHONPATH=. python -m pytest tests/test_correctness.py -q
+    - PYTHONPATH=. python scripts/check_drift.py
+    - PYTHONPATH=. python scripts/bench.py
+  note: These commands are fast local references for the executor; GEPA does not auto-run them outside candidate execution.
+
+isolation:
+  backend: local
+  mode: bind_paths
+
+agent:
+  command: claude
+  timeout_seconds: 900
+  extra_args:
+    - --permission-mode
+    - acceptEdits
+    - --allowedTools
+    - Read,Edit,Write,Glob,Grep,Bash
+
+safety:
+  editable_paths:
+    - tinyalgo/**/*.py
+  frozen_paths:
+    - tests/**
+    - scripts/**
+    - benchmarks/*.md
+    - README.md
+    - pyproject.toml
+  max_files_per_candidate: 2
