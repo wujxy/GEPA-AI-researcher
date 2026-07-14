@@ -87,3 +87,82 @@ def test_prompt_trimming_keeps_mandatory_blocks_and_uses_refs_for_overflow():
     assert "summary 1" in prompt
     assert "candidate:cand_004" in prompt
     assert "omitted_context_refs" in prompt
+
+
+def test_prompt_trimming_keeps_only_current_candidate_mandatory_for_executor():
+    blocks = [
+        ContextBlock(
+            block_id="run:task",
+            kind=ContextBlockKind.RUN_FACT,
+            title="Task",
+            summary="goal",
+            inline_content={"goal": "improve"},
+            source_refs=[],
+            entity_refs=[],
+            visibility=ContextVisibility.AGENT,
+            role_scope=[ContextRole.EXECUTOR],
+        ),
+        *[
+            ContextBlock(
+                block_id=f"candidate:{candidate_id}",
+                kind=ContextBlockKind.CANDIDATE_FACT,
+                title=candidate_id,
+                summary=candidate_id,
+                inline_content={"candidate_id": candidate_id},
+                source_refs=[SourceRef(source_type="candidate", source_id=candidate_id)],
+                entity_refs=[],
+                visibility=ContextVisibility.AGENT,
+                role_scope=[ContextRole.EXECUTOR],
+            )
+            for candidate_id in ("historical", "current")
+        ],
+    ]
+    view = ContextView(
+        role=ContextRole.EXECUTOR,
+        envelope=ContextEnvelope(role="executor", round_id=1, phase="execution", candidate_id="current"),
+        blocks=blocks,
+        metadata={},
+    )
+
+    prompt = PromptAssembler(max_prompt_blocks=1).render_context_blocks(view)
+
+    assert '"goal": "improve"' in prompt
+    assert "current" in prompt
+    assert '"candidate:historical"]' in prompt
+
+
+def test_prompt_budget_comes_from_assembler_not_context_config():
+    blocks = [
+        ContextBlock(
+            block_id=f"candidate:cand_{index}",
+            kind=ContextBlockKind.CANDIDATE_FACT,
+            title=f"Candidate {index}",
+            summary=f"summary {index}",
+            inline_content={"candidate_id": f"cand_{index}"},
+            source_refs=[SourceRef(source_type="candidate", source_id=f"cand_{index}")],
+            entity_refs=[],
+            visibility=ContextVisibility.AGENT,
+            role_scope=[ContextRole.PROPOSER],
+        )
+        for index in range(3)
+    ]
+    view = ContextView(
+        role=ContextRole.PROPOSER,
+        envelope=ContextEnvelope(role="proposer", round_id=1, phase="mutation"),
+        blocks=blocks,
+        metadata={},
+    )
+    config = {
+        "task": {"goal": "improve"},
+        "runtime": {},
+        "evidence": {},
+        "context": {"max_prompt_blocks": 99},
+    }
+
+    prompt = PromptAssembler(max_prompt_blocks=1).build_proposer_prompt(
+        LoopState(task_name="task", round_id=1), config, view
+    )
+
+    assert "summary 0" in prompt
+    assert '"candidate:cand_2"' in prompt
+    assert "omitted_context_refs" in prompt

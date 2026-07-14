@@ -86,7 +86,7 @@ class PromptAssembler:
             PromptSection("task", f"Task goal:\n{config['task']['goal']}"),
             PromptSection("contract", _format_config_for_role(config, "proposer")),
             PromptSection("evidence", _format_evidence_policy(config)),
-            PromptSection("context", self.render_context(view, "proposer", empty="Proposer role context:\n- No prior candidate pool exists yet; create seed candidate(s).", max_prompt_blocks=_config_prompt_budget(config))),
+            PromptSection("context", self.render_context(view, "proposer", empty="Proposer role context:\n- No prior candidate pool exists yet; create seed candidate(s).")),
             PromptSection("evidence-policy", _evidence_access_policy()),
             PromptSection("constraints", f'''Important constraints:
 - Propose {proposal_count}.
@@ -113,7 +113,7 @@ structured evidence about what happened.'''),
             PromptSection("task", f"Task goal:\n{config['task']['goal']}"),
             PromptSection("contract", _format_config_for_role(config, "executor")),
             PromptSection("evidence", _format_evidence_policy(config)),
-            PromptSection("context", self.render_context(view, "executor", max_prompt_blocks=_config_prompt_budget(config))),
+            PromptSection("context", self.render_context(view, "executor")),
             PromptSection("evidence-policy", _evidence_access_policy()),
             PromptSection("constraints", f'''Constraints:
 - Do not ask the user for help.
@@ -163,7 +163,7 @@ Required JSON schema:
             PromptSection("purpose", "Evaluate whether the executor's result supports the candidate as a useful\nimprovement or valid finding for the configured task."),
             PromptSection("task", f"Task goal:\n{config['task']['goal']}"),
             PromptSection("contract", _format_config_for_role(config, "judger")),
-            PromptSection("context", self.render_context(view, "judger", max_prompt_blocks=_config_prompt_budget(config))),
+            PromptSection("context", self.render_context(view, "judger")),
             PromptSection("evidence-policy", _evidence_access_policy()),
             PromptSection("rubric", _JUDGE_RUBRIC),
             PromptSection("delivery", _JUDGE_DELIVERY),
@@ -175,15 +175,14 @@ Required JSON schema:
         role: str,
         *,
         empty: str = "",
-        max_prompt_blocks: int | None = None,
     ) -> str:
         if isinstance(view, ContextView):
-            return self.render_context_blocks(view, max_prompt_blocks=max_prompt_blocks)
+            return self.render_context_blocks(view)
         return _render_legacy_context(view, role, empty)
 
-    def render_context_blocks(self, view: ContextView, *, max_prompt_blocks: int | None = None) -> str:
+    def render_context_blocks(self, view: ContextView) -> str:
         lines = ["Context envelope:", json.dumps(view.envelope.to_dict(), ensure_ascii=False, sort_keys=True)]
-        selected, omitted = self._select_blocks(view, max_prompt_blocks)
+        selected, omitted = self._select_blocks(view)
         for block in selected:
             lines.append(self._render_block(block))
         if omitted:
@@ -193,18 +192,32 @@ Required JSON schema:
         return "\n\n".join(lines)
 
     def _select_blocks(
-        self, view: ContextView, max_prompt_blocks: int | None
+        self, view: ContextView
     ) -> tuple[list[ContextBlock], list[str]]:
         blocks = sorted(view.blocks, key=lambda item: (item.kind.value, item.block_id))
-        budget = self.max_prompt_blocks if max_prompt_blocks is None else max_prompt_blocks
+        budget = self.max_prompt_blocks
         if budget is None:
             return blocks, []
 
         mandatory_kinds = {ContextBlockKind.RUN_FACT, ContextBlockKind.LOOP_STATE}
-        if view.role in (ContextRole.EXECUTOR, ContextRole.JUDGE):
-            mandatory_kinds.add(ContextBlockKind.CANDIDATE_FACT)
         mandatory = [block for block in blocks if block.kind in mandatory_kinds]
+        if view.role in (ContextRole.EXECUTOR, ContextRole.JUDGE) and view.envelope.candidate_id:
+            current_candidate_id = view.envelope.candidate_id
+            mandatory.extend(
+                block
+                for block in blocks
+                if block.kind is ContextBlockKind.CANDIDATE_FACT
+                and (
+                    block.block_id == f"candidate:{current_candidate_id}"
+                    or any(
+                        ref.source_type == "candidate" and ref.source_id == current_candidate_id
+                        for ref in block.source_refs
+                    )
+                )
+            )
         optional = [block for block in blocks if block.kind not in mandatory_kinds]
+        mandatory_ids = {block.block_id for block in mandatory}
+        optional = [block for block in optional if block.block_id not in mandatory_ids]
         selected = mandatory + optional[:max(0, budget - len(mandatory))]
         selected_ids = {block.block_id for block in selected}
         omitted = [block.block_id for block in blocks if block.block_id not in selected_ids]
@@ -235,11 +248,6 @@ def _format_config_for_role(config: dict[str, Any], role: str) -> str:
     if role == "judger":
         return ""
     return "\n\n".join([_format_task_resources(config), _format_candidate_policy(config), _format_runtime(config)])
-
-
-def _config_prompt_budget(config: dict[str, Any]) -> int | None:
-    context_config = config.get("context", {})
-    return context_config.get("max_prompt_blocks")
 
 
 def _format_runtime(config: dict[str, Any]) -> str:
