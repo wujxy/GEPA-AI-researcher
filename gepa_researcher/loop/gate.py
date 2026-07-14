@@ -3,6 +3,20 @@ from __future__ import annotations
 from ..models.schemas import Candidate, GateDecision, Judgment, ParetoFrontier, ScoreMatrix
 
 
+DEFAULT_HARD_FAILURE_CATEGORIES = {
+    "frozen_violation",
+    "incomplete_validation",
+    "implementation_uncertainty",
+    "missing_metrics",
+    "no_implementation",
+    "invalid_hypothesis",
+    "scope_mismatch",
+    "duplicate_baseline",
+    "baseline_mismatch",
+    "accumulated_prior_changes",
+}
+
+
 class GEPAGate:
     def select_parents(
         self,
@@ -25,7 +39,7 @@ class GEPAGate:
         improvers: list[Candidate] = []
         for candidate in candidates:
             child_score = judgment_by_id.get(candidate.candidate_id)
-            if child_score is None:
+            if child_score is None or not self._eligible_judgment(child_score, {}):
                 continue
             parent_scores = [
                 parent_judgments[parent_id].score
@@ -57,6 +71,11 @@ class GEPAGate:
                 discarded.append(candidate.candidate_id)
                 reasons[candidate.candidate_id] = "discarded: missing judgment"
                 continue
+            eligible, eligibility_reason = self._candidate_eligible(judgment, {})
+            if not eligible:
+                discarded.append(candidate.candidate_id)
+                reasons[candidate.candidate_id] = eligibility_reason
+                continue
             if not had_active_pool:
                 accepted.append(candidate.candidate_id)
                 reasons[candidate.candidate_id] = "accepted: initial pool seed"
@@ -78,6 +97,20 @@ class GEPAGate:
             discarded=discarded,
             reason_by_candidate=reasons,
         )
+
+
+    def _candidate_eligible(self, judgment: Judgment, config: dict) -> tuple[bool, str]:
+        if not judgment.passed:
+            return False, "discarded: judgment did not pass required validation/quality gates"
+        hard_categories = set(config.get("gepa", {}).get("gate_hard_failure_categories") or DEFAULT_HARD_FAILURE_CATEGORIES)
+        matched = sorted(category for category in judgment.failure_categories if category in hard_categories)
+        if matched:
+            return False, "discarded: hard failure categories present: " + ", ".join(matched)
+        return True, "eligible"
+
+    def _eligible_judgment(self, judgment: Judgment, config: dict) -> bool:
+        eligible, _ = self._candidate_eligible(judgment, config)
+        return eligible
 
     def _task_best_ids(self, matrix: ScoreMatrix) -> set[str]:
         best_ids: set[str] = set()

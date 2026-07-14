@@ -166,7 +166,7 @@ class GEPAMiniFlowTest(unittest.TestCase):
             self._candidate("child_bad", 1, ["parent"]),
         ]
         judgments = [
-            Judgment("child_good", 1, 0.8, False, [{"sample_id": "task", "score": 0.8}], [], [], "high"),
+            Judgment("child_good", 1, 0.8, True, [{"sample_id": "task", "score": 0.8}], [], [], "high"),
             Judgment("child_bad", 1, 0.3, False, [{"sample_id": "task", "score": 0.3}], [], [], "high"),
         ]
         previous = ScoreMatrix(round_id=0, task_scores={"task": {"parent": 0.5}}, aggregate_scores={"parent": 0.5})
@@ -180,6 +180,46 @@ class GEPAMiniFlowTest(unittest.TestCase):
 
         self.assertEqual(decision.accepted, ["child_good"])
         self.assertEqual(decision.discarded, ["child_bad"])
+
+    def test_gepa_gate_discards_failed_task_best(self):
+        from gepa_researcher.loop.gate import GEPAGate
+
+        candidate = self._candidate("child_failed_best", 1, ["parent"])
+        judgments = [
+            Judgment(
+                "child_failed_best",
+                1,
+                0.9,
+                False,
+                [{"sample_id": "task", "score": 0.9}],
+                ["incomplete_validation"],
+                [],
+                "high",
+            )
+        ]
+        previous = ScoreMatrix(round_id=0, task_scores={"task": {"parent": 0.5}}, aggregate_scores={"parent": 0.5})
+        trial = ScoreMatrix(
+            round_id=1,
+            task_scores={"task": {"parent": 0.5, "child_failed_best": 0.9}},
+            aggregate_scores={"parent": 0.5, "child_failed_best": 0.9},
+        )
+
+        decision = GEPAGate().accept_or_discard(1, [candidate], judgments, previous, trial, had_active_pool=True)
+
+        self.assertEqual(decision.accepted, [])
+        self.assertEqual(decision.discarded, ["child_failed_best"])
+        self.assertIn("did not pass", decision.reason_by_candidate["child_failed_best"])
+
+    def test_minibatch_improvers_ignore_failed_judgments(self):
+        from gepa_researcher.loop.gate import GEPAGate
+
+        candidate = self._candidate("child_failed", 1, ["parent"])
+        parent = Judgment("parent", 1, 0.5, True, [], [], [], "high")
+        child = Judgment("child_failed", 1, 0.9, False, [], ["incomplete_validation"], [], "high")
+
+        improvers = GEPAGate().minibatch_improvers([candidate], [child], {"parent": parent})
+
+        self.assertEqual(improvers, [])
 
     def test_generation_decision_merges_feedback_and_accepted_pareto_feedback(self):
         from gepa_researcher.orchestrator import ResearchOrchestrator

@@ -227,6 +227,33 @@ _EXECUTOR_RESULT_SCHEMA = """{
 }"""
 
 
+_PROPOSER_CANDIDATE_SCHEMA = """{
+  "hypothesis": "short falsifiable hypothesis or optimization idea",
+  "scope": "module, component, prompt, dataset, workflow, or subsystem to change/test",
+  "proposed_change": "what to test this round",
+  "rationale": "why this is a good next candidate",
+  "expected_improvement": "which configured metric or objective should improve",
+  "risk": "main risk or failure mode",
+  "strategy": "short name for the approach",
+  "target_files": ["file to change"],
+  "safety_class": "optional short safety note (free text)",
+  "candidate_class": "optional optimization-type tag (free text)",
+  "expected_gain": 0.0,
+  "analysis_plan": ["step 1", "step 2"],
+  "executor_contract": {"instructions": "what the executor should attempt or verify", "expected_artifacts": ["artifact"], "success_criteria": ["criterion"]},
+  "expected_artifacts": ["artifact"],
+  "mutation_note": "what prior feedback this candidate responds to"
+}"""
+
+
+_PROPOSER_FINAL_CONTRACT = """Final delivery contract (mandatory):
+- Your final response MUST be exactly one parseable JSON object matching the required schema below.
+- Wrapping the JSON in a ```json code fence is acceptable; any prose, Markdown table, heading, commentary, status update, or natural-language wrap-up outside the JSON is forbidden.
+- NEVER say that you have already submitted candidates, that you will continue later, or that another agent completed work unless that text is inside a JSON string field.
+- If you are uncertain, blocked, or found that an idea is infeasible, still return the required JSON object with conservative fields, explicit risk, and an analysis_plan step that verifies the uncertainty.
+- Do not ask for more data and do not emit a natural-language summary."""
+
+
 class AgentProposer:
     def __init__(self, client: ClaudeCodeClient):
         self.client = client
@@ -257,26 +284,10 @@ Important constraints:
 - Propose candidates that are executable in the runtime environment above.
 - Include diagnostics or evidence artifacts in the analysis plan when they can support or falsify the candidate.
 - Choose task-appropriate evidence; do not rely on a fixed artifact template.
-- Return only a JSON object, no prose outside JSON.
+{_PROPOSER_FINAL_CONTRACT}
 
 Required JSON schema:
-{{
-  "hypothesis": "short falsifiable hypothesis or optimization idea",
-  "scope": "module, component, prompt, dataset, workflow, or subsystem to change/test",
-  "proposed_change": "what to test this round",
-  "rationale": "why this is a good next candidate",
-  "expected_improvement": "which configured metric or objective should improve",
-  "risk": "main risk or failure mode",
-  "strategy": "short name for the approach",
-  "target_files": ["file to change"],
-  "safety_class": "optional short safety note (free text)",
-  "candidate_class": "optional optimization-type tag (free text)",
-  "expected_gain": 0.0,
-  "analysis_plan": ["step 1", "step 2"],
-  "executor_contract": {{"instructions": "what the executor should attempt or verify", "expected_artifacts": ["artifact"], "success_criteria": ["criterion"]}},
-  "expected_artifacts": ["artifact"],
-  "mutation_note": "what prior feedback this candidate responds to"
-}}
+{_PROPOSER_CANDIDATE_SCHEMA}
 """
         result = _run_agent_json(
             self.client,
@@ -342,28 +353,12 @@ Important constraints:
 - Keep each candidate small enough for the executor to test in one isolated workspace.
 - Propose candidates that are executable in the runtime environment above.
 - Include diagnostics or evidence artifacts in each analysis plan when they can support or falsify the candidate.
-- Return only a JSON object, no prose outside JSON.
+{_PROPOSER_FINAL_CONTRACT}
 
 Required JSON schema:
 {{
   "candidates": [
-    {{
-      "hypothesis": "short falsifiable hypothesis or optimization idea",
-      "scope": "module, component, prompt, dataset, workflow, or subsystem to change/test",
-      "proposed_change": "what to test this round",
-      "rationale": "why this is a good next candidate",
-      "expected_improvement": "which configured metric or objective should improve",
-      "risk": "main risk or failure mode",
-      "strategy": "short name for the approach",
-      "target_files": ["file to change"],
-      "safety_class": "optional short safety note (free text)",
-      "candidate_class": "optional optimization-type tag (free text)",
-      "expected_gain": 0.0,
-      "analysis_plan": ["step 1", "step 2"],
-      "executor_contract": {{"instructions": "what the executor should attempt or verify", "expected_artifacts": ["artifact"], "success_criteria": ["criterion"]}},
-      "expected_artifacts": ["artifact"],
-      "mutation_note": "what prior feedback this candidate responds to"
-    }}
+    {_PROPOSER_CANDIDATE_SCHEMA}
   ]
 }}
 """

@@ -210,14 +210,39 @@ class WorkspaceManager:
                 f"path={worktree_path} before={snapshot} after={current}"
             )
 
+    def assert_worktree_clean_for_execution(self, worktree_path: str) -> None:
+        """Require a candidate worktree to start from a clean, attributable state."""
+        if self.mode != "git_worktree":
+            return
+        worktree = Path(worktree_path).expanduser().resolve()
+        status = self._filtered_worktree_status(worktree)
+        if status:
+            raise WorkspaceError(
+                "candidate worktree is not clean before execution: "
+                f"path={worktree} status={status!r}"
+            )
+
+    def _filtered_worktree_status(self, worktree: Path) -> str:
+        lines = _git(worktree, "status", "--porcelain=v1", "--untracked-files=all").splitlines()
+        ignore_globs = [
+            *self._controller_ignore_globs,
+            *self._pre_materialized_lfs_paths,
+            *list(self.config.get("clean_start_ignore_globs") or []),
+        ]
+        kept = [line for line in lines if line and not self._status_line_matches_any(line, ignore_globs)]
+        return "\n".join(kept)
+
+    def _status_line_matches_any(self, line: str, patterns: list[str]) -> bool:
+        path = _status_path(line)
+        return any(_matches_glob(path, pattern) for pattern in patterns)
+
     def _filtered_status(self, repo: Path) -> str:
         lines = _git(repo, "status", "--porcelain=v1", "--untracked-files=all").splitlines()
         kept = [line for line in lines if line and not self._is_ignored_status_line(line)]
         return "\n".join(kept)
 
     def _is_ignored_status_line(self, line: str) -> bool:
-        path = _status_path(line)
-        return any(_matches_glob(path, pattern) for pattern in self._controller_ignore_globs)
+        return self._status_line_matches_any(line, self._controller_ignore_globs)
 
     def _recover_stale_controller_protection(self, repo: Path, lock_path: Path) -> None:
         lock_pid = self._read_lock_pid(lock_path)

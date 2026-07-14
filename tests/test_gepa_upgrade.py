@@ -53,7 +53,7 @@ class GEPAUpgradeTest(unittest.TestCase):
 
     def test_gate_requires_minibatch_improvement(self):
         parent = Judgment("parent", 0, 0.5, False, [{"sample_id": "f", "score": 0.5}], [], [], "high")
-        good = Judgment("good", 0, 0.6, False, [{"sample_id": "f", "score": 0.6}], [], [], "high")
+        good = Judgment("good", 0, 0.6, True, [{"sample_id": "f", "score": 0.6}], [], [], "high")
         bad = Judgment("bad", 0, 0.4, False, [{"sample_id": "f", "score": 0.4}], [], [], "high")
         candidates = [self._candidate("good"), self._candidate("bad")]
         improvers = GEPAGate().minibatch_improvers(candidates, [good, bad], {"parent": parent})

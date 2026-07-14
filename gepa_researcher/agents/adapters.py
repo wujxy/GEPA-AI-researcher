@@ -232,6 +232,8 @@ class ExecutorAdapter:
                 execution_mode="evaluate_only",
                 status="evaluating",
             )
+            self.workspace_manager.assert_worktree_clean_for_execution(eval_lease.worktree_path)
+            record.artifacts["clean_start_audit"] = {"passed": True}
             return eval_lease, record, False
 
         parent_sha = ""
@@ -241,6 +243,7 @@ class ExecutorAdapter:
             if not parent_sha and str(config.get("workspace", {}).get("mode")) == "git_worktree":
                 raise RuntimeError(f"parent {parent_id} has no accepted result SHA")
         lease = self.workspace_manager.prepare(candidate, parent_sha)
+        self.workspace_manager.assert_worktree_clean_for_execution(lease.worktree_path)
         self.registry.record_workspace(lease)
         record = ExecutionRecord(
             execution_id=str(uuid.uuid4()),
@@ -254,6 +257,7 @@ class ExecutorAdapter:
             worktree_path=lease.worktree_path,
             execution_mode="implement_and_validate",
             status="executing",
+            artifacts={"clean_start_audit": {"passed": True}},
         )
         self.registry.record_execution(record)
         return lease, record, True

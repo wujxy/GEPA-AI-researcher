@@ -534,6 +534,60 @@ class WorkspaceAndProvenanceTest(unittest.TestCase):
             self.assertEqual(executor.modes, ["implement_and_validate", "evaluate_only"])
             self.assertEqual(registry.accepted_result_sha(candidate.candidate_id), first_sha)
 
+    def test_existing_worktree_must_be_clean_before_evaluate_only(self):
+        class CommittingExecutor:
+            def __init__(self):
+                self.calls = 0
+
+            def execute(self, candidate, config):
+                self.calls += 1
+                repo = Path(config["_candidate_repo"])
+                _git(repo, "config", "user.email", "test@example.invalid")
+                _git(repo, "config", "user.name", "GEPA Test")
+                (repo / "src" / "hot.cc").write_text("int hot() { return 2; }\n", encoding="utf-8")
+                _git(repo, "add", "src/hot.cc")
+                _git(repo, "commit", "-m", "candidate")
+                return Trace(
+                    candidate.candidate_id,
+                    candidate.round_id,
+                    [SampleTrace("task", "in", "out", "expected", "ok")],
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, baseline = _make_repo(root)
+            run_dir = root / "run"
+            config = {
+                "workspace": {
+                    "mode": "git_worktree",
+                    "repo_path": str(repo),
+                    "root": str(run_dir / "worktrees"),
+                    "baseline_ref": baseline,
+                    "branch_prefix": "gepa/test",
+                },
+                "candidate_policy": {"max_commits": 1},
+                "execution": {"lifecycle": "materialize_once"},
+                "executor": {"max_workers": 1},
+            }
+            candidate = _candidate()
+            executor = CommittingExecutor()
+            registry = ExecutionRegistry(run_dir)
+            adapter = ExecutorAdapter(executor, run_dir, WorkspaceManager(run_dir, config), registry)
+
+            first = adapter.run_many([candidate], 0, config)
+            self.assertFalse(first.failed_candidate_ids)
+            registry.mark_candidate_status(candidate.candidate_id, "accepted")
+            workspace = registry.workspace(candidate.candidate_id)
+            self.assertIsNotNone(workspace)
+            dirty_file = Path(workspace["worktree_path"]) / "pre_applied.txt"
+            dirty_file.write_text("pollution\n", encoding="utf-8")
+
+            second = adapter.run_many([candidate], 0, config)
+
+            self.assertEqual(executor.calls, 1)
+            self.assertEqual(second.failed_candidate_ids, [candidate.candidate_id])
+            self.assertIn("candidate worktree is not clean before execution", second.traces[0].samples[0].error)
+
     def test_br101_clean_source_with_runtime_debris_is_judged_normally(self):
         # Regression for the br101 incident: a candidate that commits clean
         # in-scope source and passes validation, but leaves untracked runtime

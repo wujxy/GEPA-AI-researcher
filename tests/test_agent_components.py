@@ -99,6 +99,8 @@ class AgentComponentsTest(unittest.TestCase):
 
         prompt = client.prompts[0][1]
         self.assertIn("Runtime environment", prompt)
+        self.assertIn("Final delivery contract", prompt)
+        self.assertIn("exactly one parseable JSON object", prompt)
         self.assertIn("conda run -n myenv python", prompt)
         self.assertIn("do not install packages", prompt)
         self.assertIn("Visual evidence", prompt)
@@ -196,6 +198,9 @@ class AgentComponentsTest(unittest.TestCase):
         self.assertEqual(batch.candidates[0].candidate_id, "cand_000_000")
         prompt = client.prompts[0][1]
         self.assertIn("Propose exactly 10 candidate", prompt)
+        self.assertIn("Final delivery contract", prompt)
+        self.assertIn("exactly one parseable JSON object", prompt)
+        self.assertIn("NEVER say that you have already submitted candidates", prompt)
         self.assertIn('"candidates"', prompt)
 
     def test_agent_proposer_batch_prompt_includes_candidate_policy_targets(self):
