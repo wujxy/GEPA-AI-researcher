@@ -6,7 +6,8 @@ from io import StringIO
 from pathlib import Path
 
 from gepa_researcher.agents.agent_client import AgentError, ClaudeCodeClient
-from gepa_researcher.agents.agent_components import AgentExecutor, AgentJudger, AgentProposer
+from gepa_researcher.agents.agent_components import AgentExecutor, AgentJudger, AgentProposer, AgentProtocolError
+from gepa_researcher.loop.context_views import build_executor_context, build_judger_context, build_proposer_context
 from gepa_researcher.models.schemas import Candidate, LoopState, SampleTrace, Trace
 
 
@@ -68,6 +69,73 @@ def _make_candidate(candidate_id: str = "cand_000") -> Candidate:
 
 
 class AgentComponentsTest(unittest.TestCase):
+    def test_role_contexts_include_hard_context_envelope(self):
+        candidate = _make_candidate("cand_env")
+        state = LoopState(task_name="task", round_id=2)
+        config = {
+            "task": {"goal": "g"},
+            "run_id": "run-001",
+            "_eval_phase": "feedback",
+            "_execution_id": "exec-env",
+            "_input_revision": "a" * 40,
+            "_selected_sample_ids": ["s1"],
+            "_gepa_context": {"pareto_frontier": {}, "parents": [], "score_matrix": {}, "dataset_split": {}},
+        }
+        trace = Trace(candidate_id=candidate.candidate_id, round_id=2, samples=[])
+
+        proposer = build_proposer_context(state, config)["envelope"]
+        executor = build_executor_context(candidate, config, Path("/tmp/run"), Path("/tmp/artifacts"), Path("/tmp/repo"), "evaluate_only")["envelope"]
+        judger = build_judger_context(candidate, trace, config)["envelope"]
+
+        self.assertEqual(proposer["role"], "proposer")
+        self.assertEqual(proposer["round_id"], 2)
+        self.assertEqual(executor["role"], "executor")
+        self.assertEqual(executor["candidate_id"], "cand_env")
+        self.assertEqual(executor["execution_id"], "exec-env")
+        self.assertEqual(executor["input_revision"], "a" * 40)
+        self.assertEqual(executor["selected_sample_ids"], ["s1"])
+        self.assertEqual(judger["role"], "judger")
+        self.assertEqual(judger["candidate_id"], "cand_env")
+
+    def test_proposer_rejects_missing_required_payload_fields(self):
+        client = CapturingClient({"hypothesis": "h", "scope": "task_system"})
+        config = {"task": {"goal": "g"}, "runtime": {}, "evidence": {}}
+
+        with self.assertRaisesRegex(AgentProtocolError, "missing required proposer field"):
+            AgentProposer(client).propose(LoopState(task_name="task"), config)
+
+    def test_executor_repair_payload_is_validated(self):
+        err = AgentError("Agent did not return a parseable JSON object.")
+        err.raw_output = "partial non-json"
+        repaired = type("Result", (), {"text": "{}", "data": {"summary": "still missing schema"}})()
+        client = QueuedClient([err, repaired])
+        config = {"task": {"goal": "g"}, "runtime": {}, "evidence": {}}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(AgentProtocolError, "missing required executor field"):
+                AgentExecutor(client, Path(tmp)).execute(_make_candidate("cand_protocol"), config)
+
+    def test_judger_score_out_of_range_falls_back_to_protocol_failure(self):
+        client = CapturingClient(
+            {
+                "score": 1.7,
+                "passed": True,
+                "per_sample_scores": [],
+                "failure_categories": [],
+                "actionable_feedback": [],
+                "confidence": "high",
+            }
+        )
+        candidate = _make_candidate("cand_judge_invalid")
+        trace = Trace(candidate_id=candidate.candidate_id, round_id=0, samples=[])
+
+        judgment = AgentJudger(client).judge(candidate, trace, {"task": {"goal": "g"}, "judger": {"repair_retries": 0}})
+
+        self.assertEqual(judgment.score, 0.0)
+        self.assertFalse(judgment.passed)
+        self.assertEqual(judgment.failure_categories, ["judger_protocol_invalid"])
+        self.assertEqual(judgment.confidence, "low")
+
     def test_proposer_prompt_includes_runtime(self):
         client = CapturingClient(
             {
@@ -432,7 +500,15 @@ class AgentComponentsTest(unittest.TestCase):
             self.assertIn("timeout=7s", output.getvalue())
 
     def test_executor_prompt_includes_hardened_delivery_contract(self):
-        client = CapturingClient({"summary": "", "errors": [], "artifact_paths": []})
+        client = CapturingClient({
+            "summary": "prompt inspected",
+            "implementation": {"changed_files": [], "commands_run": [], "notes": ""},
+            "metrics": {},
+            "validation": {"passed": False},
+            "diagnostics": [],
+            "artifact_paths": [],
+            "errors": [],
+        })
         config = {"task": {"goal": "g"}, "runtime": {}, "evidence": {}}
         with tempfile.TemporaryDirectory() as tmp:
             AgentExecutor(client, Path(tmp)).execute(_make_candidate(), config)
@@ -455,6 +531,7 @@ class AgentComponentsTest(unittest.TestCase):
                 "text": "{}",
                 "data": {
                     "summary": "transcribed prior state into JSON",
+                    "implementation": {"changed_files": [], "commands_run": [], "notes": ""},
                     "validation": {"passed": False},
                     "metrics": {"primary": None},
                     "errors": ["prior attempt produced no JSON"],
@@ -530,7 +607,15 @@ class AgentComponentsTest(unittest.TestCase):
         self.assertNotIn("EXECUTION_SHOULD_NOT_APPEAR", prompt)
 
     def test_executor_prompt_uses_role_context_without_gepa_global_state(self):
-        client = CapturingClient({"summary": "", "errors": [], "artifact_paths": []})
+        client = CapturingClient({
+            "summary": "prompt inspected",
+            "implementation": {"changed_files": [], "commands_run": [], "notes": ""},
+            "metrics": {},
+            "validation": {"passed": False},
+            "diagnostics": [],
+            "artifact_paths": [],
+            "errors": [],
+        })
         candidate = _make_candidate("cand_010")
         candidate.executor_contract = {"instructions": "run the narrow check"}
         config = {

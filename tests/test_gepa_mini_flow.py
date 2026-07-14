@@ -1,5 +1,6 @@
 import json
 import tempfile
+import threading
 import time
 import unittest
 from contextlib import redirect_stdout
@@ -34,6 +35,36 @@ class RecordingExecutor:
                 )
             ],
         )
+
+
+class ConcurrentRecordingExecutor:
+    def __init__(self):
+        self.active = 0
+        self.max_active = 0
+        self.lock = threading.Lock()
+
+    def execute(self, candidate, config):
+        with self.lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        try:
+            time.sleep(0.1)
+            return Trace(
+                candidate_id=candidate.candidate_id,
+                round_id=candidate.round_id,
+                samples=[
+                    SampleTrace(
+                        sample_id="task_a",
+                        input="data.csv",
+                        output="ok",
+                        expected="unknown",
+                        logs="ran",
+                    )
+                ],
+            )
+        finally:
+            with self.lock:
+                self.active -= 1
 
 
 class ScoreByCandidateJudger:
@@ -156,6 +187,8 @@ class GEPAMiniFlowTest(unittest.TestCase):
 
         self.assertEqual(decision.accepted, ["child_good"])
         self.assertEqual(decision.discarded, ["child_bad"])
+        self.assertEqual(decision.reason_code_by_candidate["child_good"], "TASK_BEST")
+        self.assertEqual(decision.reason_code_by_candidate["child_bad"], "JUDGMENT_FAILED")
 
     def test_gepa_gate_discards_failed_task_best(self):
         from gepa_researcher.loop.gate import GEPAGate
@@ -185,6 +218,7 @@ class GEPAMiniFlowTest(unittest.TestCase):
         self.assertEqual(decision.accepted, [])
         self.assertEqual(decision.discarded, ["child_failed_best"])
         self.assertIn("did not pass", decision.reason_by_candidate["child_failed_best"])
+        self.assertEqual(decision.reason_code_by_candidate["child_failed_best"], "JUDGMENT_FAILED")
 
     def test_minibatch_improvers_ignore_failed_judgments(self):
         from gepa_researcher.loop.gate import GEPAGate
@@ -303,6 +337,28 @@ class GEPAMiniFlowTest(unittest.TestCase):
             second_round = [row for row in candidate_lines if row["round_id"] == 1]
             self.assertTrue(second_round)
             self.assertTrue(any(row["parent_candidate_ids"] for row in second_round))
+
+
+    def test_evaluate_candidates_uses_executor_max_workers(self):
+        from gepa_researcher.orchestrator import ResearchOrchestrator
+        from tests._fakes import FakeProposer, make_generic_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            config = make_generic_config(run_dir, max_rounds=1, batch_size=3)
+            config["executor"]["max_workers"] = 3
+            executor = ConcurrentRecordingExecutor()
+            orchestrator = ResearchOrchestrator(
+                config=config,
+                config_path=Path(tmp) / "config.json",
+                components=(FakeProposer(), executor, ScoreByCandidateJudger()),
+            )
+            candidates = [self._candidate(f"cand_000_{index:03d}") for index in range(3)]
+
+            with redirect_stdout(StringIO()):
+                orchestrator._evaluate_candidates(candidates, 0, "pareto", ["task_a"])
+
+            self.assertGreaterEqual(executor.max_active, 2)
 
 
 if __name__ == "__main__":

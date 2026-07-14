@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from ..models.schemas import Candidate, LoopState, SampleTrace, Trace
+from ..models.schemas import Candidate, ContextEnvelope, LoopState, SampleTrace, Trace
 
 
 ARTIFACT_KEYS_FOR_CONTEXT = {
@@ -154,6 +154,7 @@ def build_proposer_context(state: LoopState, config: dict[str, Any]) -> dict[str
     parents = list(gepa_context.get("parents") or [])
     relevant_ids = _relevant_candidate_ids(frontier, parents)
     return {
+        "envelope": _context_envelope("proposer", state.round_id, config).to_dict(),
         "prior_context": _prior_context_for_role(dict(config.get("_prior_context") or {})),
         "state": state_for_agent(state),
         "frontier": frontier,
@@ -181,6 +182,14 @@ def build_executor_context(
 ) -> dict[str, Any]:
     candidate_ref = str(run_dir / "traces" / f"round_{candidate.round_id:03d}" / candidate.candidate_id / "candidate.json")
     return {
+        "envelope": _context_envelope(
+            "executor",
+            candidate.round_id,
+            config,
+            candidate_id=candidate.candidate_id,
+            execution_id=config.get("_execution_id"),
+            input_revision=config.get("_input_revision"),
+        ).to_dict(),
         "prior_context": _prior_context_for_role(dict(config.get("_prior_context") or {})),
         "evaluation": {
             "eval_phase": config.get("_eval_phase", "pareto"),
@@ -200,6 +209,14 @@ def build_judger_context(candidate: Candidate, trace: Trace, config: dict[str, A
     candidate_ref = str(run_dir / "traces" / f"round_{candidate.round_id:03d}" / candidate.candidate_id / "candidate.json")
     trace_ref = str(run_dir / "traces" / f"round_{trace.round_id:03d}" / trace.candidate_id / "trace.json")
     return {
+        "envelope": _context_envelope(
+            "judger",
+            trace.round_id,
+            config,
+            candidate_id=candidate.candidate_id,
+            execution_id=config.get("_execution_id"),
+            input_revision=config.get("_input_revision"),
+        ).to_dict(),
         "evaluation": {
             "eval_phase": config.get("_eval_phase", "pareto"),
             "selected_sample_ids": list(config.get("_selected_sample_ids") or []),
@@ -207,6 +224,27 @@ def build_judger_context(candidate: Candidate, trace: Trace, config: dict[str, A
         "candidate": candidate_for_judger(candidate, [candidate_ref]),
         "trace": trace_for_agent(trace, [trace_ref]),
     }
+
+
+def _context_envelope(
+    role: str,
+    round_id: int,
+    config: dict[str, Any],
+    *,
+    candidate_id: str | None = None,
+    execution_id: str | None = None,
+    input_revision: str | None = None,
+) -> ContextEnvelope:
+    return ContextEnvelope(
+        role=role,
+        run_id=str(config.get("run_id") or Path(str(config.get("run_dir", ""))).name or "") or None,
+        round_id=round_id,
+        phase=str(config.get("_eval_phase") or config.get("_agent_phase") or "unspecified"),
+        candidate_id=candidate_id,
+        execution_id=execution_id,
+        input_revision=input_revision,
+        selected_sample_ids=list(config.get("_selected_sample_ids") or []),
+    )
 
 
 def _sample_for_agent(sample: SampleTrace) -> dict[str, Any]:

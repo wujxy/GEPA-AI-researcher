@@ -157,6 +157,21 @@ def test_implementation_execution_creates_result_revision_and_updates_store(tmp_
     assert [item.execution_id for item in store.list_for_candidate(card.candidate_id)] == [spec.execution_id]
 
 
+def test_execution_service_indexes_trace_artifact(tmp_path: Path):
+    repo, baseline = _make_repo(tmp_path)
+    card = _card(baseline)
+    spec = _spec(card, ExecutionPhase.IMPLEMENTATION, baseline)
+    service, store = _service(tmp_path, repo, baseline, CommittingRunner())
+
+    record, _ = service.execute(spec, card)
+
+    persisted = store.get(spec.execution_id)
+    assert [artifact.kind.value for artifact in persisted.artifact_refs] == ["execution_trace"]
+    artifact_path = service.run_dir / persisted.artifact_refs[0].path
+    assert artifact_path.exists()
+    assert "cand_001_000" in artifact_path.read_text(encoding="utf-8")
+
+
 def test_git_implementation_without_commit_fails_without_result_revision(tmp_path: Path):
     repo, baseline = _make_repo(tmp_path)
     card = _card(baseline)
@@ -166,6 +181,7 @@ def test_git_implementation_without_commit_fails_without_result_revision(tmp_pat
     record, trace = service.execute(spec, card)
 
     assert record.status == ExecutionStatus.FAILED
+    assert record.failure.code == "NO_CANDIDATE_COMMIT"
     assert record.result_revision is None
     assert "no candidate commit produced" in trace.samples[0].error
     assert store.get(spec.execution_id).result_revision is None

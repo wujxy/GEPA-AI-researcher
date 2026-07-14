@@ -27,6 +27,51 @@ class CandidateStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
+_TERMINAL_STATUSES = {
+    CandidateStatus.ACCEPTED,
+    CandidateStatus.REJECTED,
+    CandidateStatus.IMPLEMENTATION_FAILED,
+    CandidateStatus.EVALUATION_FAILED,
+    CandidateStatus.CANCELLED,
+}
+
+_CANDIDATE_TRANSITIONS: dict[CandidateStatus, dict[str, CandidateStatus]] = {
+    CandidateStatus.GENERATED: {
+        "admit": CandidateStatus.ADMITTED,
+        "reject_admission": CandidateStatus.REJECTED,
+        "cancel": CandidateStatus.CANCELLED,
+    },
+    CandidateStatus.ADMITTED: {
+        "implementation_started": CandidateStatus.MATERIALIZING,
+        "implementation_failed": CandidateStatus.IMPLEMENTATION_FAILED,
+        "reject": CandidateStatus.REJECTED,
+        "cancel": CandidateStatus.CANCELLED,
+    },
+    CandidateStatus.MATERIALIZING: {
+        "implementation_succeeded": CandidateStatus.MATERIALIZED,
+        "implementation_failed": CandidateStatus.IMPLEMENTATION_FAILED,
+        "cancel": CandidateStatus.CANCELLED,
+    },
+    CandidateStatus.MATERIALIZED: {
+        "evaluation_started": CandidateStatus.EVALUATING,
+        "gate_accepted": CandidateStatus.ACCEPTED,
+        "gate_rejected": CandidateStatus.REJECTED,
+        "cancel": CandidateStatus.CANCELLED,
+    },
+    CandidateStatus.EVALUATING: {
+        "evaluation_succeeded": CandidateStatus.EVALUATED,
+        "evaluation_failed": CandidateStatus.EVALUATION_FAILED,
+        "cancel": CandidateStatus.CANCELLED,
+    },
+    CandidateStatus.EVALUATED: {
+        "gate_accepted": CandidateStatus.ACCEPTED,
+        "gate_rejected": CandidateStatus.REJECTED,
+        "evaluation_started": CandidateStatus.EVALUATING,
+        "cancel": CandidateStatus.CANCELLED,
+    },
+}
+
+
 @dataclass(frozen=True)
 class ProposalIdea:
     proposal_id: str
@@ -111,6 +156,40 @@ class CandidateCard:
 
     def touch(self) -> None:
         self.updated_at = _now_iso()
+
+    def transition(
+        self,
+        event: str,
+        *,
+        result_revision: str | None = None,
+        final_decision: str | None = None,
+        score_summary: dict[str, float] | None = None,
+    ) -> None:
+        if self.status in _TERMINAL_STATUSES:
+            raise ValueError(f"candidate is terminal and cannot transition: {self.status.value}")
+        target = _CANDIDATE_TRANSITIONS.get(self.status, {}).get(event)
+        if target is None:
+            raise ValueError(f"illegal candidate transition: {self.status.value} --{event}--> ?")
+        if result_revision is not None:
+            self.result_revision = RevisionRef.validate_sha(result_revision)
+        if target in {CandidateStatus.MATERIALIZED, CandidateStatus.EVALUATED, CandidateStatus.ACCEPTED} and self.result_revision is None:
+            raise ValueError(f"candidate transition {event!r} requires result_revision")
+        if target in {CandidateStatus.ACCEPTED, CandidateStatus.REJECTED}:
+            if not final_decision:
+                raise ValueError(f"candidate terminal transition {event!r} requires final_decision")
+            self.final_decision = final_decision
+        elif final_decision is not None:
+            self.final_decision = final_decision
+        if score_summary is not None:
+            self.score_summary.update(score_summary)
+        self.status = target
+        self.touch()
+
+    def validate_invariants(self) -> None:
+        if self.status in {CandidateStatus.MATERIALIZED, CandidateStatus.EVALUATED, CandidateStatus.ACCEPTED} and self.result_revision is None:
+            raise ValueError(f"candidate {self.candidate_id} status {self.status.value} requires result_revision")
+        if self.status in {CandidateStatus.ACCEPTED, CandidateStatus.REJECTED} and not self.final_decision:
+            raise ValueError(f"terminal candidate {self.candidate_id} requires final_decision")
 
     def to_dict(self) -> dict[str, Any]:
         return {

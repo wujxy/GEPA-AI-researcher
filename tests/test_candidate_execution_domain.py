@@ -49,6 +49,40 @@ class CandidateExecutionDomainTest(unittest.TestCase):
         self.assertNotIn("worktree_path", str(data))
         self.assertEqual(CandidateCard.from_dict(data).proposal.hypothesis, "inline hot function")
 
+    def test_candidate_card_transition_enforces_revision_invariants(self):
+        proposal = ProposalIdea(
+            proposal_id="proposal-1",
+            hypothesis="h",
+            scope="src/hot.cc",
+            proposed_change="change",
+            rationale="why",
+            expected_improvement="score",
+            risk="risk",
+            prompt_text="prompt",
+        )
+        card = CandidateCard(
+            candidate_id="cand_001_000",
+            round_id=1,
+            parent_candidate_ids=(),
+            proposal_id=proposal.proposal_id,
+            proposal=proposal,
+            base_revision="a" * 40,
+            status=CandidateStatus.ADMITTED,
+        )
+
+        card.transition("implementation_started")
+        with self.assertRaisesRegex(ValueError, "result_revision"):
+            card.transition("implementation_succeeded")
+        card.transition("implementation_succeeded", result_revision="b" * 40)
+        card.transition("evaluation_started")
+        card.transition("evaluation_succeeded")
+        card.transition("gate_accepted", final_decision="accepted")
+
+        self.assertEqual(card.status, CandidateStatus.ACCEPTED)
+        self.assertEqual(card.result_revision, "b" * 40)
+        with self.assertRaisesRegex(ValueError, "terminal"):
+            card.transition("implementation_started")
+
     def test_execution_spec_and_record_are_execution_id_keyed(self):
         spec = ExecutionSpec(
             execution_id="exec-001",

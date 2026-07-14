@@ -17,6 +17,10 @@ from ..loop.context_views import (
 from ..models.schemas import AgentCallContext, Candidate, CandidateBatch, Judgment, LoopState, SampleTrace, Trace
 
 
+class AgentProtocolError(ValueError):
+    """Agent returned parseable JSON that does not satisfy GEPA's hard protocol."""
+
+
 def format_runtime(config: dict[str, Any]) -> str:
     runtime = config.get("runtime", {})
     if not runtime:
@@ -215,6 +219,78 @@ def _call_artifact(result) -> dict[str, Any]:
     return {"agent_call_id": record.call_id} if record is not None else {}
 
 
+def _require_mapping(data: Any, label: str) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        raise AgentProtocolError(f"{label}: expected JSON object")
+    return data
+
+
+def _require_fields(data: dict[str, Any], fields: tuple[str, ...], label: str) -> None:
+    missing = [field for field in fields if field not in data or data[field] in (None, "")]
+    if missing:
+        raise AgentProtocolError(f"missing required {label} field(s): {missing}")
+
+
+def _require_list(value: Any, field: str) -> list[Any]:
+    if not isinstance(value, list):
+        raise AgentProtocolError(f"{field}: expected list")
+    return value
+
+
+def validate_proposal_payload(data: Any) -> dict[str, Any]:
+    payload = _require_mapping(data, "proposer payload")
+    _require_fields(
+        payload,
+        ("hypothesis", "scope", "proposed_change", "rationale", "expected_improvement", "risk"),
+        "proposer",
+    )
+    for field in ("target_files", "expected_artifacts", "analysis_plan"):
+        if field in payload:
+            _require_list(payload[field], field)
+    if "executor_contract" in payload and not isinstance(payload["executor_contract"], dict):
+        raise AgentProtocolError("executor_contract: expected object")
+    return payload
+
+
+def validate_executor_payload(data: Any) -> dict[str, Any]:
+    payload = _require_mapping(data, "executor payload")
+    _require_fields(
+        payload,
+        ("summary", "implementation", "metrics", "validation", "diagnostics", "artifact_paths", "errors"),
+        "executor",
+    )
+    if not isinstance(payload["metrics"], dict):
+        raise AgentProtocolError("metrics: expected object")
+    if not isinstance(payload["validation"], dict):
+        raise AgentProtocolError("validation: expected object")
+    _require_list(payload["diagnostics"], "diagnostics")
+    _require_list(payload["artifact_paths"], "artifact_paths")
+    _require_list(payload["errors"], "errors")
+    return payload
+
+
+def validate_judgment_payload(data: Any) -> dict[str, Any]:
+    payload = _require_mapping(data, "judger payload")
+    _require_fields(
+        payload,
+        ("score", "passed", "per_sample_scores", "failure_categories", "actionable_feedback", "confidence"),
+        "judger",
+    )
+    try:
+        score = float(payload["score"])
+    except (TypeError, ValueError) as exc:
+        raise AgentProtocolError("score: expected number") from exc
+    if not 0.0 <= score <= 1.0:
+        raise AgentProtocolError("score: expected value between 0.0 and 1.0")
+    if not isinstance(payload["passed"], bool):
+        raise AgentProtocolError("passed: expected boolean")
+    for field in ("per_sample_scores", "failure_categories", "actionable_feedback"):
+        _require_list(payload[field], field)
+    if str(payload["confidence"]) not in {"low", "medium", "high"}:
+        raise AgentProtocolError("confidence: expected low, medium, or high")
+    return payload
+
+
 # Shared by the executor's normal and repair prompts so the two cannot drift.
 _EXECUTOR_RESULT_SCHEMA = """{
   "summary": "what you executed",
@@ -300,7 +376,7 @@ Required JSON schema:
                 candidate_ids=[f"cand_{state.round_id:03d}"],
             ),
         )
-        data = result.data
+        data = validate_proposal_payload(result.data)
         candidate_id = f"cand_{state.round_id:03d}"
         prompt_text = _candidate_prompt_text(data)
         return Candidate(
@@ -374,10 +450,12 @@ Required JSON schema:
                 candidate_ids=planned_ids,
             ),
         )
-        items = list(result.data.get("candidates", []))[:batch_size]
+        batch_payload = _require_mapping(result.data, "proposer batch payload")
+        items = _require_list(batch_payload.get("candidates"), "candidates")[:batch_size]
         parent_ids = list((config.get("_gepa_context") or {}).get("pareto_frontier", {}).get("parent_ids", []))
         candidates = []
         for index, data in enumerate(items):
+            data = validate_proposal_payload(data)
             candidate_id = f"cand_{state.round_id:03d}_{index:03d}"
             prompt_text = _candidate_prompt_text(data)
             candidates.append(
@@ -535,7 +613,7 @@ Required JSON schema:
                 resolve_command_on_host=bool(config.get("_executor_resolve_command_on_host", True)),
             )
             repair_meta = {"repair_applied": True, "original_raw_output": raw_output}
-        data = result.data
+        data = validate_executor_payload(result.data)
         trace = SampleTrace(
             sample_id=str((config.get("_selected_sample_ids") or ["task_execution"])[0]),
             input=str(config.get("task", {})),
@@ -710,8 +788,9 @@ Required JSON schema:
                     "judger",
                     call_context,
                 )
+                validate_judgment_payload(result.data)
                 repair_meta = {"repair_applied": True, "original_raw_output": raw_output}
-            except AgentError as repair_exc:
+            except (AgentError, AgentProtocolError) as repair_exc:
                 repair_raw = str(getattr(repair_exc, "raw_output", None) or repair_exc)[:4000]
                 return self._fallback_judgment(
                     candidate,
@@ -720,7 +799,16 @@ Required JSON schema:
                     "judger returned non-JSON output and repair failed",
                     repair_raw_output=repair_raw,
                 )
-        return self._judgment_from_data(candidate, config, result.data, result.text, result, repair_meta)
+        try:
+            return self._judgment_from_data(candidate, config, result.data, result.text, result, repair_meta)
+        except AgentProtocolError as exc:
+            return self._fallback_judgment(
+                candidate,
+                config,
+                str(getattr(result, "text", "") or result.data)[:4000],
+                f"judger protocol invalid: {exc}",
+                failure_category="judger_protocol_invalid",
+            )
 
     def _repair_client_for_config(self, config: dict[str, Any]) -> ClaudeCodeClient:
         if not isinstance(self.client, ClaudeCodeClient):
@@ -775,6 +863,7 @@ JSON object.
         result: Any,
         extra_artifacts: dict[str, Any] | None = None,
     ) -> Judgment:
+        data = validate_judgment_payload(data)
         try:
             score = float(data.get("score", 0.0))
         except (TypeError, ValueError):
@@ -806,6 +895,7 @@ JSON object.
         reason: str,
         *,
         repair_raw_output: str | None = None,
+        failure_category: str = "judger_invalid_json",
     ) -> Judgment:
         artifacts = {
             "deterministic": True,
@@ -822,12 +912,11 @@ JSON object.
             score=0.0,
             passed=False,
             per_sample_scores=[],
-            failure_categories=["judger_invalid_json"],
+            failure_categories=[failure_category],
             actionable_feedback=[
                 "Judger returned non-JSON output; retry judging with the stricter JSON-only contract."
             ],
             confidence="low",
             artifacts=artifacts,
         )
-
 

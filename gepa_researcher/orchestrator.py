@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -41,6 +42,7 @@ from .services.candidate_scheduler import CandidateScheduler
 from .services.execution_service import ExecutionService
 from .storage.candidate_store import CandidateStore
 from .storage.execution_store import ExecutionStore
+from .storage.event_store import EventStore
 from .storage.store import RunStore
 from .storage.usage import UsageTracker, format_round_usage, format_run_usage
 from .execution.workspace import WorkspaceManager
@@ -58,8 +60,9 @@ class ResearchOrchestrator:
             workspace.setdefault("branch_prefix", "gepa/<run-id>")
         self.usage_tracker = UsageTracker(self.run_dir, self.config.get("usage_tracking", {}))
         self.store = RunStore(self.run_dir)
+        self.event_store = EventStore(self.run_dir)
         self.candidate_store = CandidateStore(self.run_dir)
-        self.execution_store = ExecutionStore(self.run_dir)
+        self.execution_store = ExecutionStore(self.run_dir, event_store=self.event_store)
         self.workspace_manager = WorkspaceManager(self.run_dir, self.config)
         self.admission = CandidateAdmissionGate()
         self.dataset_split = resolve_dataset_split(self.config)
@@ -103,6 +106,7 @@ class ResearchOrchestrator:
         state = self.store.load_or_create_state(self.config["task"]["name"], self.config.get("resume", False))
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.store.save_config(self.config)
+        self._recover_interrupted_executions()
         self.store.save_dataset_split(self.dataset_split.to_dict())
         self.store.save_prior_context(self.prior_context)
         max_rounds = int(self.config["budget"]["max_rounds"])
@@ -158,6 +162,14 @@ class ResearchOrchestrator:
 
     def _log_block(self, text: str) -> None:
         [self._log(line) for line in text.splitlines()]
+
+    def _recover_interrupted_executions(self) -> None:
+        interrupted = self.execution_store.mark_active_interrupted("run startup found active execution from a previous process")
+        for record in interrupted:
+            self._log(
+                "recovered interrupted execution: "
+                f"execution_id={record.execution_id} previous_status={record.failure.details.get('previous_status') if record.failure else 'unknown'}"
+            )
 
     def _write_live_artifact(self, round_id: int, name: str, data: dict[str, Any]) -> None:
         write_json(self.run_dir / "live" / f"round_{round_id:03d}_{name}.json", data)
@@ -228,12 +240,36 @@ class ResearchOrchestrator:
         card = self.candidate_store.get(candidate_id)
         if card is None:
             return
-        card.status = status
-        if final_decision is not None:
+        terminal_statuses = {
+            CandidateStatus.ACCEPTED,
+            CandidateStatus.REJECTED,
+            CandidateStatus.IMPLEMENTATION_FAILED,
+            CandidateStatus.EVALUATION_FAILED,
+            CandidateStatus.CANCELLED,
+        }
+        if card.status in terminal_statuses and card.status != status:
+            if final_decision is not None:
+                card.final_decision = final_decision
+            if score_summary is not None:
+                card.score_summary.update(score_summary)
+            card.touch()
+            self.candidate_store.save(card)
+            return
+        if status == CandidateStatus.ACCEPTED and card.status != CandidateStatus.ACCEPTED:
+            card.transition("gate_accepted", final_decision=final_decision or "accepted")
+        elif status == CandidateStatus.REJECTED and card.status != CandidateStatus.REJECTED:
+            card.transition("gate_rejected", final_decision=final_decision or "rejected")
+        elif card.status != status:
+            card.status = status
+            if final_decision is not None:
+                card.final_decision = final_decision
+            card.touch()
+        elif final_decision is not None:
             card.final_decision = final_decision
+            card.touch()
         if score_summary is not None:
             card.score_summary.update(score_summary)
-        card.touch()
+            card.touch()
         self.candidate_store.save(card)
 
     def _build_components(self):
@@ -474,7 +510,16 @@ class ResearchOrchestrator:
                 reasons[candidate.candidate_id] = "discarded: did not improve over parent on D_feedback minibatch"
             elif candidate.candidate_id in final_discarded and candidate.candidate_id not in reasons:
                 reasons[candidate.candidate_id] = "discarded: failed D_pareto add criteria"
-        gate_decision = GateDecision(round_id=round_id, accepted=list(gate_decision.accepted), discarded=final_discarded, reason_by_candidate=reasons)
+        reason_codes = dict(gate_decision.reason_code_by_candidate)
+        for candidate_id in final_discarded:
+            reason_codes.setdefault(candidate_id, "NOT_ACCEPTED_BY_GATE")
+        gate_decision = GateDecision(
+            round_id=round_id,
+            accepted=list(gate_decision.accepted),
+            discarded=final_discarded,
+            reason_by_candidate=reasons,
+            reason_code_by_candidate=reason_codes,
+        )
         self._apply_gate_decision(pool, candidate_batch.candidates, gate_decision)
         accepted_update = ScoreMatrixBuilder.from_batch(pareto_judgment_batch, set(gate_decision.accepted))
         next_matrix = ScoreMatrixBuilder.merge(active_matrix, accepted_update)
@@ -527,14 +572,13 @@ class ResearchOrchestrator:
             ))
         eval_config = config_for_eval(self.config, sample_ids, phase, self.prior_context)
         eval_config["_run_dir"] = str(self.run_dir)
-        traces: list[Trace] = []
-        failed_ids: list[str] = []
-        for candidate in candidates:
-            card = self._ensure_candidate_card(candidate)
-            trace = self._execute_candidate_for_eval(card, phase, sample_ids, eval_config)
-            traces.append(trace)
-            if any(sample.error for sample in trace.samples):
-                failed_ids.append(candidate.candidate_id)
+        traces = self._execute_candidate_batch(candidates, phase, sample_ids, eval_config)
+        failed_ids = [
+            trace.candidate_id
+            for trace in traces
+            if any(sample.error for sample in trace.samples)
+        ]
+        for trace in traces:
             self._persist_trace(trace)
         trace_batch = TraceBatch(round_id=round_id, traces=traces, failed_candidate_ids=failed_ids)
         for trace in trace_batch.traces:
@@ -544,6 +588,41 @@ class ResearchOrchestrator:
         for judgment in judgment_batch.judgments:
             self._log_block(format_judgment_summary(judgment, phase))
         return trace_batch, judgment_batch
+
+    def _execute_candidate_batch(
+        self,
+        candidates: list[Candidate],
+        phase: str,
+        sample_ids: list[str],
+        eval_config: dict[str, Any],
+    ) -> list[Trace]:
+        max_workers = min(
+            len(candidates),
+            max(1, int(self.config.get("executor", {}).get("max_workers", 1))),
+        )
+        if max_workers <= 1:
+            return [
+                self._execute_candidate_for_eval(
+                    self._ensure_candidate_card(candidate),
+                    phase,
+                    sample_ids,
+                    eval_config,
+                )
+                for candidate in candidates
+            ]
+
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="gepa-candidate") as pool:
+            futures = [
+                pool.submit(
+                    self._execute_candidate_for_eval,
+                    self._ensure_candidate_card(candidate),
+                    phase,
+                    sample_ids,
+                    eval_config,
+                )
+                for candidate in candidates
+            ]
+            return [future.result() for future in futures]
 
     def _ensure_candidate_card(self, candidate: Candidate) -> CandidateCard:
         card = self.candidate_store.get(candidate.candidate_id)
@@ -562,16 +641,15 @@ class ResearchOrchestrator:
     ) -> Trace:
         if card.result_revision is None:
             impl_spec = self.scheduler.make_implementation(card)
+            card.transition("implementation_started")
+            self.candidate_store.save(card)
             impl_record, impl_trace = self.execution_service.execute(impl_spec, card)
             self._record_card_execution(card, impl_record.execution_id)
             if impl_record.status == ExecutionStatus.SUCCEEDED and impl_record.result_revision:
-                card.result_revision = impl_record.result_revision
-                card.status = CandidateStatus.MATERIALIZED
-                card.touch()
+                card.transition("implementation_succeeded", result_revision=impl_record.result_revision)
                 self.candidate_store.save(card)
             else:
-                card.status = CandidateStatus.IMPLEMENTATION_FAILED
-                card.touch()
+                card.transition("implementation_failed")
                 self.candidate_store.save(card)
                 return impl_trace
 
@@ -580,14 +658,16 @@ class ResearchOrchestrator:
             eval_spec = self.scheduler.make_feedback_eval(card, dataset_ref=dataset_ref)
         else:
             eval_spec = self.scheduler.make_pareto_eval(card, dataset_ref=dataset_ref)
+        if card.status not in {CandidateStatus.ACCEPTED, CandidateStatus.REJECTED}:
+            card.transition("evaluation_started")
+            self.candidate_store.save(card)
         eval_record, eval_trace = self.execution_service.execute(eval_spec, card)
         self._record_card_execution(card, eval_record.execution_id)
         if eval_record.status == ExecutionStatus.SUCCEEDED:
             if card.status not in {CandidateStatus.ACCEPTED, CandidateStatus.REJECTED}:
-                card.status = CandidateStatus.EVALUATED
+                card.transition("evaluation_succeeded")
         else:
-            card.status = CandidateStatus.EVALUATION_FAILED
-        card.touch()
+            card.transition("evaluation_failed")
         self.candidate_store.save(card)
         return eval_trace
 

@@ -45,6 +45,7 @@ class RunnerAdapter:
         candidate_config["_executor_resolve_command_on_host"] = runtime_lease.backend != "apptainer"
         candidate_config["_runtime_lease"] = runtime_lease.to_dict()
         candidate_config["_execution_id"] = spec.execution_id
+        candidate_config["_input_revision"] = spec.input_revision
         candidate_config["_execution_mode"] = _execution_mode_for_phase(spec.phase)
         candidate_config["_candidate_env"] = dict(runtime_lease.env)
         candidate_config["_eval_phase"] = spec.phase.value

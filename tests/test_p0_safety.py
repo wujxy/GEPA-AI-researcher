@@ -277,7 +277,13 @@ class WorkspaceAndProvenanceTest(unittest.TestCase):
 
             with manager.protect_controller():
                 self.assertTrue(lock.exists())
-                self.assertIn(f"pid={os.getpid()}", lock.read_text(encoding="utf-8"))
+                lock_text = lock.read_text(encoding="utf-8")
+                self.assertIn(f"pid={os.getpid()}", lock_text)
+                self.assertIn(f"run_dir={run_dir}", lock_text)
+                self.assertIn(f"repo_path={repo}", lock_text)
+                self.assertIn("hostname=", lock_text)
+                self.assertIn("started_at=", lock_text)
+                self.assertIn("updated_at=", lock_text)
                 self.assertEqual(repo.stat().st_mode & 0o222, 0)
 
             self.assertFalse(lock.exists())

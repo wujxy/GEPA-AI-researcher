@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import socket
 import subprocess
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Iterator
@@ -120,6 +122,10 @@ class WorkspaceManager:
                     "GEPA controller checkout is in use.",
                     f"pid={os.getpid()}",
                     f"run_dir={self.run_dir}",
+                    f"repo_path={lock_path.parent}",
+                    f"hostname={socket.gethostname()}",
+                    f"started_at={datetime.now(timezone.utc).isoformat()}",
+                    f"updated_at={datetime.now(timezone.utc).isoformat()}",
                     "Do not edit this checkout while the run is active.",
                     "",
                 ]

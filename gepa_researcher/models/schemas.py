@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from typing import Any
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 @dataclass
@@ -79,6 +84,22 @@ class AgentCallContext:
     execution_id: str | None = None
     parent_candidate_id: str | None = None
     candidate_ids: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class ContextEnvelope:
+    role: str
+    round_id: int
+    phase: str
+    run_id: str | None = None
+    candidate_id: str | None = None
+    execution_id: str | None = None
+    input_revision: str | None = None
+    selected_sample_ids: list[str] = field(default_factory=list)
+    created_at: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -266,6 +287,7 @@ class GateDecision:
     accepted: list[str]
     discarded: list[str]
     reason_by_candidate: dict[str, str]
+    reason_code_by_candidate: dict[str, str] = field(default_factory=dict)
     stop: bool = False
     artifacts: dict[str, Any] = field(default_factory=dict)
 

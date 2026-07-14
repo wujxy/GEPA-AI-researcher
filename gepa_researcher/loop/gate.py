@@ -63,6 +63,7 @@ class GEPAGate:
         accepted: list[str] = []
         discarded: list[str] = []
         reasons: dict[str, str] = {}
+        reason_codes: dict[str, str] = {}
         task_best = self._task_best_ids(trial_matrix)
 
         for candidate in candidates:
@@ -70,32 +71,39 @@ class GEPAGate:
             if judgment is None:
                 discarded.append(candidate.candidate_id)
                 reasons[candidate.candidate_id] = "discarded: missing judgment"
+                reason_codes[candidate.candidate_id] = "MISSING_JUDGMENT"
                 continue
             eligible, eligibility_reason = self._candidate_eligible(judgment, {})
             if not eligible:
                 discarded.append(candidate.candidate_id)
                 reasons[candidate.candidate_id] = eligibility_reason
+                reason_codes[candidate.candidate_id] = _reason_code_for_ineligible(judgment)
                 continue
             if not had_active_pool:
                 accepted.append(candidate.candidate_id)
                 reasons[candidate.candidate_id] = "accepted: initial pool seed"
+                reason_codes[candidate.candidate_id] = "INITIAL_POOL_SEED"
                 continue
             if candidate.candidate_id in task_best:
                 accepted.append(candidate.candidate_id)
                 reasons[candidate.candidate_id] = "accepted: candidate is best on at least one D_pareto task"
+                reason_codes[candidate.candidate_id] = "TASK_BEST"
                 continue
             if self._improves_parent(candidate, judgment, previous_matrix):
                 accepted.append(candidate.candidate_id)
                 reasons[candidate.candidate_id] = "accepted: D_pareto aggregate score improves over parent"
+                reason_codes[candidate.candidate_id] = "PARENT_IMPROVER"
                 continue
             discarded.append(candidate.candidate_id)
             reasons[candidate.candidate_id] = "discarded: no D_pareto parent or task-best improvement"
+            reason_codes[candidate.candidate_id] = "NOT_PARENT_OR_TASK_BEST_IMPROVER"
 
         return GateDecision(
             round_id=round_id,
             accepted=accepted,
             discarded=discarded,
             reason_by_candidate=reasons,
+            reason_code_by_candidate=reason_codes,
         )
 
 
@@ -130,3 +138,12 @@ class GEPAGate:
         if not parent_scores:
             return False
         return float(judgment.score) > max(parent_scores)
+
+
+def _reason_code_for_ineligible(judgment: Judgment) -> str:
+    if not judgment.passed:
+        return "JUDGMENT_FAILED"
+    matched = sorted(category for category in judgment.failure_categories if category in DEFAULT_HARD_FAILURE_CATEGORIES)
+    if matched:
+        return "HARD_FAILURE_CATEGORY"
+    return "JUDGMENT_INELIGIBLE"

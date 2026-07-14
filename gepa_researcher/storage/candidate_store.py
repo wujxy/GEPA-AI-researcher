@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 from .io_utils import append_jsonl, read_json, write_json
@@ -11,17 +12,21 @@ class CandidateStore:
         self.run_dir = Path(run_dir)
         self.root = self.run_dir / "candidates"
         self.index_path = self.run_dir / "candidates.jsonl"
+        self._lock = threading.RLock()
 
     def save(self, card: CandidateCard) -> None:
+        card.validate_invariants()
         payload = card.to_dict()
-        write_json(self.root / f"{card.candidate_id}.json", payload)
-        append_jsonl(self.index_path, payload)
+        with self._lock:
+            write_json(self.root / f"{card.candidate_id}.json", payload)
+            append_jsonl(self.index_path, payload)
 
     def get(self, candidate_id: str) -> CandidateCard | None:
-        path = self.root / f"{candidate_id}.json"
-        if not path.exists():
-            return None
-        return CandidateCard.from_dict(read_json(path))
+        with self._lock:
+            path = self.root / f"{candidate_id}.json"
+            if not path.exists():
+                return None
+            return CandidateCard.from_dict(read_json(path))
 
     def list_by_round(self, round_id: int) -> list[CandidateCard]:
         return [card for card in self._all_cards() if card.round_id == round_id]
@@ -37,10 +42,11 @@ class CandidateStore:
         return self._all_cards()
 
     def _all_cards(self) -> list[CandidateCard]:
-        if not self.root.exists():
-            return []
-        cards = [
-            CandidateCard.from_dict(read_json(path))
-            for path in sorted(self.root.glob("*.json"))
-        ]
-        return sorted(cards, key=lambda card: (card.round_id, card.candidate_id))
+        with self._lock:
+            if not self.root.exists():
+                return []
+            cards = [
+                CandidateCard.from_dict(read_json(path))
+                for path in sorted(self.root.glob("*.json"))
+            ]
+            return sorted(cards, key=lambda card: (card.round_id, card.candidate_id))

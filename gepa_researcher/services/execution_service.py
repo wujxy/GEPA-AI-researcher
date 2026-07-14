@@ -6,11 +6,17 @@ from typing import Any, Protocol
 
 from ..domain.candidate import CandidateCard
 from ..domain.execution import ExecutionFailure, ExecutionPhase, ExecutionRecord, ExecutionSpec
+from ..agents.agent_client import AgentError
+from ..agents.agent_components import AgentProtocolError
 from ..execution.git_result import GitResultService
-from ..execution.materializer import RepositoryMaterializer
+from ..execution.git_result import GitResultError
+from ..execution.materializer import MaterializerError, RepositoryMaterializer
+from ..execution.runtime_backend import RuntimeBackendError
 from ..execution.runtime_backend import runtime_backend_for
 from ..execution.sandbox import SandboxSession
 from ..models.schemas import SampleTrace, Trace
+from ..domain.artifact import ArtifactKind
+from ..storage.artifact_store import ArtifactStore
 from ..storage.execution_store import ExecutionStore
 
 
@@ -36,6 +42,7 @@ class ExecutionService:
         execution_store: ExecutionStore,
         git_result_service: GitResultService,
         runner: Runner,
+        artifact_store: ArtifactStore | None = None,
     ):
         self.run_dir = Path(run_dir)
         self.config = config
@@ -43,6 +50,7 @@ class ExecutionService:
         self.execution_store = execution_store
         self.git_result_service = git_result_service
         self.runner = runner
+        self.artifact_store = artifact_store or ArtifactStore(self.run_dir)
 
     def execute(self, spec: ExecutionSpec, card: CandidateCard) -> tuple[ExecutionRecord, Trace]:
         record = self.execution_store.create_pending(spec)
@@ -67,7 +75,7 @@ class ExecutionService:
                 if session.mode == "git_worktree":
                     result_revision, audit = self.git_result_service.finalize_implementation(spec, session)
                     if audit.commit_count <= 0:
-                        raise RuntimeError(f"no candidate commit produced: execution_id={spec.execution_id}")
+                        raise NoCandidateCommitError(f"no candidate commit produced: execution_id={spec.execution_id}")
                 else:
                     result_revision = spec.input_revision
             else:
@@ -80,19 +88,27 @@ class ExecutionService:
                 metrics=_metrics_from_trace(trace),
             )
             self._attach_execution_artifacts(trace, record, runtime_lease, wall_seconds, audit)
+            record = self._index_trace_artifact(record, trace, spec.phase.value)
             return record, trace
         except Exception as exc:
-            failure = ExecutionFailure(
-                code=type(exc).__name__,
-                message=str(exc),
-                retryable=False,
-            )
+            failure = _failure_from_exception(exc)
             record = self.execution_store.mark_failed(spec.execution_id, failure)
             trace = self._failure_trace(card, spec, record, exc)
+            record = self._index_trace_artifact(record, trace, spec.phase.value)
             return record, trace
         finally:
             if session is not None:
-                self.materializer.cleanup(session)
+                try:
+                    self.materializer.cleanup(session)
+                except Exception as cleanup_exc:
+                    if "record" in locals():
+                        record.failure = record.failure or ExecutionFailure(
+                            code="SANDBOX_CLEANUP_FAILED",
+                            message=str(cleanup_exc),
+                            retryable=True,
+                        )
+                        record.failure.details.setdefault("cleanup_failure", str(cleanup_exc))
+                        self.execution_store.save(record)
 
     def _attach_execution_artifacts(
         self,
@@ -142,6 +158,18 @@ class ExecutionService:
             ],
         )
 
+    def _index_trace_artifact(self, record: ExecutionRecord, trace: Trace, phase: str) -> ExecutionRecord:
+        ref = self.artifact_store.put_json(
+            record.execution_id,
+            ArtifactKind.EXECUTION_TRACE,
+            "execution_trace.json",
+            trace.to_dict(),
+            metadata={"phase": phase, "candidate_id": record.candidate_id},
+        )
+        record.artifact_refs = [*record.artifact_refs, ref]
+        self.execution_store.save(record)
+        return record
+
 
 def _metrics_from_trace(trace: Trace) -> dict[str, float]:
     metrics: dict[str, float] = {}
@@ -153,3 +181,35 @@ def _metrics_from_trace(trace: Trace) -> dict[str, float]:
             if isinstance(value, (int, float)):
                 metrics[str(key)] = float(value)
     return metrics
+
+
+class NoCandidateCommitError(RuntimeError):
+    pass
+
+
+def _failure_from_exception(exc: Exception) -> ExecutionFailure:
+    if isinstance(exc, MaterializerError):
+        code = "SANDBOX_PREPARE_FAILED"
+        retryable = True
+    elif isinstance(exc, RuntimeBackendError):
+        code = "RUNTIME_PREPARE_FAILED"
+        retryable = True
+    elif isinstance(exc, AgentProtocolError):
+        code = "AGENT_PROTOCOL_INVALID"
+        retryable = True
+    elif isinstance(exc, AgentError):
+        code = "AGENT_PROCESS_FAILED"
+        retryable = True
+    elif isinstance(exc, NoCandidateCommitError):
+        code = "NO_CANDIDATE_COMMIT"
+        retryable = False
+    elif isinstance(exc, GitResultError) and "read-only execution changed sandbox" in str(exc):
+        code = "READONLY_EXECUTION_MUTATED_REPO"
+        retryable = False
+    elif isinstance(exc, GitResultError):
+        code = "COMMIT_FAILED"
+        retryable = False
+    else:
+        code = "AGENT_PROCESS_FAILED"
+        retryable = False
+    return ExecutionFailure(code=code, message=str(exc), retryable=retryable)
