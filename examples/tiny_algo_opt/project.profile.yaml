@@ -28,13 +28,13 @@ isolation:
 agent:
   command: claude
   timeout_seconds: 900
-  model: glm-4.7
+  model: deepseek-v4-pro
   env:
     ANTHROPIC_AUTH_TOKEN: sk-UXrlRbWtCmkgqOgzVcficPKFLqczspUfcQXXRvNynxmBlzm
     ANTHROPIC_BASE_URL: https://aiapi.ihep.ac.cn/apiv2/anthropic
-    ANTHROPIC_DEFAULT_HAIKU_MODEL: glm-4.7
-    ANTHROPIC_DEFAULT_OPUS_MODEL: glm-4.7
-    ANTHROPIC_DEFAULT_SONNET_MODEL: glm-4.7
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: deepseek-v4-flash
+    ANTHROPIC_DEFAULT_OPUS_MODEL: deepseek-v4-pro
+    ANTHROPIC_DEFAULT_SONNET_MODEL: deepseek-v4-pro
   extra_args:
     - --permission-mode
     - acceptEdits

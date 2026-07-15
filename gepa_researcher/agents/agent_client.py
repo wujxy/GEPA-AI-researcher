@@ -92,7 +92,10 @@ class ClaudeCodeClient:
         command = self.ensure_available() if resolve_command_on_host else CommandResolution([self.command])
         args = _without_output_format([*self.extra_args, *(extra_args or [])])
         model_flag = ["--model", self.model] if self.model else []
-        cmd = [*(command_prefix or []), *command.argv, "-p", prompt, *model_flag, *args, "--output-format", "json"]
+        settings_flag: list[str] = []
+        if self.env:
+            settings_flag = ["--settings", json.dumps({"env": self.env})]
+        cmd = [*(command_prefix or []), *command.argv, *settings_flag, "-p", prompt, *model_flag, *args, "--output-format", "json"]
         started_at = datetime.now(timezone.utc)
         call_id = str(uuid.uuid4())
         context = call_context or AgentCallContext(role=label, round_id=-1, phase="unspecified")
