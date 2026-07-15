@@ -294,3 +294,74 @@ def test_synthetic_omilrec_loop_harness_commit_excludes_dirty_benchmark(tmp_path
     changed = _git(repo, "diff", "--name-only", baseline, best_card.result_revision).splitlines()
     assert "OMILRECV2/src/hot.cc" in changed
     assert "benchmarks/speed.csv" not in changed
+
+
+class SyntheticOmilrecNoOpExecutor(SyntheticOmilrecExecutor):
+    """Returns a verification-no-change trace: validation.passed=true,
+    changed_files=[], errors=[]. Under Part G this is a legitimate delivery,
+    not an implementation failure."""
+
+    def execute(self, candidate, config):
+        mode = str(config["_execution_mode"])
+        repo = Path(config["_candidate_repo"])
+        if mode == "implement_and_validate":
+            # No source edit — agent correctly concluded no change needed.
+            return Trace(
+                candidate_id=candidate.candidate_id,
+                round_id=candidate.round_id,
+                samples=[
+                    SampleTrace(
+                        sample_id="verification_task",
+                        input="verify if already precomputed",
+                        output="no change needed",
+                        expected="verification complete",
+                        logs="analyzed code, found already optimal",
+                        error=None,
+                        artifacts={
+                            "validation": {"passed": True, "checks": [], "regressions": []},
+                            "implementation": {
+                                "changed_files": [],
+                                "commands_run": ["read source files"],
+                                "commit_sha": None,
+                                "committed_files": [],
+                                "git_status_after_commit": "",
+                                "notes": "Pattern already applied — no change needed.",
+                            },
+                            "errors": [],
+                            "diagnostics": ["No optimization applicable."],
+                            "metrics": {"primary": None, "baseline": None, "delta": None},
+                        },
+                    )
+                ],
+            )
+        return super().execute(candidate, config)
+
+
+def test_synthetic_omilrec_loop_verification_no_change_accepted(tmp_path: Path):
+    """Part G acceptance at loop scale: when the agent correctly determines
+    no code change is needed (verification-no-change), the candidate should
+    complete implementation successfully, not be marked implementation_failed."""
+    repo, baseline = _make_synthetic_omilrec_repo(tmp_path)
+    run_dir = tmp_path / "run"
+    executor = SyntheticOmilrecNoOpExecutor()
+
+    config = _config(run_dir, repo, baseline)
+    # Use only 1 seed — it's a no-op candidate, one is enough to test.
+    config["generation"]["batch_size"] = 1
+    config["initialization"]["seed_count"] = 1
+
+    state = ResearchOrchestrator(
+        config,
+        tmp_path / "synthetic.task.yaml",
+        components=(SyntheticOmilrecProposer(), executor, SyntheticOmilrecJudger()),
+    ).run()
+
+    assert state.best_candidate_id is not None
+    pool = CandidatePool.load(run_dir)
+    # The no-op candidate should be in the active (succeeded) pool, not
+    # filtered out as implementation_failed.
+    assert pool.active_ids()
+    execution_rows = (run_dir / "executions.jsonl").read_text(encoding="utf-8")
+    # Implementation phase should have succeeded, not failed.
+    assert "NO_CANDIDATE_COMMIT" not in execution_rows
+    assert '"status": "succeeded"' in execution_rows

@@ -82,6 +82,10 @@ class CommitAudit:
     # ignored), "none_allowed" (dirty paths exist but none match allowed
     # targets/globs). None when a commit WAS created.
     commit_failure_reason: str | None = None
+    # Part G: when True, the execution was a legitimate verification that
+    # found no code change was needed (validation.passed=true, no errors).
+    # The result_revision equals input_revision and no commit was created.
+    verification_no_change: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

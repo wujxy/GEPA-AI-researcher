@@ -372,3 +372,203 @@ def test_runner_adapter_builds_transient_agent_config_without_mutating_card(tmp_
     assert any(block["block_id"] == f"candidate:{card.candidate_id}" for block in executor.config["_context_view"]["blocks"])
     assert card.to_dict()["result_revision"] is None
     assert "repo_path" not in card.to_dict()
+
+
+# ── Part G: verification-no-change unit tests ────────────────────────────
+# Verify that an agent which legitimately determines no code change is needed
+# (validation.passed=true, changed_files=[], no errors) yields a successful
+# execution rather than NoCandidateCommitError.
+
+
+class VerificationNoChangeRunner:
+    """Agent correctly analyzed code, found no change needed, reported
+    validation.passed=true with empty changed_files and no errors."""
+
+    def run(self, card, spec, runtime_lease, session, config):
+        return Trace(
+            candidate_id=card.candidate_id,
+            round_id=card.round_id,
+            samples=[
+                SampleTrace(
+                    sample_id="verification_task",
+                    input="verify if already precomputed",
+                    output="no change needed",
+                    expected="verification complete",
+                    logs="analyzed code, found already optimal",
+                    error=None,
+                    artifacts={
+                        "validation": {"passed": True, "checks": [], "regressions": []},
+                        "implementation": {
+                            "changed_files": [],
+                            "commands_run": ["read OMILRECV2/src/omilrec_likelihood.cc"],
+                            "commit_sha": None,
+                            "committed_files": [],
+                            "git_status_after_commit": "",
+                            "notes": "Rsp_arr already precomputed in geometry phase.",
+                        },
+                        "errors": [],
+                        "diagnostics": ["All loops already cache geometry. No optimization applicable."],
+                        "metrics": {"primary": None, "baseline": None, "delta": None},
+                    },
+                )
+            ],
+        )
+
+
+def test_verification_no_change_agent_succeeds_with_baseline_revision(
+    tmp_path: Path,
+):
+    """Agent correctly determines no code change needed. Execution should
+    succeed with result_revision == input_revision, not raise
+    NoCandidateCommitError, and preserve the original trace."""
+    repo, baseline = _make_repo(tmp_path)
+    card = _card(baseline)
+    spec = _spec(card, ExecutionPhase.IMPLEMENTATION, baseline)
+    service, _ = _service(tmp_path, repo, baseline, VerificationNoChangeRunner())
+
+    record, trace = service.execute(spec, card)
+
+    assert record.status == ExecutionStatus.SUCCEEDED
+    assert record.result_revision == baseline  # baseline because no change
+    assert trace.samples[0].error is None  # original trace preserved, NOT replaced
+    assert trace.samples[0].sample_id == "verification_task"  # not "execution_failure"
+    audit = trace.samples[0].artifacts["commit_audit"]
+    assert audit["verification_no_change"] is True
+    # commit_failure_reason retains its original audit value (e.g. "empty")
+    # because the harness correctly diagnosed that no source changed.
+    # verification_no_change=True is the signal that this was accepted.
+
+
+class ValidationFailedNoChangeRunner:
+    """Agent changed nothing AND validation reported FAILED. Should still
+    raise NoCandidateCommitError — not a legitimate verification."""
+
+    def run(self, card, spec, runtime_lease, session, config):
+        return Trace(
+            candidate_id=card.candidate_id,
+            round_id=card.round_id,
+            samples=[
+                SampleTrace(
+                    sample_id="task",
+                    input="in",
+                    output="out",
+                    expected="exp",
+                    logs="",
+                    error=None,
+                    artifacts={
+                        "validation": {"passed": False, "checks": [], "regressions": []},
+                        "implementation": {"changed_files": [], "commit_sha": None, "committed_files": []},
+                        "errors": [],
+                        "metrics": {},
+                    },
+                )
+            ],
+        )
+
+
+def test_validation_failed_no_change_raises_no_candidate_commit(tmp_path: Path):
+    """Agent changed nothing AND validation failed. Should still raise
+    NoCandidateCommitError — not a legitimate verification-no-change."""
+    repo, baseline = _make_repo(tmp_path)
+    card = _card(baseline)
+    spec = _spec(card, ExecutionPhase.IMPLEMENTATION, baseline)
+    service, _ = _service(tmp_path, repo, baseline, ValidationFailedNoChangeRunner())
+
+    record, _ = service.execute(spec, card)
+
+    assert record.status == ExecutionStatus.FAILED
+    assert record.failure.code == "NO_CANDIDATE_COMMIT_EMPTY"
+
+
+class VerificationWithErrorsRunner:
+    """Agent changed nothing, validation passed, but reported errors.
+    Should still fail — infra issues are not a clean verification."""
+
+    def run(self, card, spec, runtime_lease, session, config):
+        return Trace(
+            candidate_id=card.candidate_id,
+            round_id=card.round_id,
+            samples=[
+                SampleTrace(
+                    sample_id="task",
+                    input="in",
+                    output="out",
+                    expected="exp",
+                    logs="",
+                    error=None,
+                    artifacts={
+                        "validation": {"passed": True, "checks": [], "regressions": []},
+                        "implementation": {"changed_files": [], "commit_sha": None, "committed_files": []},
+                        "errors": ["benchmark environment unavailable"],
+                        "metrics": {},
+                    },
+                )
+            ],
+        )
+
+
+def test_verification_with_agent_errors_raises_no_candidate_commit(tmp_path: Path):
+    """Agent validation passed, no changes, but agent reported errors.
+    Should raise NoCandidateCommitError — infra errors taint the verification."""
+    repo, baseline = _make_repo(tmp_path)
+    card = _card(baseline)
+    spec = _spec(card, ExecutionPhase.IMPLEMENTATION, baseline)
+    service, _ = _service(tmp_path, repo, baseline, VerificationWithErrorsRunner())
+
+    record, _ = service.execute(spec, card)
+
+    assert record.status == ExecutionStatus.FAILED
+    assert record.failure.code == "NO_CANDIDATE_COMMIT_EMPTY"
+
+
+class VerificationWithChangedFilesRunner:
+    """Agent returned validation.passed=true AND has changed_files. This is
+    NOT verification-no-change — agent actually made a change, and the normal
+    harness commit should run. The test verifies the guard doesn't intercept."""
+
+    def run(self, card, spec, runtime_lease, session, config):
+        (session.repo_path / "src" / "hot.cc").write_text("int hot() { return 9; }\n", encoding="utf-8")
+        return Trace(
+            candidate_id=card.candidate_id,
+            round_id=card.round_id,
+            samples=[
+                SampleTrace(
+                    sample_id="task",
+                    input="in",
+                    output="out",
+                    expected="exp",
+                    logs="done",
+                    error=None,
+                    artifacts={
+                        "validation": {"passed": True, "checks": [], "regressions": []},
+                        "implementation": {"changed_files": ["src/hot.cc"], "commit_sha": None, "committed_files": []},
+                        "errors": [],
+                        "metrics": {},
+                    },
+                )
+            ],
+        )
+
+
+def test_verification_with_changed_files_goes_through_harness_commit(tmp_path: Path):
+    """Agent has changed_files — NOT verification-no-change. Harness should
+    commit them normally (not NoCandidateCommitError, not verification flag)."""
+    repo, baseline = _make_repo(tmp_path)
+    card = _card(baseline)
+    spec = _spec(card, ExecutionPhase.IMPLEMENTATION, baseline)
+    service, _ = _service(
+        tmp_path,
+        repo,
+        baseline,
+        VerificationWithChangedFilesRunner(),
+        candidate_policy={"allowed_target_globs": ["src/**"], "frozen_globs": ["tests/**"]},
+    )
+
+    record, trace = service.execute(spec, card)
+
+    assert record.status == ExecutionStatus.SUCCEEDED
+    assert record.result_revision is not None
+    assert record.result_revision != baseline  # committed something
+    audit = trace.samples[0].artifacts["commit_audit"]
+    assert audit["verification_no_change"] is False
+    assert audit["harness_commit_created"] is True

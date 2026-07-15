@@ -181,7 +181,7 @@ def _resolve_task(raw_task: dict[str, Any], task_path: Path) -> dict[str, Any]:
         },
         "_runtime_spec": runtime_spec,
         "components": {"mode": "claude_code_agents"},
-        "agent": {"command": command, "cwd": str(repo_path or task_path.parent), "timeout_seconds": timeout, "extra_args": list(agent_profile.get("extra_args") or [])},
+        "agent": {"command": command, "cwd": str(repo_path or task_path.parent), "timeout_seconds": timeout, "extra_args": list(agent_profile.get("extra_args") or []), "model": agent_profile.get("model"), "env": dict(agent_profile.get("env") or {})},
         "runtime": runtime_contract,
         "task": task_section,
         "context": {"paths": docs, "notes": [reference_note], "skills": list(profile.get("skills") or [])},

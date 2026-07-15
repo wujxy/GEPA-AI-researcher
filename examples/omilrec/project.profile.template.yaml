@@ -60,6 +60,10 @@ isolation:
 agent:
   command: claude
   timeout_seconds: 3600
+  # model: opus         # optional: override the model (e.g. opus, sonnet, haiku, or a full model id)
+  # env:                # optional: extra environment variables for the Claude subprocess
+  #   ANTHROPIC_API_KEY: sk-ant-...
+  #   ANTHROPIC_BASE_URL: https://your-api-proxy.example.com
   extra_args:
     - --permission-mode
     - acceptEdits

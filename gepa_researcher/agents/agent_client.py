@@ -54,6 +54,8 @@ class ClaudeCodeClient:
         extra_args: list[str] | None = None,
         heartbeat_seconds: int = 30,
         usage_tracker: UsageTracker | None = None,
+        model: str | None = None,
+        env: dict[str, str] | None = None,
     ):
         self.command = command
         self.cwd = cwd
@@ -61,6 +63,8 @@ class ClaudeCodeClient:
         self.extra_args = extra_args or []
         self.heartbeat_seconds = heartbeat_seconds
         self.usage_tracker = usage_tracker
+        self.model = model
+        self.env = env or {}
 
     def ensure_available(self) -> CommandResolution:
         resolved = resolve_command(self.command)
@@ -87,7 +91,8 @@ class ClaudeCodeClient:
     ) -> AgentResult:
         command = self.ensure_available() if resolve_command_on_host else CommandResolution([self.command])
         args = _without_output_format([*self.extra_args, *(extra_args or [])])
-        cmd = [*(command_prefix or []), *command.argv, "-p", prompt, *args, "--output-format", "json"]
+        model_flag = ["--model", self.model] if self.model else []
+        cmd = [*(command_prefix or []), *command.argv, "-p", prompt, *model_flag, *args, "--output-format", "json"]
         started_at = datetime.now(timezone.utc)
         call_id = str(uuid.uuid4())
         context = call_context or AgentCallContext(role=label, round_id=-1, phase="unspecified")
@@ -100,7 +105,7 @@ class ClaudeCodeClient:
             print(f"[{started_at.astimezone().strftime('%Y-%m-%d %H:%M:%S')}] resolved Claude command: {command.display}", flush=True)
         if command_prefix:
             print(f"[{started_at.astimezone().strftime('%Y-%m-%d %H:%M:%S')}] command prefix: {' '.join(command_prefix)}", flush=True)
-        process_env = _process_env(env or {}, inherit_host_env=inherit_host_env)
+        process_env = _process_env({**self.env, **(env or {})}, inherit_host_env=inherit_host_env)
         proc = subprocess.Popen(
             cmd,
             cwd=str(cwd or self.cwd) if (cwd or self.cwd) else None,

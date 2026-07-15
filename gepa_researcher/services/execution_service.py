@@ -75,15 +75,22 @@ class ExecutionService:
                 if session.mode == "git_worktree":
                     result_revision, audit = self.git_result_service.finalize_implementation(spec, session)
                     if audit.commit_count <= 0:
-                        sub_code = _NO_CANDIDATE_COMMIT_SUBCODE.get(
-                            audit.commit_failure_reason,
-                            ExecutionFailureCode.NO_CANDIDATE_COMMIT.value,
-                        )
-                        raise NoCandidateCommitError(
-                            f"no candidate commit produced: execution_id={spec.execution_id}",
-                            sub_code=sub_code,
-                            details=self._no_candidate_commit_details(spec, session, audit, trace),
-                        )
+                        # Part G: verification-no-change — if the agent
+                        # legitimately concluded no change was needed (validation
+                        # passed, no changed files, no errors), treat it as a
+                        # successful execution with the baseline as result_revision.
+                        if _is_verification_no_change(trace):
+                            result_revision = spec.input_revision
+                        else:
+                            sub_code = _NO_CANDIDATE_COMMIT_SUBCODE.get(
+                                audit.commit_failure_reason,
+                                ExecutionFailureCode.NO_CANDIDATE_COMMIT.value,
+                            )
+                            raise NoCandidateCommitError(
+                                f"no candidate commit produced: execution_id={spec.execution_id}",
+                                sub_code=sub_code,
+                                details=self._no_candidate_commit_details(spec, session, audit, trace),
+                            )
                 else:
                     result_revision = spec.input_revision
             else:
@@ -95,6 +102,9 @@ class ExecutionService:
                 result_revision=result_revision,
                 metrics=_metrics_from_trace(trace),
             )
+            # Part G: mark verification-no-change on the audit before persisting
+            if audit is not None and _is_verification_no_change(trace):
+                audit.verification_no_change = True
             self._attach_execution_artifacts(trace, record, runtime_lease, wall_seconds, audit)
             record = self._index_trace_artifact(record, trace, spec.phase.value)
             return record, trace
@@ -287,3 +297,42 @@ _NO_CANDIDATE_COMMIT_SUBCODE = {
     "only_forbidden": ExecutionFailureCode.NO_CANDIDATE_COMMIT_ONLY_FORBIDDEN.value,
     "none_allowed": ExecutionFailureCode.NO_CANDIDATE_COMMIT_NONE_ALLOWED.value,
 }
+
+
+# Part G: verification-no-change — when an agent legitimately determines no
+# code change is needed (validation.passed=true, changed_files=[], no errors),
+# this is a successful outcome, not a NoCandidateCommit failure.
+def _is_verification_no_change(trace: Trace) -> bool:
+    """Return True if the agent's trace indicates a legitimate verification
+    that found no code change was needed.
+
+    Requires all three signals:
+      - ``validation.passed`` is ``True`` (agent ran and passed checks)
+      - ``implementation.changed_files`` is ``[]`` or ``None`` (no source edit)
+      - no errors in ``artifacts.errors`` or ``sample.error`` (no infra issues)
+    """
+    if not trace.samples:
+        return False
+    sample = trace.samples[0]
+    artifacts = dict(sample.artifacts or {})
+
+    validation = artifacts.get("validation")
+    if not isinstance(validation, dict):
+        return False
+    if validation.get("passed") is not True:
+        return False
+
+    implementation = artifacts.get("implementation")
+    if not isinstance(implementation, dict):
+        return False
+    if implementation.get("changed_files") not in ([], None):
+        return False
+
+    errors = artifacts.get("errors")
+    if isinstance(errors, list) and len(errors) > 0:
+        return False
+
+    if sample.error is not None and sample.error != "":
+        return False
+
+    return True

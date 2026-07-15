@@ -309,6 +309,8 @@ class ResearchOrchestrator:
                 timeout_seconds=int(agent_config.get("timeout_seconds", 600)),
                 extra_args=list(agent_config.get("extra_args", [])),
                 usage_tracker=self.usage_tracker,
+                model=agent_config.get("model"),
+                env=dict(agent_config.get("env") or {}),
             )
             return (
                 AgentProposer(client),

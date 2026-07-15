@@ -648,6 +648,8 @@ class AgentExecutor:
             extra_args=list(self.client.extra_args),
             heartbeat_seconds=self.client.heartbeat_seconds,
             usage_tracker=self.client.usage_tracker,
+            model=self.client.model,
+            env=dict(self.client.env),
         )
 
     def _repair_client_for_config(self, config: dict[str, Any]) -> ClaudeCodeClient:
@@ -669,6 +671,8 @@ class AgentExecutor:
             extra_args=list(self.client.extra_args),
             heartbeat_seconds=self.client.heartbeat_seconds,
             usage_tracker=self.client.usage_tracker,
+            model=self.client.model,
+            env=dict(self.client.env),
         )
 
     def _repair_prompt(
@@ -836,6 +840,8 @@ Required JSON schema:
             extra_args=list(self.client.extra_args),
             heartbeat_seconds=self.client.heartbeat_seconds,
             usage_tracker=self.client.usage_tracker,
+            model=self.client.model,
+            env=dict(self.client.env),
         )
 
     def _repair_prompt(self, raw_output: str, judger_context: dict[str, Any]) -> str:

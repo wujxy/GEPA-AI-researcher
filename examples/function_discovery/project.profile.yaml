@@ -39,6 +39,10 @@ hash_artifacts: []
 agent:
   command: claude
   timeout_seconds: 900
+  # model: opus         # optional: override the model
+  # env:                # optional: extra environment variables for the Claude subprocess
+  #   ANTHROPIC_API_KEY: sk-ant-...
+  #   ANTHROPIC_BASE_URL: https://your-api-proxy.example.com
   extra_args:
     - --bare
     - --max-turns
